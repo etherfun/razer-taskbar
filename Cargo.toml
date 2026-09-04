@@ -1,0 +1,50 @@
+[package]
+name = "razer-taskbar"
+version = "0.13.0"
+edition = "2021"
+description = "Razer battery widget hooked into the Windows taskbar (no tray, native GDI icons)"
+license = "MIT"
+
+[[bin]]
+name = "razer-taskbar"
+path = "src/main.rs"
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "implement",
+] }
+notify = "6"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Battery history storage: bundled SQLite keeps the single-exe build.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# The #[implement] macro (uia_events.rs) expands to `windows_core::` paths,
+# so the core crate must be a direct dependency.
+windows-core = "0.58"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
