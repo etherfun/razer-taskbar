@@ -568,12 +568,13 @@ pub fn format_estimate_compact(e: Estimate) -> String {
     }
 }
 
-/// Verbal text for the tray tooltip.
+/// Verbal text for the tray tooltip (localized sentence, neutral duration).
 pub fn format_estimate_verbose(e: Estimate) -> String {
+    let d = format_duration(e.secs);
     if e.charging {
-        format!("full in {}", format_duration(e.secs))
+        crate::i18n::tr("full in {}").replace("{}", &d)
     } else {
-        format!("~{} left", format_duration(e.secs))
+        crate::i18n::tr("~{} left").replace("{}", &d)
     }
 }
 

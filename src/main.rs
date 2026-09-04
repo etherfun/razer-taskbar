@@ -18,6 +18,7 @@ mod battery;
 mod config;
 mod history;
 mod hover;
+mod i18n;
 mod icons;
 mod taskbar;
 mod tray;
@@ -48,6 +49,8 @@ fn main() {
     // Battery history DB (recording can be switched off in settings; a
     // failure here just disables the feature, never the widget).
     history::init();
+    // UI language from settings (or the system UI language for "auto").
+    i18n::init();
 
     // Single instance: exit if a previous widget window already exists.
     if window::find_existing_instance() {

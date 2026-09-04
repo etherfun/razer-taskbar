@@ -135,12 +135,17 @@ The overlay itself is click-through, so the tray icon carries the menu:
 * Record battery history + Record interval (1/2/5/10/30s)
 * Show time remaining on widget
 * Battery history… (viewer window)
+* Language (Auto / English / 中文)
 * Widget on left/right
 * Run at startup
 * Show tray icon
 * Avoid overlap (widgets board always avoided)
 * Show devices on hover
 * Exit
+
+The UI ships in English and Chinese; **Auto** (default) follows the Windows
+UI language, switches apply live from the menu (`language` in
+settings.json). Compact durations (`3h25m`) stay locale-neutral.
 
 Config lives in `%APPDATA%\razer-taskbar\settings.json`.
 

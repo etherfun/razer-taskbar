@@ -20,6 +20,7 @@ Razer Synapse 日志驱动的 Windows 任务栏电池挂件（Rust，无托盘�
 | `src/hover.rs` | 悬停设备列表面板（光标轮询，非交互只读） |
 | `src/icons.rs` | GDI 矢量设备类型图标（鼠标/耳机/键盘/其他） |
 | `src/tray.rs` | 托盘兜底图标（菜单入口，explorer 重启后重挂） |
+| `src/i18n.rs` | 极简国际化：英文源串即 key，`tr()` 映射 zh；语言 auto（跟随系统）/en/zh，菜单热切换 |
 | `src/history.rs` | 电量历史：SQLite 采样（`battery.db`）、充放电周期切分（换电跳变/关机排除）、加权预测（剩余可用/距充满） |
 | `src/viewer.rs` | "Battery history…" 查看窗口（深色 Win11 风格：DWM 深色标题栏/圆角、卡片布局、owner-draw pill/列表、GDI 图表） |
 | `src/config.rs` | `%APPDATA%\razer-taskbar\settings.json` 读写、自启动同步 |
@@ -38,7 +39,7 @@ cargo test --quiet      # 单元测试（battery / watcher 解析规则）
 ## 配置速览
 
 - 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `serde(default)` 回填。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`widget_side`（left/right）、`avoid_overlap`、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 false）、`history_poll_interval_secs`（默认 5）。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`widget_side`（left/right）、`avoid_overlap`、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 false）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
 - 自启动：`HKCU\...\Run\RazerTaskbar`，由菜单切换同步。
 

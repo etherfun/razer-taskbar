@@ -139,7 +139,7 @@ fn panel_rect() -> RECT {
 
 fn no_devices_row() -> Row {
     Row {
-        name: "No Razer devices found".into(),
+        name: crate::i18n::tr("No Razer devices found").into(),
         pct: "--".into(),
         eta: String::new(),
         level: 0,

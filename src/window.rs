@@ -65,7 +65,15 @@ const ID_SHOW_EST_TIME: u16 = 1009;
 const ID_HISTORY_VIEW: u16 = 1010;
 const ID_POLL_BASE: u16 = 1100; // + seconds/5 index (5,10,15,30,60)
 const ID_REC_BASE: u16 = 1150; // + index (1,2,5,10,30)
+const ID_LANG_BASE: u16 = 1170; // + index (auto, en, zh)
 const ID_DEVICE_BASE: u16 = 2000;
+
+/// Append one dynamically-translated menu item (`tr` applied; UTF-16 copy).
+unsafe fn append_item(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u16, text: &'static str) {
+    let wide: Vec<u16> =
+        crate::i18n::tr(text).encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
+}
 
 /// Everything drawn depends on this tuple; when it is unchanged the
 /// per-tick repaint is skipped entirely (layered window content persists
@@ -858,7 +866,7 @@ fn show_menu(hwnd: HWND) {
         } else {
             MF_UNCHECKED
         };
-        let _ = AppendMenuW(menu, MF_STRING | all_checked, ID_DEVICE_BASE as usize, w!("All devices"));
+        append_item(menu, MF_STRING | all_checked, ID_DEVICE_BASE, "All devices");
         for (i, d) in connected.iter().enumerate() {
             let checked = if st.config.shown_device_handle == d.handle {
                 MF_CHECKED
@@ -894,29 +902,29 @@ fn show_menu(hwnd: HWND) {
                 PCWSTR(wide.as_ptr()),
             );
         }
-        let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, poll_menu.0 as usize, w!("Poll interval"));
+        append_item(menu, MF_STRING | MF_POPUP, poll_menu.0 as u16, "Poll interval");
 
         // Widget side.
         let left_checked = if st.config.widget_side == "left" { MF_CHECKED } else { MF_UNCHECKED };
         let right_checked = if st.config.widget_side != "left" { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | left_checked, ID_SIDE_LEFT as usize, w!("Widget on left"));
-        let _ = AppendMenuW(menu, MF_STRING | right_checked, ID_SIDE_RIGHT as usize, w!("Widget on right"));
+        append_item(menu, MF_STRING | left_checked, ID_SIDE_LEFT, "Widget on left");
+        append_item(menu, MF_STRING | right_checked, ID_SIDE_RIGHT, "Widget on right");
 
         // Autostart.
         let auto_checked = if st.config.run_at_startup { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | auto_checked, ID_AUTOSTART as usize, w!("Run at startup"));
+        append_item(menu, MF_STRING | auto_checked, ID_AUTOSTART, "Run at startup");
         // Tray icon toggle (fallback when the hook is occluded).
         let tray_checked = if st.config.show_tray_icon { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | tray_checked, ID_TRAY_ICON as usize, w!("Show tray icon"));
+        append_item(menu, MF_STRING | tray_checked, ID_TRAY_ICON, "Show tray icon");
         // Third-party avoidance switch (widgets board is always avoided).
         let avoid_checked = if st.config.avoid_overlap { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | avoid_checked, ID_AVOID_OVERLAP as usize, w!("Avoid overlap (widgets board always avoided)"));
+        append_item(menu, MF_STRING | avoid_checked, ID_AVOID_OVERLAP, "Avoid overlap (widgets board always avoided)");
         // Hover popover listing every device.
         let hover_checked = if st.config.hover_devices { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | hover_checked, ID_HOVER_DEVICES as usize, w!("Show devices on hover"));
+        append_item(menu, MF_STRING | hover_checked, ID_HOVER_DEVICES, "Show devices on hover");
         // Battery history recording + predicted usage time.
         let rec_checked = if st.config.record_battery_history { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | rec_checked, ID_RECORD_HISTORY as usize, w!("Record battery history"));
+        append_item(menu, MF_STRING | rec_checked, ID_RECORD_HISTORY, "Record battery history");
         let rec_menu = CreatePopupMenu().unwrap_or_default();
         for (i, secs) in [1u64, 2, 5, 10, 30].iter().enumerate() {
             let checked = if st.config.history_poll_interval_secs == *secs {
@@ -933,12 +941,23 @@ fn show_menu(hwnd: HWND) {
                 PCWSTR(wide.as_ptr()),
             );
         }
-        let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, rec_menu.0 as usize, w!("Record interval"));
+        append_item(menu, MF_STRING | MF_POPUP, rec_menu.0 as u16, "Record interval");
         let est_checked = if st.config.show_estimated_time { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, MF_STRING | est_checked, ID_SHOW_EST_TIME as usize, w!("Show time remaining on widget"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_HISTORY_VIEW as usize, w!("Battery history…"));
+        append_item(menu, MF_STRING | est_checked, ID_SHOW_EST_TIME, "Show time remaining on widget");
+        append_item(menu, MF_STRING, ID_HISTORY_VIEW, "Battery history…");
+        // UI language (auto follows the Windows UI language).
+        let lang_menu = CreatePopupMenu().unwrap_or_default();
+        for (i, key) in ["Auto", "English", "中文"].iter().enumerate() {
+            let checked = if st.config.language == ["auto", "en", "zh"][i] {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+            append_item(lang_menu, MF_STRING | checked, ID_LANG_BASE + i as u16, key);
+        }
+        append_item(menu, MF_STRING | MF_POPUP, lang_menu.0 as u16, "Language");
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, ID_EXIT as usize, w!("Exit"));
+        append_item(menu, MF_STRING, ID_EXIT, "Exit");
 
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
@@ -1019,6 +1038,19 @@ fn handle_command(hwnd: HWND, id: u16) {
             let secs = [1u64, 2, 5, 10, 30][(id - ID_REC_BASE) as usize];
             st.config.history_poll_interval_secs = secs;
             config::save(&st.config);
+        }
+        id if (ID_LANG_BASE..ID_LANG_BASE + 3).contains(&id) => {
+            let v = (id - ID_LANG_BASE) as u8; // 0 auto / 1 en / 2 zh
+            st.config.language = ["auto", "en", "zh"][v as usize].into();
+            crate::i18n::set_setting(v);
+            config::save(&st.config);
+            // Re-render localized surfaces now: tray tooltip, viewer window,
+            // and the widget (label only changes if it embeds text).
+            tray::refresh();
+            viewer::sync_language();
+            unsafe {
+                let _ = InvalidateRect(hwnd, None, true);
+            }
         }
         id if id >= ID_DEVICE_BASE => {
             let idx = id - ID_DEVICE_BASE;

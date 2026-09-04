@@ -96,10 +96,14 @@ pub fn open() {
         }
         register_class();
         let instance = GetModuleHandleW(None).unwrap_or_default();
+        let title: Vec<u16> = crate::i18n::tr("Battery history — Razer Taskbar")
+            .encode_utf16()
+            .chain(once(0))
+            .collect();
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS_NAME,
-            w!("Battery history — Razer Taskbar"),
+            PCWSTR(title.as_ptr()),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -164,11 +168,12 @@ pub fn open() {
         let _ = SetWindowTheme(combo, w!("DarkMode_Explorer"), PCWSTR::null());
         let _ = SendMessageW(combo, WM_SETFONT, WPARAM(BODY_FONT.0 as usize), LPARAM(1));
 
-        let mk_pill = |id: i32, text: PCWSTR| {
+        let mk_pill = |id: i32, text: &'static str| {
+            let wide: Vec<u16> = crate::i18n::tr(text).encode_utf16().chain(once(0)).collect();
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 w!("BUTTON"),
-                text,
+                PCWSTR(wide.as_ptr()),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
                 0,
                 0,
@@ -181,9 +186,9 @@ pub fn open() {
             )
             .unwrap_or_default()
         };
-        let btn7 = mk_pill(IDC_RANGE7, w!("7 days"));
-        let btn30 = mk_pill(IDC_RANGE30, w!("30 days"));
-        let btn_all = mk_pill(IDC_RANGE_ALL, w!("All"));
+        let btn7 = mk_pill(IDC_RANGE7, "7 days");
+        let btn30 = mk_pill(IDC_RANGE30, "30 days");
+        let btn_all = mk_pill(IDC_RANGE_ALL, "All");
 
         let devices = history::list_devices();
         let handle = devices.first().map(|(h, _)| h.clone()).unwrap_or_default();
@@ -245,6 +250,28 @@ pub fn destroy() {
         if let Some(v) = VIEWER.take() {
             let _ = DestroyWindow(v.hwnd);
         }
+    }
+}
+
+/// Re-localize the open viewer after a language switch (title + captions;
+/// owner-drawn rows repaint via InvalidateRect).
+pub fn sync_language() {
+    unsafe {
+        let Some(v) = VIEWER.as_ref() else { return };
+        let title: Vec<u16> = crate::i18n::tr("Battery history — Razer Taskbar")
+            .encode_utf16()
+            .chain(once(0))
+            .collect();
+        let _ = SetWindowTextW(v.hwnd, PCWSTR(title.as_ptr()));
+        for (btn, key) in [
+            (v.btn7, "7 days"),
+            (v.btn30, "30 days"),
+            (v.btn_all, "All"),
+        ] {
+            let wide: Vec<u16> = crate::i18n::tr(key).encode_utf16().chain(once(0)).collect();
+            let _ = SetWindowTextW(btn, PCWSTR(wide.as_ptr()));
+        }
+        let _ = InvalidateRect(v.hwnd, None, false);
     }
 }
 
@@ -495,10 +522,10 @@ fn paint(hwnd: HWND) {
             _ => "time remaining now",
         };
         let values = [
-            (format!("{}", stats.cycles), "discharge cycles", C_TEXT),
-            (per_charge, "per full charge", C_TEXT),
-            (charge_full, "empty → full", C_TEXT),
-            (now_val, now_cap, C_ACCENT),
+            (format!("{}", stats.cycles), crate::i18n::tr("discharge cycles"), C_TEXT),
+            (per_charge, crate::i18n::tr("per full charge"), C_TEXT),
+            (charge_full, crate::i18n::tr("empty → full"), C_TEXT),
+            (now_val, crate::i18n::tr(now_cap), C_ACCENT),
         ];
         for (card, (value, caption, color)) in cards.iter().zip(values) {
             draw_card(hdc, *card, s);
@@ -534,12 +561,10 @@ fn paint(hwnd: HWND) {
         // List card: caption row + the child listbox sits on top (layout()).
         draw_card(hdc, list, s);
         let pad = (12.0 * s).round() as i32;
-        let mut cap: Vec<u16> = format!(
-            "Cycles & charging sessions ({} recorded)",
-            v.items.len()
-        )
-        .encode_utf16()
-        .collect();
+        let mut cap: Vec<u16> = crate::i18n::tr("Cycles & charging sessions ({} recorded)")
+            .replace("{}", &v.items.len().to_string())
+            .encode_utf16()
+            .collect();
         let mut crc = RECT {
             left: list.left + pad,
             top: list.top + (7.0 * s).round() as i32,
@@ -602,9 +627,9 @@ unsafe fn draw_item(dis: &mut DRAWITEMSTRUCT) {
             let _ = DeleteObject(pen);
             let _ = SetBkMode(hdc, TRANSPARENT);
             let text: String = match dis.CtlID as i32 {
-                IDC_RANGE7 => "7 days".into(),
-                IDC_RANGE30 => "30 days".into(),
-                _ => "All".into(),
+                IDC_RANGE7 => crate::i18n::tr("7 days").into(),
+                IDC_RANGE30 => crate::i18n::tr("30 days").into(),
+                _ => crate::i18n::tr("All").into(),
             };
             let mut wide: Vec<u16> = text.encode_utf16().collect();
             if !wide.is_empty() {
@@ -641,6 +666,7 @@ unsafe fn draw_item(dis: &mut DRAWITEMSTRUCT) {
             } else {
                 ("USE", C_CARD, C_TEXT3, C_TEXT2)
             };
+            let badge_text = crate::i18n::tr(badge_text);
             let bbrush = CreateSolidBrush(badge_fill);
             let bpen = CreatePen(PS_SOLID, 1, badge_border);
             let ob = SelectObject(hdc, bpen);
@@ -699,7 +725,7 @@ fn draw_chart(hdc: HDC, v: &ViewerState, chart: RECT, s: f32) {
         draw_card(hdc, chart, s);
         let pad = (12.0 * s).round() as i32;
         // Card header: caption + legend chips.
-        let mut cap: Vec<u16> = "Battery level".encode_utf16().collect();
+        let mut cap: Vec<u16> = crate::i18n::tr("Battery level").encode_utf16().collect();
         let mut crc = RECT {
             left: chart.left + pad,
             top: chart.top + (8.0 * s).round() as i32,
@@ -722,8 +748,11 @@ fn draw_chart(hdc: HDC, v: &ViewerState, chart: RECT, s: f32) {
         }
 
         if v.samples.len() < 2 {
-            let mut text: Vec<u16> =
-                "No data yet — recording starts when a device connects.".encode_utf16().collect();
+            let mut text: Vec<u16> = crate::i18n::tr(
+                "No data yet — recording starts when a device connects.",
+            )
+            .encode_utf16()
+            .collect();
             let mut trc = chart;
             let _ = SelectObject(hdc, BODY_FONT);
             let _ = SetTextColor(hdc, C_TEXT3);
@@ -879,8 +908,11 @@ fn draw_chart(hdc: HDC, v: &ViewerState, chart: RECT, s: f32) {
         }
 
         // Legend chips at the card's top-right.
-        let legend: [(&str, COLORREF); 3] =
-            [("charging", C_GREEN), ("discharging", C_LINE), ("off (excluded)", C_TEXT3)];
+        let legend: [(&str, COLORREF); 3] = [
+            (crate::i18n::tr("charging"), C_GREEN),
+            (crate::i18n::tr("discharging"), C_LINE),
+            (crate::i18n::tr("off (excluded)"), C_TEXT3),
+        ];
         let mut lx = chart.right - pad;
         let ly = chart.top + (14.0 * s).round() as i32;
         let _ = SelectObject(hdc, CAPTION_FONT);

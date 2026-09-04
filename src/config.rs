@@ -36,6 +36,8 @@ pub struct Config {
     /// Watcher cadence while recording is enabled — finer than the display
     /// poll so connect/charge/level transitions are timestamped precisely.
     pub history_poll_interval_secs: u64,
+    /// UI language: "auto" (follow Windows) | "en" | "zh" (`i18n.rs`).
+    pub language: String,
 }
 
 impl Default for Config {
@@ -57,6 +59,7 @@ impl Default for Config {
             record_battery_history: true,
             show_estimated_time: false,
             history_poll_interval_secs: 5,
+            language: "auto".into(),
         }
     }
 }

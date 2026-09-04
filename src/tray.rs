@@ -72,19 +72,22 @@ pub fn refresh() {
                 let devices = devices.lock().unwrap();
                 match pick_device_to_display(&devices) {
                     Some(d) => {
-                        let mut tip = format!(
-                            "{}: {}%{}",
-                            d.name,
-                            d.battery_percentage,
-                            if d.is_charging { " (charging)" } else { "" }
-                        );
+                        let charging = if d.is_charging {
+                            format!(" {}", crate::i18n::tr("(charging)"))
+                        } else {
+                            String::new()
+                        };
+                        let mut tip = format!("{}: {}%{}", d.name, d.battery_percentage, charging);
                         // Predicted usage time / time-to-full from history.rs.
                         if let Some(e) = crate::history::estimate_for(&d.handle) {
-                            tip.push_str(&format!(" · {}", crate::history::format_estimate_verbose(e)));
+                            tip.push_str(&format!(
+                                " · {}",
+                                crate::history::format_estimate_verbose(e)
+                            ));
                         }
                         (tip, Some((d.battery_percentage, d.is_charging)))
                     }
-                    None => ("No devices found.".into(), None),
+                    None => (crate::i18n::tr("No devices found.").to_string(), None),
                 }
             }
             None => ("Razer Taskbar".into(), None),
