@@ -147,17 +147,21 @@ fn build_icon() -> HICON {
     build_icon_for(None)
 }
 
-/// 16x16 tray icon drawn with GDI: battery outline + fill + bolt.
+/// 16x16 tray icon (32bpp, per-pixel alpha): battery outline + level fill +
+/// charging bolt, drawn at 2x and downsampled for smooth edges. The DIB is
+/// zero-initialized and alpha is computed from coverage — an uninitialized
+/// bitmap used to composite as an opaque black square behind the glyph.
 fn build_icon_for(state: Option<(u8, bool)>) -> HICON {
     use windows::Win32::Graphics::Gdi::*;
+    const SRC: i32 = 32; // 2x supersample of the 16x16 target
     unsafe {
         let hdc = GetDC(None);
         let mem = CreateCompatibleDC(hdc);
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: 16,
-                biHeight: -16,
+                biWidth: SRC,
+                biHeight: -SRC,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -169,39 +173,39 @@ fn build_icon_for(state: Option<(u8, bool)>) -> HICON {
         let hbmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
             .unwrap_or_default();
         let old = SelectObject(mem, hbmp);
-        // Transparent background.
-        let _ = SetBkMode(mem, TRANSPARENT);
+        std::ptr::write_bytes(bits as *mut u8, 0, (SRC * SRC * 4) as usize);
 
         let (level, charging) = state.unwrap_or((0, false));
         let (fr, fg, fb) = match state {
             Some((l, _)) => color_for(l),
             None => (0x80, 0x80, 0x80),
         };
+        let s = |v: i32| v * 2;
         let white = CreateSolidBrush(COLORREF(0x00FFFFFF));
         let fill = CreateSolidBrush(COLORREF(fr as u32 | ((fg as u32) << 8) | ((fb as u32) << 16)));
-        // Outline: 1,3 - 12,12; cap at 13,6 - 14,9.
-        let pen = CreatePen(PS_SOLID, 1, COLORREF(0x00FFFFFF));
+        let pen = CreatePen(PS_SOLID, 2, COLORREF(0x00FFFFFF));
         let _ = SelectObject(mem, pen);
         let _ = SelectObject(mem, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(mem, 1, 3, 12, 12, 2, 2);
+        // Outline: 1,3 - 12,12; cap at 13,6 - 14,9.
+        let _ = RoundRect(mem, s(1), s(3), s(12), s(12), 4, 4);
         let _ = SelectObject(mem, white);
-        let _ = Rectangle(mem, 13, 6, 15, 10);
+        let _ = Rectangle(mem, s(13), s(6), s(15), s(10));
         if state.is_some() {
             let fw = 9 * level as i32 / 100;
             if fw > 0 {
-                let rc = RECT { left: 2, top: 4, right: 2 + fw, bottom: 11 };
+                let rc = RECT { left: s(2), top: s(4), right: s(2 + fw), bottom: s(11) };
                 let _ = FillRect(mem, &rc, fill);
             }
             if charging {
                 let bolt = CreateSolidBrush(COLORREF(0x00FFFFFF));
                 let _ = SelectObject(mem, bolt);
                 let pts = [
-                    POINT { x: 7, y: 3 },
-                    POINT { x: 4, y: 8 },
-                    POINT { x: 6, y: 8 },
-                    POINT { x: 5, y: 12 },
-                    POINT { x: 8, y: 7 },
-                    POINT { x: 6, y: 7 },
+                    POINT { x: s(7), y: s(3) },
+                    POINT { x: s(4), y: s(8) },
+                    POINT { x: s(6), y: s(8) },
+                    POINT { x: s(5), y: s(12) },
+                    POINT { x: s(8), y: s(7) },
+                    POINT { x: s(6), y: s(7) },
                 ];
                 let _ = Polygon(mem, &pts);
                 let _ = DeleteObject(bolt);
@@ -211,15 +215,67 @@ fn build_icon_for(state: Option<(u8, bool)>) -> HICON {
         let _ = DeleteObject(pen);
         let _ = DeleteObject(white);
         let _ = DeleteObject(fill);
+
+        // Downsample 2x2 -> 16x16 straight-alpha pixels: alpha = drawn-pixel
+        // coverage, color = average of drawn colors (background stays clear).
+        let src = bits as *const u32;
+        let mut out: [u32; 256] = [0; 256];
+        for y in 0..16usize {
+            for x in 0..16usize {
+                let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+                for dy in 0..2usize {
+                    for dx in 0..2usize {
+                        let v = *src.add((y * 2 + dy) * 32 + (x * 2 + dx));
+                        if v & 0x00FF_FFFF != 0 {
+                            r += v & 0xFF;
+                            g += (v >> 8) & 0xFF;
+                            b += (v >> 16) & 0xFF;
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    out[y * 16 + x] = ((n * 255 / 4) << 24)
+                        | ((b / n) << 16)
+                        | ((g / n) << 8)
+                        | (r / n);
+                }
+            }
+        }
+        let _ = DeleteObject(hbmp);
         let _ = DeleteDC(mem);
         ReleaseDC(None, hdc);
 
-        // All-white mask => fully opaque icon.
-        let mask = CreateBitmap(16, 16, 1, 1, None);
-        let ii = ICONINFO { fIcon: true.into(), hbmMask: mask, hbmColor: hbmp, ..Default::default() };
+        // 16x16 32bpp color bitmap with the computed alpha.
+        let mut out_bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let out_bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: 16,
+                biHeight: -16,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out_bmp = CreateDIBSection(mem, &out_bmi, DIB_RGB_COLORS, &mut out_bits, None, 0)
+            .unwrap_or_default();
+        std::ptr::copy_nonoverlapping(
+            out.as_ptr() as *const u8,
+            out_bits as *mut u8,
+            16 * 16 * 4,
+        );
+
+        // Mask all-zero (= opaque): with any nonzero alpha byte the system
+        // composites per-pixel alpha and ignores the mask.
+        let mask_bits = [0u8; 32];
+        let mask = CreateBitmap(16, 16, 1, 1, Some(mask_bits.as_ptr() as *const std::ffi::c_void));
+        let ii = ICONINFO { fIcon: true.into(), hbmMask: mask, hbmColor: out_bmp, ..Default::default() };
         let icon = CreateIconIndirect(&ii).unwrap_or_default();
         let _ = DeleteObject(mask);
-        let _ = DeleteObject(hbmp);
+        let _ = DeleteObject(out_bmp);
         icon
     }
 }
