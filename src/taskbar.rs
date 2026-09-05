@@ -285,8 +285,14 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 /// Effective blocking rect: tight content bounds when known, else full rect.
+/// Zero-width content (a sampled-blank window) stays zero — it overlaps
+/// nothing and therefore blocks nothing, which is the honest real size.
 fn block_rect(o: &Occupant) -> RECT {
-    o.content.unwrap_or(o.rect)
+    match o.content {
+        Some(c) if c.right > c.left => c,
+        Some(_) => RECT::default(),
+        None => o.rect,
+    }
 }
 
 /// Shrink each occupant's blocking rect to its visible (non-background)
@@ -359,12 +365,21 @@ fn content_cache() -> &'static Mutex<HashMap<OccupantKey, ContentEntry>> {
 /// How long a sampled content rect stays valid before re-sampling.
 const CONTENT_CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// Scan `rect` (screen coords) for columns differing from the taskbar
-/// background; return the tight bounding box of differing pixels.
-/// Returns `None` when sampling fails or nothing differs (fully
-/// transparent — caller keeps the full rect as a safe fallback... in fact
-/// a fully-transparent window blocks nothing, but treating it as blocking
-/// is the conservative choice and such windows are rare).
+/// Scan `rect` (screen coords) for columns containing non-background ink;
+/// return the tight bounding box of the ink columns.
+///
+/// The background is estimated PER COLUMN (median of a vertical sample
+/// stride): taskbar backdrops are horizontal gradients, so a single
+/// window-wide background color misreads every column past the first ~100px
+/// as ink and the "content" box silently grows to the full window width.
+/// A column counts as ink when ≥2 of its samples differ from the column
+/// median by more than 60 total channel delta (glyph cores qualify, noise
+/// and 1px antialias fringe do not).
+///
+/// Returns `None` only when sampling itself fails (caller falls back to the
+/// full window rect). A genuinely blank window (idle lyrics, transparent
+/// padding) returns a ZERO-WIDTH rect: it overlaps nothing and blocks
+/// nothing — the honest real size instead of a phantom 700px wall.
 fn visible_content_rect(rect: &RECT) -> Option<RECT> {
     use windows::Win32::Graphics::Gdi::*;
     unsafe {
@@ -435,31 +450,31 @@ fn visible_content_rect(rect: &RECT) -> Option<RECT> {
         if ok.is_err() || rows == 0 {
             return None;
         }
-        // Background estimate: median-ish sample from the rect corners
-        // (transparent padding usually touches the edges). Use the four
-        // corner pixels + edge midpoints; the most common wins.
         let at = |x: i32, y: i32| -> u32 { bits[(y * w + x) as usize] & 0x00FF_FFFF };
-        let mut votes = [at(0, 0), at(w - 1, 0), at(0, h - 1), at(w - 1, h - 1)];
-        votes.sort_unstable();
-        let bg = votes[1];
-        let differs = |c: u32| {
-            let dr = ((c & 0xFF) as i32 - (bg & 0xFF) as i32).abs();
-            let dg = (((c >> 8) & 0xFF) as i32 - ((bg >> 8) & 0xFF) as i32).abs();
-            let db = (((c >> 16) & 0xFF) as i32 - ((bg >> 16) & 0xFF) as i32).abs();
-            dr + dg + db > 60
+        let dist = |a: u32, b: u32| -> i32 {
+            let dr = ((a & 0xFF) as i32 - (b & 0xFF) as i32).abs();
+            let dg = (((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32).abs();
+            let db = (((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32).abs();
+            dr + dg + db
         };
+        // Per-column background = median of a vertical sample stride; the
+        // gradient drifts horizontally but is near-constant vertically.
+        let mut samples: Vec<u32> = Vec::with_capacity((h / 4 + 1) as usize);
+        let mut sorted: Vec<u32> = Vec::with_capacity(samples.capacity());
         let (mut lo, mut hi) = (w, -1);
         for x in 0..w {
-            let mut col_hit = false;
+            samples.clear();
             let mut y = 0;
             while y < h {
-                if differs(at(x, y)) {
-                    col_hit = true;
-                    break;
-                }
-                y += 2; // stride 2 rows: 2x faster, still catches any glyph
+                samples.push(at(x, y));
+                y += 4;
             }
-            if col_hit {
+            sorted.clear();
+            sorted.extend_from_slice(&samples);
+            sorted.sort_unstable();
+            let bg = sorted[sorted.len() / 2];
+            let ink = samples.iter().filter(|&&c| dist(c, bg) > 60).count();
+            if ink >= 2 {
                 if x < lo {
                     lo = x;
                 }
@@ -467,7 +482,9 @@ fn visible_content_rect(rect: &RECT) -> Option<RECT> {
             }
         }
         if hi < lo {
-            return None;
+            // Blank window: zero-width block at the rect's center.
+            let cx = rect.left + w / 2;
+            return Some(RECT { left: cx, right: cx, top: rect.top, bottom: rect.bottom });
         }
         // 2px safety margin so antialiased edges never touch us.
         lo = (lo - 2).max(0);
@@ -969,13 +986,30 @@ pub fn compute_placement(
             }
             x = x.clamp(2, (bar_w - w - 2).max(2));
 
+            // Clearance of the candidate rect, checked BEFORE the cap: a
+            // yield that lands clear of every occupant is not a catapult —
+            // the blocker already outlived its grace (held=false got here),
+            // and staying would only guarantee overlap. The cap keeps
+            // vetoing far moves that would land in contention.
+            let target_clear = !avoid_overlap || {
+                window_rect(self_hwnd).map(|live| {
+                    let tr = RECT {
+                        left: bar.left + x,
+                        right: bar.left + x + w,
+                        ..live
+                    };
+                    occupants.iter().all(|o| !rects_overlap(&tr, &block_rect(o)))
+                }) == Some(true)
+            };
+
             // Jump cap (see MAX_AVOID_JUMP_PX): refuse far yields, stay put.
             // First call (first=true, window still at 0,0) bypasses it via
             // hold_usable(): there is no position worth defending yet.
             // `alone_in_band` bypasses it too: the cap defends against other
             // widgets, and there are none — going home is not a catapult.
+            // A clear-landing yield bypasses it as well: see target_clear.
             let mut capped = false;
-            if avoid_overlap && !first && !alone_in_band {
+            if avoid_overlap && !first && !alone_in_band && !target_clear {
                 if let Some(live) = window_rect(self_hwnd) {
                     if hold_usable(&live, &bar, w, h) {
                         let reference = live.left - bar.left;
@@ -1063,11 +1097,24 @@ pub fn compute_placement(
             };
             x += offset_left;
             x = x.clamp(2, (band_w - w - 2).max(2));
+            // Clearance of the candidate rect before the cap — see the Win11
+            // branch: far yields that land clear of every occupant are not
+            // catapults, and staying would only guarantee overlap.
+            let target_clear = !avoid_overlap || {
+                window_rect(self_hwnd).map(|live| {
+                    let tr = RECT {
+                        left: band.left + x,
+                        right: band.left + x + w,
+                        ..live
+                    };
+                    occupants.iter().all(|o| !rects_overlap(&tr, &block_rect(o)))
+                }) == Some(true)
+            };
             // Jump cap (see MAX_AVOID_JUMP_PX): refuse far yields, stay put.
             // First call exempt — see Win11 branch. `alone_in_band` exempt
             // too: the cap defends against other widgets, and there are none.
             let mut capped = false;
-            if avoid_overlap && !first && !alone_in_band {
+            if avoid_overlap && !first && !alone_in_band && !target_clear {
                 if let Some(live) = window_rect(self_hwnd) {
                     if hold_usable(&live, &band, w, h) {
                         let reference = live.left - band.left;

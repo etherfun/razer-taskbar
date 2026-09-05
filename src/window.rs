@@ -421,10 +421,20 @@ fn place_widget(hwnd: HWND, first: bool) {
 
     // One log line per distinct state; unchanged states stay silent.
     let describe = |o: &taskbar::Occupant| {
-        if o.exe.is_empty() {
+        let base = if o.exe.is_empty() {
             o.class.clone()
         } else {
             format!("{} ({})", o.exe, o.class)
+        };
+        // Sampled content span when it beats the window rect (Lyricify
+        // requests a 708px window for a few hundred px of lyrics; blank
+        // windows sample to "none" and block nothing).
+        match o.content {
+            Some(c) if c.right > c.left => {
+                format!("{base} block={}-{}", c.left, c.right)
+            }
+            Some(_) => format!("{base} block=none"),
+            None => base,
         }
     };
     let mut line = format!(
