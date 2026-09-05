@@ -108,8 +108,6 @@ struct AppState {
     z_burst_left: u32,
     /// Dedup for the "covered" log line.
     last_covered_log: Option<Instant>,
-    /// Last occupancy fingerprint (avoidance change detection).
-    last_occupancy: Option<u64>,
     /// Experimental embed mode: the widget is a WS_CHILD of the taskbar band
     /// instead of a topmost overlay (see `taskbar::set_taskbar_child`).
     embedded: bool,
@@ -166,7 +164,7 @@ pub fn widget_hwnd() -> HWND {
 pub fn reposition_widget() {
     let Some(st) = state() else { return };
     let hwnd = st.hwnd;
-    place_widget(hwnd, false);
+    place_widget(hwnd);
     unsafe {
         let _ = InvalidateRect(hwnd, None, true);
     }
@@ -178,15 +176,6 @@ pub fn invalidate_widget() {
             let _ = InvalidateRect(st.hwnd, None, true);
         }
     }
-}
-
-/// Force the next WM_PAINT to really redraw instead of hitting the
-/// `painted_sig` dedup. Needed after a hide/show cycle: the layered
-/// surface is re-created blank, and skipping the repaint would leave the
-/// widget transparent until the drawn content happens to change.
-pub fn invalidate_paint_cache() {
-    let st = state_mut();
-    st.painted_sig = None;
 }
 
 /// Switch the displayed device ("" = auto). Shared by the tray menu and the
@@ -287,7 +276,6 @@ pub fn run_message_loop(devices: Arc<Mutex<DeviceMap>>, cfg: Config) {
             layout_pending: false,
             z_burst_left: 0,
             last_covered_log: None,
-            last_occupancy: None,
             embedded: false,
             embed_failed: false,
         });
@@ -302,7 +290,7 @@ pub fn run_message_loop(devices: Arc<Mutex<DeviceMap>>, cfg: Config) {
         // First call anchors directly (first=true bypasses hold AND the
         // jump cap): the window still sits at its 0,0 creation rect, which
         // is not a position worth defending.
-        place_widget(hwnd, true);
+        place_widget(hwnd);
         let show_tray = state_mut().config.show_tray_icon;
         if show_tray {
             tray::set_devices(state_mut().devices.clone());
@@ -364,7 +352,7 @@ fn widget_size(hwnd: HWND) -> (i32, i32) {
 /// Recompute and apply the placement. Runs on the 1s fallback poll, after
 /// every coalesced UIA structure event, and on first anchor — so both the
 /// move/invalidate and the stderr log are deduped against the previous pass.
-fn place_widget(hwnd: HWND, first: bool) {
+fn place_widget(hwnd: HWND) {
     let st = state_mut();
     let (w, h) = widget_size(hwnd);
     st.widget_w = w;
@@ -375,7 +363,6 @@ fn place_widget(hwnd: HWND, first: bool) {
 
     let Some(pl) = taskbar::compute_placement(
         tray,
-        hwnd,
         w,
         h,
         &side,
@@ -384,8 +371,6 @@ fn place_widget(hwnd: HWND, first: bool) {
         cfg.taskbar_left_space_win11,
         cfg.taskbar_right_space_win11,
         cfg.avoid_overlap_with_widgets,
-        cfg.avoid_overlap,
-        first,
     ) else {
         return;
     };
@@ -429,47 +414,10 @@ fn place_widget(hwnd: HWND, first: bool) {
     let sy = parent_y + pl.y;
 
     // One log line per distinct state; unchanged states stay silent.
-    let describe = |o: &taskbar::Occupant| {
-        let base = if o.exe.is_empty() {
-            o.class.clone()
-        } else {
-            format!("{} ({})", o.exe, o.class)
-        };
-        // Sampled content span when it beats the window rect (Lyricify
-        // requests a 708px window for a few hundred px of lyrics; blank
-        // windows sample to "none" and block nothing).
-        match o.content {
-            Some(c) if c.right > c.left => {
-                format!("{base} block={}-{}", c.left, c.right)
-            }
-            Some(_) => format!("{base} block=none"),
-            None => base,
-        }
-    };
-    let mut line = format!(
-        "overlay kind={:?} pos=({sx},{sy}) size={w}x{h} held={} capped={} embed={}",
-        pl.kind,
-        pl.held,
-        pl.capped,
-        st.embedded
+    let line = format!(
+        "overlay kind={:?} pos=({sx},{sy}) size={w}x{h} embed={}",
+        pl.kind, st.embedded
     );
-    if pl.capped && !pl.blockers.is_empty() {
-        let names: Vec<String> = pl.blockers.iter().map(describe).collect();
-        line.push_str(&format!(
-            " | staying despite overlap with {} (avoid jump capped at {}px)",
-            names.join(", "),
-            taskbar::MAX_AVOID_JUMP_PX,
-        ));
-    } else if !pl.blockers.is_empty() {
-        let names: Vec<String> = pl.blockers.iter().map(describe).collect();
-        line.push_str(&format!(" | yielding to occupant(s): {}", names.join(", ")));
-    } else if !pl.occupants.is_empty() {
-        let names: Vec<String> = pl.occupants.iter().map(describe).collect();
-        line.push_str(&format!(
-            " | coexisting with occupant(s) (no overlap): {}",
-            names.join(", ")
-        ));
-    }
     if st.last_log.as_deref() != Some(line.as_str()) {
         eprintln!("razer-taskbar: {line}");
         st.last_log = Some(line);
@@ -534,7 +482,7 @@ unsafe extern "system" fn wnd_proc(
                             arm_z_burst(hwnd);
                         }
                     }
-                    place_widget(hwnd, false);
+                    place_widget(hwnd);
                     tray::refresh();
                     // Battery changes never move the rect, so place_widget's
                     // changed-only invalidate would leave the digits frozen
@@ -563,9 +511,6 @@ unsafe extern "system" fn wnd_proc(
                     if !embedded && z_covered(hwnd) {
                         arm_z_burst(hwnd);
                     }
-                    if occupancy_changed(hwnd) {
-                        request_layout(hwnd);
-                    }
                     let enabled = state_mut().config.hover_devices;
                     hover::track(hwnd, enabled);
                 }
@@ -580,7 +525,7 @@ unsafe extern "system" fn wnd_proc(
                     } else {
                         // place_widget ends in move_overlay → re-asserts
                         // HWND_TOPMOST above the taskbar.
-                        place_widget(hwnd, false);
+                        place_widget(hwnd);
                     }
                 }
                 _ => {}
@@ -643,18 +588,6 @@ fn z_covered(hwnd: HWND) -> bool {
     }
 }
 
-/// `true` when a taskbar child's geometry changed since the previous call
-/// (occupants moving in/out = avoidance must re-run soon).
-fn occupancy_changed(hwnd: HWND) -> bool {
-    let fp = state()
-        .map(|st| taskbar::occupancy_fingerprint(st.tray, hwnd))
-        .unwrap_or(0);
-    let st = state_mut();
-    let changed = st.last_occupancy != Some(fp);
-    st.last_occupancy = Some(fp);
-    changed
-}
-
 /// Arm the fast re-assert burst (see TIMER_Z_BURST). Only start it when it
 /// is not already running — a repeated SetTimer would RESET the countdown,
 /// and the 120ms hover check firing while covered would keep postponing the
@@ -692,7 +625,7 @@ fn request_layout(hwnd: HWND) {
         }
     };
     if due {
-        place_widget(hwnd, false);
+        place_widget(hwnd);
     } else {
         unsafe {
             let _ = SetTimer(hwnd, TIMER_LAYOUT, LAYOUT_DEBOUNCE_MS, None);
@@ -711,7 +644,7 @@ fn flush_pending_layout(hwnd: HWND) {
         run
     };
     if run {
-        place_widget(hwnd, false);
+        place_widget(hwnd);
     }
 }
 
@@ -728,7 +661,6 @@ fn handle_taskbar_created(hwnd: HWND) {
     if let Some(tray) = taskbar::find_shell_tray() {
         st.tray = tray;
     }
-    taskbar::reset_hold_state();
     taskbar::invalidate_widgets_cache();
     st.last_layout = None;
     if st.config.show_tray_icon {
@@ -739,8 +671,7 @@ fn handle_taskbar_created(hwnd: HWND) {
     if let Some(tx) = st.uia_rebind.clone() {
         let _ = tx.send(());
     }
-    // first=true bypasses hold + jump cap: the old position is meaningless.
-    place_widget(hwnd, true);
+    place_widget(hwnd);
 }
 
 /// Win11-style battery UI: glyph + percentage, transparent background.

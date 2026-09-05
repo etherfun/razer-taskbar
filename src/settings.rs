@@ -31,7 +31,6 @@ const CLASS_NAME: PCWSTR = w!("RazerTaskbarSettings");
 const IDC_SIDE_LEFT: i32 = 1;
 const IDC_SIDE_RIGHT: i32 = 2;
 const IDC_CHK_EST: i32 = 3;
-const IDC_CHK_AVOID: i32 = 4;
 const IDC_CHK_TRAY: i32 = 5;
 const IDC_CHK_HOVER: i32 = 6;
 const IDC_CHK_REC: i32 = 7;
@@ -97,7 +96,6 @@ fn sections() -> Vec<(&'static str, Vec<Row>)> {
                     pills: true,
                 },
                 Row::Check(IDC_CHK_EST),
-                Row::Check(IDC_CHK_AVOID),
                 Row::Check(IDC_CHK_TRAY),
                 Row::Check(IDC_CHK_HOVER),
             ],
@@ -135,7 +133,6 @@ fn sections() -> Vec<(&'static str, Vec<Row>)> {
 fn check_caption(id: i32) -> &'static str {
     match id {
         IDC_CHK_EST => "Show time remaining on widget",
-        IDC_CHK_AVOID => "Avoid overlap (widgets board always avoided)",
         IDC_CHK_TRAY => "Show tray icon",
         IDC_CHK_HOVER => "Show devices on hover",
         IDC_CHK_REC => "Record battery history",
@@ -236,7 +233,6 @@ struct Controls {
     side_left: HWND,
     side_right: HWND,
     chk_est: HWND,
-    chk_avoid: HWND,
     chk_tray: HWND,
     chk_hover: HWND,
     chk_rec: HWND,
@@ -398,7 +394,6 @@ fn create_controls(hwnd: HWND, geoms: &[SectionGeom], instance: HINSTANCE, s: f3
             side_left: HWND(std::ptr::null_mut()),
             side_right: HWND(std::ptr::null_mut()),
             chk_est: HWND(std::ptr::null_mut()),
-            chk_avoid: HWND(std::ptr::null_mut()),
             chk_tray: HWND(std::ptr::null_mut()),
             chk_hover: HWND(std::ptr::null_mut()),
             chk_rec: HWND(std::ptr::null_mut()),
@@ -466,7 +461,6 @@ fn create_controls(hwnd: HWND, geoms: &[SectionGeom], instance: HINSTANCE, s: f3
                         let h = mk_check(id, rc);
                         match id {
                             IDC_CHK_EST => ctl.chk_est = h,
-                            IDC_CHK_AVOID => ctl.chk_avoid = h,
                             IDC_CHK_TRAY => ctl.chk_tray = h,
                             IDC_CHK_HOVER => ctl.chk_hover = h,
                             IDC_CHK_REC => ctl.chk_rec = h,
@@ -558,7 +552,6 @@ fn refresh_controls() {
             );
         };
         set_chk(c.chk_est, cfg.show_estimated_time);
-        set_chk(c.chk_avoid, cfg.avoid_overlap);
         set_chk(c.chk_tray, cfg.show_tray_icon);
         set_chk(c.chk_hover, cfg.hover_devices);
         set_chk(c.chk_rec, cfg.record_battery_history);
@@ -751,11 +744,6 @@ fn handle_command(id: i32, code: i32) {
                 let on = checked(c.chk_est);
                 crate::window::modify_config(|cfg| cfg.show_estimated_time = on);
                 // The widget width depends on the toggle.
-                crate::window::reposition_widget();
-            }
-            IDC_CHK_AVOID if clicked => {
-                let on = checked(c.chk_avoid);
-                crate::window::modify_config(|cfg| cfg.avoid_overlap = on);
                 crate::window::reposition_widget();
             }
             IDC_CHK_TRAY if clicked => {

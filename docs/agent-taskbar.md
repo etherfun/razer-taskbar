@@ -35,22 +35,18 @@
 - 天气挂件板是 XAML 内容，`EnumChildWindows` 看不见：经缓存后的 UIA `WidgetsButton` 取 rect，失败回退注册表 `TaskbarDa` 估计（`widgets_zone_width`）。**无论 `avoid_overlap` 开关一律避让**；右锚可用带止于 `min(board_left, notify_left)`。
 - **坐标系**：返回的 `x/y` 相对 `Placement.parent`——Win11 是 `Shell_TrayWnd`，Classic 是 `ReBarWindow32` 带（回退 `WorkerW`）。`place_widget` 必须用 `pl.parent` 的原点换算屏幕坐标，用 tray 原点换算 Classic 会偏移 Start 按钮宽度。
 
-## 共存避让状态机
+## 无第三方避让（设计决定）
 
-- 枚举父窗口可见子窗口，跳过 `WHITELIST`（`Start`、`ReBarWindow32`、`MSTaskSwWClass`、`TrayNotifyWnd`、`DesktopWindowContentBridge` 等，XAML 覆盖层必须保留，否则每次都会"让位"）。
-- 透明 padding 不挡路：`shrink_to_content` 屏幕采样收紧为 content rect（`block_rect`），比较与让位都用它（5s 缓存）。背景按**列**取垂直采样中位数（任务栏是横向渐变，整窗单一背景色会把百像素外全误判成内容）；列内 ≥2 个采样点偏离中位数 >60 才算墨迹；全空窗口（歌词未播放）采样为零宽 rect、不阻挡任何位置。放置日志以 `block=L-R` / `block=none` 显示采样出的真实阻挡范围。
-- **采样三帧投票**：单次 BitBlt 在 DWM 过渡期（邻居移动、自身隐藏）会抓到撕裂/陈旧帧，幻影列会冒充内容。每次采样抓 3 帧（间隔 DwmFlush+30ms）逐列多数投票。隐藏采样时自身残影留在托盘重定向上：hide 后对父窗口暴露区 `InvalidateRect+UpdateWindow` 同步强制重绘；show 后 `invalidate_paint_cache()` 清 `painted_sig` 并 `InvalidateRect(self)`——layered 子窗口 hide/show 后表面被弃，签名去重会跳过重建，挂件会永久透明（已修复，勿删）。
-- 身份：`OccupantKey(pid, class, 高度桶)`（不用裸 HWND，防复用误判）；`annotate_moves` 记 30s TTL、2px 抖动阈值，`moved` 粘性、`is_new` 首见。
-- 让位节奏：`try_hold_position` —— 无碰撞 hold；新碰撞进 grace（静态 1s / 移动或新来 3s，`waiting=true`，按 `Instant` 计时，事件驱动下更频繁调用不改变语义）；同 key 过期才 yield。`avoid_overlap=false` 时清空第三方 occupant（仅钉死原始锚点，天气板仍避让）。
-- 防弹射：`MAX_AVOID_JUMP_PX = 500`，非首轮、相对 live 位移超限则 stay + `capped=true`；首轮（`first=true`，窗口仍在 0,0）与 `TaskbarCreated` 后的重锚不设防。落点已验证无 occupant 碰撞的让位同样豁免——阻塞者既已熬过 grace（非误检），拒绝让位只会造成永久重叠（实测 Lyricify 无第三方避让逻辑，僵局无解）。
-- 退场回位：hold 与跳跃上限都是"防其他挂件"的手段——band 内不再有任何第三方 occupant 时（挤开我们的那个已关闭），两者一并解除，直接回自然锚点，不再滞留原地（`alone_in_band`）。
+- 挂件位置 = 纯锚点计算（右锚：`TrayNotifyWnd` 左缘 − 宽 + 2，小组件板左侧硬保留），每个放置 pass 结果确定、无状态。与第三方挂件（Lyricify、TrafficMonitor 等）重叠时接受：嵌入模式我们是 band 兄弟第 0 位、覆盖模式是 TOPMOST，始终绘制在对方上层。
+- 曾经实现过完整的 occupant 避让状态机（枚举子窗口、屏幕采样收紧 content rect、grace/hold/跳跃上限），但实测歌词窗内容秒级变化，反应式避让永远慢半拍且来回抖动；Lyricify 自身又无避让逻辑，僵局无解——2026-09 经用户确认整体移除。若未来要恢复，参考 git 历史（`2111fea` 及之前）。
+- 仍保留的边界：`TrayNotifyWnd`/`Start` 锚点约束，小组件板（天气）硬保留（XAML 内容 HWND 枚举不可见，经 UIA `WidgetsButton` 查询 + 注册表 `TaskbarDa` 门控，30s 缓存）。
 
 ## 实验性嵌入模式（`embed_into_taskbar`，默认关）
 
 - `taskbar::set_taskbar_child`：Lyricify 任务栏歌词同款——跨进程 `SetParent` 进任务栏带（Win11 是 `Shell_TrayWnd`，Classic 是 `ReBarWindow32`），`WS_POPUP→WS_CHILD`、去 `WS_EX_TOPMOST`、保留 `WS_EX_LAYERED|NOACTIVATE`，并 `HWND_TOP` 保持兄弟第 0 位（压在 XAML 桥上）。子窗口随任务栏生灭，z 序争夺战（`arm_z_burst`/`z_covered`）整体跳过，改为每秒 `reassert_child_top`。
 - 坐标换算：定位数学输出带坐标，子窗口用父 CLIENT 坐标，差值即 `client_origin(parent)`。
 - 失败回退：`SetParent` 被拒（安全软件拦截等）置 `embed_failed` 粘性回退覆盖模式；explorer 重启后父窗被拆，`place_widget` 每轮校验 `is_child_of`，丢父即重嵌或回退。
-- 避让/occupant 枚举在嵌入下照常工作（枚举按 hwnd + 自身 pid 排除自己）；`embed_into_taskbar=false` 或删除该键即回到纯覆盖模式。
+- `embed_into_taskbar=false` 或删除该键即回到纯覆盖模式。
 
 ## 绘制与菜单
 
@@ -64,8 +60,7 @@
 
 ## 禁区
 
-- 不删白名单、不把天气板当普通 occupant、不动 `DesktopWindowContentBridge`。
+- 不动 `DesktopWindowContentBridge`；小组件板（天气）硬保留必须维持。
 - 不把 `SetLayeredWindowAttributes` 调两次（第二次会替换 colorkey 模式）。
-- 定位改动必须保留 hold/grace/jump-cap 三件套行为，并在终端用 occupant 日志验证（见 `docs/agent-build.md`）。
-- **UIA 缓存失效路径必须保留**：`TaskbarCreated` → `reset_hold_state` + `invalidate_widgets_cache`；`ensure_created` 必须重置 `TRAY_LAST` 签名，否则 explorer 重启后托盘图标不会重绘。
+- **UIA 缓存失效路径必须保留**：`TaskbarCreated` → `invalidate_widgets_cache`；`ensure_created` 必须重置 `TRAY_LAST` 签名，否则 explorer 重启后托盘图标不会重绘。
 - 改 `uia_events.rs` 时保持回调零共享状态（只 `PostMessageW`）：UIA 事件在任意线程投递。

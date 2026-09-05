@@ -17,10 +17,8 @@ pub struct Config {
     /// "left" | "right" — widget side relative to TrayNotifyWnd
     pub widget_side: String,
     pub avoid_overlap_with_widgets: bool,
-    /// Switch for third-party occupant avoidance (TrafficMonitor, Lyricify,
-    /// ...). Off = pin to the raw anchor, never yield, never hold. The Win11
-    /// widgets board (weather) is ALWAYS avoided regardless of this flag.
-    pub avoid_overlap: bool,
+    /// Reserved space after Start for the (XAML-invisible) taskbar app
+    /// icons on Win11.
     pub taskbar_left_space_win11: i32,
     pub taskbar_right_space_win11: i32,
     pub window_offset_left: i32,
@@ -54,7 +52,6 @@ impl Default for Config {
             synapse_version: "auto".into(),
             widget_side: "right".into(),
             avoid_overlap_with_widgets: true,
-            avoid_overlap: true,
             taskbar_left_space_win11: 160,
             taskbar_right_space_win11: 88,
             window_offset_left: 0,

@@ -62,7 +62,6 @@ fn translate(s: &'static str) -> &'static str {
         "Widget on right" => "挂件靠右",
         "Run at startup" => "开机自启",
         "Show tray icon" => "显示托盘图标",
-        "Avoid overlap (widgets board always avoided)" => "避免重叠（始终避让系统天气板）",
         "Show devices on hover" => "悬停显示设备列表",
         "Record battery history" => "记录电量历史",
         "Record interval" => "记录间隔",

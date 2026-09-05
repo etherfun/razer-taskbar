@@ -40,7 +40,7 @@ cargo test --quiet      # 单元测试（battery / watcher 解析规则）
 ## 配置速览
 
 - 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `serde(default)` 回填。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`widget_side`（left/right）、`avoid_overlap`、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 false）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`widget_side`（left/right）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 false）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
 - 自启动：`HKCU\...\Run\RazerTaskbar`，由菜单切换同步。
 
