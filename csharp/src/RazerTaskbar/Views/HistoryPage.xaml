@@ -15,11 +15,13 @@
                     <SolidColorBrush x:Key="ChartLineBrush" Color="#E8E8E8" />
                     <SolidColorBrush x:Key="ChartGreenBrush" Color="#6CCB5F" />
                     <SolidColorBrush x:Key="ChartOffBrush" Color="#7A7A7A" />
+                    <SolidColorBrush x:Key="ChartAccentBrush" Color="#60CDFF" />
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="ChartLineBrush" Color="#1B1B1B" />
                     <SolidColorBrush x:Key="ChartGreenBrush" Color="#3A8A32" />
                     <SolidColorBrush x:Key="ChartOffBrush" Color="#9A9A9A" />
+                    <SolidColorBrush x:Key="ChartAccentBrush" Color="#0078D4" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
             <DataTemplate x:Key="CycleItemTemplate" x:DataType="local:CycleItem">
@@ -61,28 +63,40 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <!-- Toolbar: device picker + range selector -->
-            <Grid Grid.Row="0">
+            <!-- Export feedback -->
+            <InfoBar x:Name="ExportInfoBar" Grid.Row="0" IsOpen="False" Severity="Informational" />
+
+            <!-- Toolbar: device picker + range selector + export -->
+            <Grid Grid.Row="1">
                 <ComboBox
                     x:Name="DeviceCombo"
                     Width="280"
                     HorizontalAlignment="Left"
                     SelectionChanged="Device_SelectionChanged" />
-                <RadioButtons
-                    x:Name="RangeButtons"
-                    MaxColumns="3"
-                    HorizontalAlignment="Right"
-                    SelectionChanged="Range_SelectionChanged">
-                    <RadioButton x:Name="Range7" Content="7 days" />
-                    <RadioButton x:Name="Range30" Content="30 days" IsChecked="True" />
-                    <RadioButton x:Name="RangeAll" Content="All" />
-                </RadioButtons>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="12">
+                    <Button x:Name="ExportButton" Click="Export_Click" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE74E;" FontSize="14" />
+                            <TextBlock x:Name="ExportButtonText" />
+                        </StackPanel>
+                    </Button>
+                    <RadioButtons
+                        x:Name="RangeButtons"
+                        MaxColumns="3"
+                        VerticalAlignment="Center"
+                        SelectionChanged="Range_SelectionChanged">
+                        <RadioButton x:Name="Range7" Content="7 days" />
+                        <RadioButton x:Name="Range30" Content="30 days" IsChecked="True" />
+                        <RadioButton x:Name="RangeAll" Content="All" />
+                    </RadioButtons>
+                </StackPanel>
             </Grid>
 
             <!-- Stat cards -->
-            <Grid Grid.Row="1">
+            <Grid Grid.Row="2">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="12" />
@@ -119,7 +133,7 @@
             </Grid>
 
             <!-- Chart card -->
-            <Border Grid.Row="2" Style="{StaticResource CardStyle}">
+            <Border Grid.Row="3" Style="{StaticResource CardStyle}">
                 <Grid RowSpacing="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -128,6 +142,8 @@
                     <Grid Grid.Row="0">
                         <TextBlock x:Name="ChartHeader" Style="{StaticResource CardCaptionStyle}" />
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="16">
+                            <ComboBox x:Name="CompareCombo" Width="150" VerticalAlignment="Center"
+                                      SelectionChanged="Compare_SelectionChanged" />
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Ellipse Width="8" Height="8" Fill="{ThemeResource ChartGreenBrush}"
                                          VerticalAlignment="Center" />
@@ -143,6 +159,12 @@
                                          VerticalAlignment="Center" />
                                 <TextBlock x:Name="LegendOff" Style="{StaticResource CardCaptionStyle}" />
                             </StackPanel>
+                            <StackPanel x:Name="CompareLegend" Orientation="Horizontal" Spacing="6"
+                                        Visibility="Collapsed">
+                                <Rectangle Width="10" Height="3" RadiusX="1" RadiusY="1"
+                                           Fill="{ThemeResource ChartAccentBrush}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="LegendCompare" Style="{StaticResource CardCaptionStyle}" />
+                            </StackPanel>
                         </StackPanel>
                     </Grid>
                     <controls:BatteryChart x:Name="Chart" Grid.Row="1" />
@@ -150,7 +172,7 @@
             </Border>
 
             <!-- Cycles list card -->
-            <Border Grid.Row="3" Style="{StaticResource CardStyle}">
+            <Border Grid.Row="4" Style="{StaticResource CardStyle}">
                 <Grid RowSpacing="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

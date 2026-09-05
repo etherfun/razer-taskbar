@@ -3,6 +3,7 @@
 //! Data flows straight from HistoryService (same process, thread-safe reads).
 
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using RazerTaskbar.Core;
@@ -46,6 +47,9 @@ public sealed partial class HistoryPage : Page
     /// collection while the first modification is still in progress (WinUI
     /// COMException). Guard mirrors SettingsPage._suppress.</summary>
     private bool _suppressSelection;
+    private List<Sample> _currentSamples = new();
+    /// <summary>Compare-series device ("" = none) for the chart overlay.</summary>
+    private string _compareHandle = "";
 
     public HistoryPage()
     {
@@ -60,10 +64,17 @@ public sealed partial class HistoryPage : Page
         Range7.Content = I18n.Tr("7 days");
         Range30.Content = I18n.Tr("30 days");
         RangeAll.Content = I18n.Tr("All");
+        ExportButtonText.Text = I18n.Tr("Export");
         ChartHeader.Text = I18n.Tr("Battery level");
         LegendCharging.Text = I18n.Tr("charging");
         LegendDischarging.Text = I18n.Tr("discharging");
         LegendOff.Text = I18n.Tr("off (excluded)");
+        // Accessibility names (screen readers announce the row label).
+        AutomationProperties.SetName(DeviceCombo, I18n.Tr("Shown device"));
+        AutomationProperties.SetName(ExportButton, I18n.Tr("Export"));
+        AutomationProperties.SetName(RangeButtons, I18n.Tr("Time range"));
+        AutomationProperties.SetName(CompareCombo, I18n.Tr("compare"));
+        AutomationProperties.SetName(Chart, I18n.Tr("Battery level"));
         Reload();
     }
 
@@ -88,6 +99,71 @@ public sealed partial class HistoryPage : Page
             1 => 30,
             _ => 0, // All
         };
+        Reload();
+    }
+
+    private async void Export_Click(object sender, RoutedEventArgs e)
+    {
+        ExportInfoBar.IsOpen = false;
+        if (_currentSamples.Count == 0)
+        {
+            ShowExportInfo(InfoBarSeverity.Warning, I18n.Tr("No data to export."));
+            return;
+        }
+        try
+        {
+            // Desktop (unpackaged) apps must associate pickers with an owner
+            // HWND: WindowNative.GetWindowHandle + InitializeWithWindow.
+            var picker = new Windows.Storage.Pickers.FileSavePicker();
+            if (!App.TryGetMainWindowHandle(out var hwnd))
+            {
+                return;
+            }
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            var name = _devices.FirstOrDefault(d => d.Handle == SelectedHandle()).Name ?? "device";
+            var safe = string.Join("", name.Split(Path.GetInvalidFileNameChars()));
+            picker.SuggestedFileName = $"razer-battery-{safe}-{DateTime.Now:yyyyMMdd-HHmm}";
+            picker.FileTypeChoices.Add("CSV", new List<string> { ".csv" });
+            picker.DefaultFileExtension = ".csv";
+            var file = await picker.PickSaveFileAsync();
+            if (file is null)
+            {
+                return; // user cancelled
+            }
+            File.WriteAllText(file.Path, ExportService.ToCsv(_currentSamples));
+            ShowExportInfo(InfoBarSeverity.Success, I18n.Tr("CSV exported ({})").Replace("{}", $"{_currentSamples.Count}"));
+        }
+        catch (Exception ex)
+        {
+            Log.Error("export failed", ex);
+            ShowExportInfo(InfoBarSeverity.Error, I18n.Tr("Export failed"));
+        }
+    }
+
+    private void ShowExportInfo(InfoBarSeverity severity, string message)
+    {
+        ExportInfoBar.Severity = severity;
+        ExportInfoBar.Message = message;
+        ExportInfoBar.IsOpen = true;
+    }
+
+    private void Compare_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection)
+        {
+            return;
+        }
+        if (CompareCombo.SelectedIndex <= 0)
+        {
+            _compareHandle = "";
+            Reload();
+            return;
+        }
+        // Index > 0 maps onto the roster order used to build the items
+        // (None + all devices except the main selection).
+        var others = _devices.Where(d => d.Handle != SelectedHandle()).ToList();
+        var idx = CompareCombo.SelectedIndex - 1;
+        _compareHandle = idx < others.Count ? others[idx].Handle : "";
         Reload();
     }
 
@@ -129,7 +205,8 @@ public sealed partial class HistoryPage : Page
         var handle = SelectedHandle();
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long since = _rangeDays > 0 ? now - (_rangeDays * 86400) : 0;
-        var samples = handle.Length > 0 ? HistoryService.SamplesInRange(handle, since) : new List<Sample>();
+        _currentSamples = handle.Length > 0 ? HistoryService.SamplesInRange(handle, since) : new List<Sample>();
+        var samples = _currentSamples;
 
         // Stat cards (viewer.rs paint values).
         var stats = HistoryService.CycleStatsOf(samples);
@@ -147,8 +224,38 @@ public sealed partial class HistoryPage : Page
             new Windows.UI.Color { A = 0xFF, R = 0x60, G = 0xCD, B = 0xFF });
         StatNowCaption.Text = I18n.Tr(est is { Charging: true } ? "until full (now)" : "time remaining now");
 
+        // Compare series picker: None + other recorded devices.
+        _suppressSelection = true;
+        try
+        {
+            var compareEntries = new List<DeviceEntry> { new("", I18n.Tr("None")) };
+            compareEntries.AddRange(_devices.Where(d => d.Handle != handle));
+            CompareCombo.ItemsSource = compareEntries.Select(d => d.Name).ToList();
+            var cIdx = compareEntries.FindIndex(d => d.Handle == _compareHandle);
+            CompareCombo.SelectedIndex = cIdx >= 0 ? cIdx : 0;
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
+        List<Sample>? compareSamples = null;
+        string? compareName = null;
+        if (_compareHandle.Length > 0 && _compareHandle != handle)
+        {
+            compareSamples = HistoryService.SamplesInRange(_compareHandle, since);
+            if (compareSamples.Count > 0)
+            {
+                compareName = _devices.FirstOrDefault(d => d.Handle == _compareHandle)?.Name;
+            }
+        }
+
         // Chart.
-        Chart.Render(samples);
+        Chart.Render(samples, compareSamples, compareName);
+        CompareLegend.Visibility = compareSamples is { Count: >= 2 } ? Visibility.Visible : Visibility.Collapsed;
+        if (compareName is not null)
+        {
+            LegendCompare.Text = $"{I18n.Tr("compare")} · {compareName}";
+        }
 
         // Cycle list: discharge + charge spans merged, newest first.
         var (discharge, charge) = HistoryService.ComputeSpans(samples);

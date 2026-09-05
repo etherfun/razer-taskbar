@@ -16,7 +16,12 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        SystemBackdrop = new MicaBackdrop();
+        // Mica exists on Windows 11 (22000+) only; on Windows 10 the backdrop
+        // is ignored and falls back to a solid color (docs: system-backdrops).
+        if (Environment.OSVersion.Version.Build >= 22000)
+        {
+            SystemBackdrop = new MicaBackdrop();
+        }
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
 

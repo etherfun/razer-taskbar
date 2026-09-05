@@ -5,6 +5,7 @@
 //! the watcher and other consumers pick changes up on their own cadence.
 
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using RazerTaskbar.Core;
 using RazerTaskbar.Native;
@@ -60,6 +61,17 @@ public sealed partial class SettingsPage : Page
             DescAutostart.Text = "Register HKCU\\...\\Run\\RazerTaskbar.";
             SideLeft.Content = I18n.Tr("Left");
             SideRight.Content = I18n.Tr("Right");
+            // Accessibility: screen readers announce the row label per control.
+            AutomationProperties.SetName(ComboDevice, LblShownDevice.Text);
+            AutomationProperties.SetName(SideButtons, LblSide.Text);
+            AutomationProperties.SetName(SwitchEst, LblEst.Text);
+            AutomationProperties.SetName(SwitchTray, LblTray.Text);
+            AutomationProperties.SetName(SwitchHover, LblHover.Text);
+            AutomationProperties.SetName(ComboPoll, LblPoll.Text);
+            AutomationProperties.SetName(SwitchRec, LblRec.Text);
+            AutomationProperties.SetName(ComboRecI, LblRecI.Text);
+            AutomationProperties.SetName(ComboLang, LblLang.Text);
+            AutomationProperties.SetName(SwitchAutostart, LblAutostart.Text);
 
             // Shown device (0 = All devices, then connected sorted by name).
             var devices = AppState.Instance.Devices.Snapshot();

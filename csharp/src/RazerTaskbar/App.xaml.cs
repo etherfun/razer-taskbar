@@ -61,6 +61,20 @@ public partial class App : Application
         });
     }
 
+    /// <summary>HWND of the main window (pickers require an owner window on
+    /// desktop apps; see learn.microsoft.com file-picker guidance).</summary>
+    public static bool TryGetMainWindowHandle(out IntPtr hwnd)
+    {
+        hwnd = 0;
+        var w = Instance._mainWindow;
+        if (w is null)
+        {
+            return false;
+        }
+        hwnd = WinRT.Interop.WindowNative.GetWindowHandle(w);
+        return hwnd != 0;
+    }
+
     /// <summary>Re-localize the (already created) window after a language switch.</summary>
     public static void SyncMainWindowLanguage()
     {

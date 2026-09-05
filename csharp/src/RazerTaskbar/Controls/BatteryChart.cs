@@ -1,11 +1,16 @@
-//! Port of viewer.rs draw_chart as a WinUI Shapes canvas: dotted grid at
-//! 0/50/100, off/charging band rectangles, area fill under connected runs,
-//! per-mode polyline segments (broken across off/gap stretches), orange
-//! battery-swap dots, and five local-time axis ticks. Theme-reactive:
-//! re-renders on ActualThemeChanged with a light/dark palette.
+// Port of viewer.rs draw_chart as a WinUI Shapes canvas: dotted grid at
+// 0/50/100, off/charging band rectangles, area fill under connected runs,
+// per-mode polyline segments (broken across off/gap stretches), orange
+// battery-swap dots, and five local-time axis ticks. Theme-reactive:
+// re-renders on ActualThemeChanged with a light/dark palette.
+//
+// P2 additions: an optional second (compare) series drawn in accent on the
+// same absolute-time axis, and a hover readout (vertical line + nearest-point
+// dot + stamp/level label) over the main series.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using RazerTaskbar.Core;
@@ -16,18 +21,39 @@ namespace RazerTaskbar.Controls;
 
 public sealed class BatteryChart : Canvas
 {
-    private IReadOnlyList<Sample> _samples = Array.Empty<Sample>();
+    private IReadOnlyList<Sample> _main = Array.Empty<Sample>();
+    private IReadOnlyList<Sample> _compare = Array.Empty<Sample>();
+    private string? _compareName;
+
+    // Plot geometry cached for hover math.
+    private long _t0;
+    private long _t1;
+    private double _x0;
+    private double _y0;
+    private double _plotW;
+    private double _plotH;
+
+    private readonly List<UIElement> _hoverElements = new();
 
     public BatteryChart()
     {
-        ActualThemeChanged += (_, _) => Render(_samples);
-        SizeChanged += (_, _) => Render(_samples);
+        ActualThemeChanged += (_, _) => Render(_main, _compare, _compareName);
+        SizeChanged += (_, _) => Render(_main, _compare, _compareName);
+        PointerMoved += OnPointerMoved;
+        PointerExited += (_, _) => ClearHover();
     }
 
-    /// <summary>Re-render with the given (ordered) samples.</summary>
     public void Render(IReadOnlyList<Sample> samples)
+        => Render(samples, null, null);
+
+    /// <summary>Render the main series (full treatment) plus an optional
+    /// compare series (accent lines only) on the same absolute-time axis.</summary>
+    public void Render(IReadOnlyList<Sample> main, IReadOnlyList<Sample>? compare, string? compareName)
     {
-        _samples = samples;
+        _main = main;
+        _compare = compare ?? Array.Empty<Sample>();
+        _compareName = compareName;
+        ClearHover();
         Children.Clear();
         if (ActualWidth < 40 || ActualHeight < 40)
         {
@@ -43,8 +69,9 @@ public sealed class BatteryChart : Canvas
         var gridBrush = Solid(dark ? 0x333333 : 0xDDDDDD);
         var swapBrush = Solid(dark ? 0xFFB900 : 0xC77800);
         var labelBrush = Solid(dark ? 0x7A7A7A : 0x9A9A9A);
+        var accentBrush = Solid(dark ? 0x60CDFF : 0x0078D4);
 
-        if (samples.Count < 2)
+        if (main.Count < 2)
         {
             var empty = new TextBlock
             {
@@ -62,50 +89,50 @@ public sealed class BatteryChart : Canvas
         // Plot rect: extra left room for the y labels, bottom for the time
         // axis (pad 12 / y-axis 26 / bottom 24 in the GDI original).
         double pad = 12, left = 26, bottom = 24, top = 8;
-        double x0 = left;
-        double y0 = top;
-        double plotW = Math.Max(ActualWidth - left - pad, 10);
-        double plotH = Math.Max(ActualHeight - top - bottom, 10);
+        _x0 = left;
+        _y0 = top;
+        _plotW = Math.Max(ActualWidth - left - pad, 10);
+        _plotH = Math.Max(ActualHeight - top - bottom, 10);
 
-        long t0 = samples[0].Ts;
-        long t1 = samples[^1].Ts;
-        double Span(long ts) => t1 == t0 ? 0 : (ts - t0) / (double)(t1 - t0);
-        double X(long ts) => x0 + (Span(ts) * plotW);
-        double Y(int level) => y0 + plotH - (Math.Clamp(level, 0, 100) / 100.0 * plotH);
+        // Absolute-time axis spans BOTH series so compare lines align.
+        _t0 = main[0].Ts;
+        _t1 = main[^1].Ts;
+        if (_compare.Count >= 2)
+        {
+            _t0 = Math.Min(_t0, _compare[0].Ts);
+            _t1 = Math.Max(_t1, _compare[^1].Ts);
+        }
+        long span = Math.Max(_t1 - _t0, 1);
+        double X(long ts) => _x0 + ((ts - _t0) / (double)span * _plotW);
+        double Y(int level) => _y0 + _plotH - (Math.Clamp(level, 0, 100) / 100.0 * _plotH);
 
         // Grid: dotted horizontal lines at 0/50/100 with right-aligned labels.
         foreach (var (lvl, label) in new[] { (100, "100"), (50, "50"), (0, "0") })
         {
             double gy = Y(lvl);
-            var gridLine = new Line
+            Children.Add(new Line
             {
-                X1 = x0,
+                X1 = _x0,
                 Y1 = gy,
-                X2 = x0 + plotW,
+                X2 = _x0 + _plotW,
                 Y2 = gy,
                 Stroke = gridBrush,
                 StrokeThickness = 1,
                 StrokeDashArray = new DoubleCollection { 2, 3 },
-            };
-            Children.Add(gridLine);
-            var tb = new TextBlock
-            {
-                Text = label,
-                Foreground = labelBrush,
-                FontSize = 11,
-            };
+            });
+            var tb = new TextBlock { Text = label, Foreground = labelBrush, FontSize = 11 };
             tb.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
             Children.Add(tb);
-            Canvas.SetLeft(tb, x0 - tb.DesiredSize.Width - 4);
+            Canvas.SetLeft(tb, _x0 - tb.DesiredSize.Width - 4);
             Canvas.SetTop(tb, gy - tb.DesiredSize.Height / 2);
         }
 
         // Bands per interval: off/unknown (disconnected or > GAP_BREAK_SECS)
         // → off band; charging → green band; discharging → none.
-        for (int i = 1; i < samples.Count; i++)
+        for (int i = 1; i < main.Count; i++)
         {
-            var prev = samples[i - 1];
-            var cur = samples[i];
+            var prev = main[i - 1];
+            var cur = main[i];
             long gap = cur.Ts - prev.Ts;
             bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
             Brush? band = active ? (cur.Charging ? greenBandBrush : null) : offBandBrush;
@@ -115,15 +142,10 @@ public sealed class BatteryChart : Canvas
             }
             double bx = X(prev.Ts);
             double bw = Math.Max(X(cur.Ts) - bx, 1);
-            var rect = new Rectangle
-            {
-                Width = bw,
-                Height = plotH,
-                Fill = band,
-            };
+            var rect = new Rectangle { Width = bw, Height = _plotH, Fill = band };
             Children.Add(rect);
             Canvas.SetLeft(rect, bx);
-            Canvas.SetTop(rect, y0);
+            Canvas.SetTop(rect, _y0);
         }
 
         // Area fill under contiguous connected runs, then the level line in
@@ -136,12 +158,11 @@ public sealed class BatteryChart : Canvas
         {
             if (areaPoints.Count >= 2)
             {
-                var polygon = new Polygon
+                Children.Add(new Polygon
                 {
                     Fill = areaBrush,
                     Points = PointCollectionOf(areaPoints),
-                };
-                Children.Add(polygon);
+                });
             }
             areaPoints.Clear();
         }
@@ -172,17 +193,16 @@ public sealed class BatteryChart : Canvas
             charge.Clear();
         }
 
-        // First sample seeds the runs when it is connected.
-        if (samples[0].Connected)
+        if (main[0].Connected)
         {
-            var p0 = new Windows.Foundation.Point(X(samples[0].Ts), Y(samples[0].Level));
+            var p0 = new Windows.Foundation.Point(X(main[0].Ts), Y(main[0].Level));
             areaPoints.Add(p0);
-            (samples[0].Charging ? charge : discharge).Add(p0);
+            (main[0].Charging ? charge : discharge).Add(p0);
         }
-        for (int i = 1; i < samples.Count; i++)
+        for (int i = 1; i < main.Count; i++)
         {
-            var prev = samples[i - 1];
-            var cur = samples[i];
+            var prev = main[i - 1];
+            var cur = main[i];
             long gap = cur.Ts - prev.Ts;
             bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
             if (!active)
@@ -193,8 +213,6 @@ public sealed class BatteryChart : Canvas
             }
             var pc = new Windows.Foundation.Point(X(cur.Ts), Y(cur.Level));
             var pp = new Windows.Foundation.Point(X(prev.Ts), Y(prev.Level));
-            // The area only keeps the fresh points of each run (the shared
-            // boundary point stays once per run).
             if (areaPoints.Count == 0 || areaPoints[^1] != pp)
             {
                 areaPoints.Add(pp);
@@ -208,32 +226,70 @@ public sealed class BatteryChart : Canvas
 
         // Swap markers: orange dot at any discharging rise >= 30 pct.
         const int SwapJumpPct = 30;
-        for (int i = 1; i < samples.Count; i++)
+        for (int i = 1; i < main.Count; i++)
         {
-            var prev = samples[i - 1];
-            var cur = samples[i];
+            var prev = main[i - 1];
+            var cur = main[i];
             if (!prev.Charging && !cur.Charging && cur.Level - prev.Level >= SwapJumpPct)
             {
                 double cx = X(cur.Ts);
                 double cy = Y(cur.Level);
                 const double r = 4;
-                var dot = new Ellipse
-                {
-                    Width = r * 2,
-                    Height = r * 2,
-                    Fill = swapBrush,
-                };
+                var dot = new Ellipse { Width = r * 2, Height = r * 2, Fill = swapBrush };
                 Children.Add(dot);
                 Canvas.SetLeft(dot, cx - r);
                 Canvas.SetTop(dot, cy - r);
             }
         }
 
+        // Compare series: accent lines over the same absolute-time axis.
+        if (_compare.Count >= 2)
+        {
+            var run = new List<Windows.Foundation.Point>();
+            void FlushCompare()
+            {
+                if (run.Count >= 2)
+                {
+                    Children.Add(new Polyline
+                    {
+                        Stroke = accentBrush,
+                        StrokeThickness = 1.5,
+                        StrokeLineJoin = PenLineJoin.Round,
+                        Points = PointCollectionOf(run),
+                    });
+                }
+                run.Clear();
+            }
+            if (_compare[0].Connected)
+            {
+                run.Add(new Windows.Foundation.Point(X(_compare[0].Ts), Y(_compare[0].Level)));
+            }
+            for (int i = 1; i < _compare.Count; i++)
+            {
+                var prev = _compare[i - 1];
+                var cur = _compare[i];
+                long gap = cur.Ts - prev.Ts;
+                bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
+                if (!active)
+                {
+                    FlushCompare();
+                    continue;
+                }
+                var pp = new Windows.Foundation.Point(X(prev.Ts), Y(prev.Level));
+                if (run.Count == 0 || run[^1] != pp)
+                {
+                    run.Add(pp);
+                }
+                run.Add(new Windows.Foundation.Point(X(cur.Ts), Y(cur.Level)));
+            }
+            FlushCompare();
+        }
+
         // Time axis: 5 evenly spaced local-time ticks (first left-aligned,
         // last right-aligned, rest centered).
         for (int k = 0; k <= 4; k++)
         {
-            long ts = t0 + (t1 - t0) * k / 4;
+            long ts = _t0 + (_t1 - _t0) * k / 4;
             var tb = new TextBlock
             {
                 Text = FormatStamp(ts),
@@ -242,7 +298,7 @@ public sealed class BatteryChart : Canvas
             };
             tb.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
             Children.Add(tb);
-            double x = x0 + (plotW * k / 4);
+            double x = _x0 + (_plotW * k / 4);
             double tx = k switch
             {
                 0 => x,
@@ -250,8 +306,106 @@ public sealed class BatteryChart : Canvas
                 _ => x - (tb.DesiredSize.Width / 2),
             };
             Canvas.SetLeft(tb, Math.Clamp(tx, 0, ActualWidth - tb.DesiredSize.Width));
-            Canvas.SetTop(tb, y0 + plotH + 6);
+            Canvas.SetTop(tb, _y0 + _plotH + 6);
         }
+    }
+
+    // — Hover readout (main series) —
+
+    private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (_main.Count < 2 || _plotW <= 0)
+        {
+            return;
+        }
+        var pt = e.GetCurrentPoint(this).Position;
+        if (pt.X < _x0 || pt.X > _x0 + _plotW || pt.Y < 0 || pt.Y > _y0 + _plotH + 20)
+        {
+            ClearHover();
+            return;
+        }
+        long span = Math.Max(_t1 - _t0, 1);
+        long ts = _t0 + (long)(((pt.X - _x0) / _plotW) * span);
+        // Nearest main-series sample (series is time-ascending).
+        int lo = 0, hi = _main.Count - 1;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) / 2;
+            if (_main[mid].Ts < ts)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+        if (lo > 0 && Math.Abs(_main[lo - 1].Ts - ts) < Math.Abs(_main[lo].Ts - ts))
+        {
+            lo -= 1;
+        }
+        var nearest = _main[lo];
+        long nSpan = Math.Max(_t1 - _t0, 1);
+        double x = _x0 + ((nearest.Ts - _t0) / (double)nSpan * _plotW);
+        double y = _y0 + _plotH - (Math.Clamp(nearest.Level, 0, 100) / 100.0 * _plotH);
+
+        bool dark = ActualTheme == ElementTheme.Dark;
+        var accent = Solid(dark ? 0x60CDFF : 0x0078D4);
+        var labelBg = Solid(dark ? 0x2B2B2B : 0xF7F7F7);
+        var labelFg = Solid(dark ? 0xF3F3F3 : 0x1B1B1B);
+
+        ClearHover();
+        var vline = new Line
+        {
+            X1 = x,
+            Y1 = _y0,
+            X2 = x,
+            Y2 = _y0 + _plotH,
+            Stroke = accent,
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 2, 2 },
+            IsHitTestVisible = false,
+        };
+        Children.Add(vline);
+        _hoverElements.Add(vline);
+        var dot = new Ellipse { Width = 7, Height = 7, Fill = accent, IsHitTestVisible = false };
+        Children.Add(dot);
+        Canvas.SetLeft(dot, x - 3.5);
+        Canvas.SetTop(dot, y - 3.5);
+        _hoverElements.Add(dot);
+        var label = new TextBlock
+        {
+            Text = $"{FormatStamp(nearest.Ts)}  {nearest.Level}%",
+            FontSize = 11,
+            Foreground = labelFg,
+            IsHitTestVisible = false,
+        };
+        label.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        var border = new Border
+        {
+            Background = labelBg,
+            BorderBrush = accent,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(6, 2, 6, 2),
+            Child = label,
+            IsHitTestVisible = false,
+        };
+        Children.Add(border);
+        double bx = Math.Clamp(x + 8, 0, Math.Max(ActualWidth - label.DesiredSize.Width - 16, 0));
+        double by = Math.Clamp(_y0 + 4, 0, Math.Max(ActualHeight - 28, 0));
+        Canvas.SetLeft(border, bx);
+        Canvas.SetTop(border, by);
+        _hoverElements.Add(border);
+    }
+
+    private void ClearHover()
+    {
+        foreach (var el in _hoverElements)
+        {
+            Children.Remove(el);
+        }
+        _hoverElements.Clear();
     }
 
     /// <summary>Local-time "yyyy-MM-dd HH:mm" (viewer.rs fmt_stamp parity).</summary>

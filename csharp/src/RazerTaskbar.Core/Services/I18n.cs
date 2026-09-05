@@ -97,6 +97,14 @@ public static class I18n
         "Cycles & charging sessions ({} recorded)" => "周期与充电会话（共 {} 条）",
         "USE" => "用电",
         "CHARGE" => "充电",
+        // History page export + compare
+        "Export" => "导出",
+        "Time range" => "时间范围",
+        "compare" => "对比",
+        "None" => "无",
+        "CSV exported ({})" => "CSV 已导出({})",
+        "No data to export." => "暂无可导出的数据。",
+        "Export failed" => "导出失败",
         // Settings page
         "Settings…" => "设置…",
         "Settings — Razer Taskbar" => "设置 — Razer Taskbar",
