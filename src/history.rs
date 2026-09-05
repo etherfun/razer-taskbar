@@ -568,6 +568,12 @@ pub fn format_estimate_compact(e: Estimate) -> String {
     }
 }
 
+/// Bare duration for the widget's second row ("3h25m"): the row's status
+/// icon (clock / charge glyph) already conveys charging, so no ~/+ prefix.
+pub fn format_estimate_plain(e: Estimate) -> String {
+    format_duration(e.secs)
+}
+
 /// Verbal text for the tray tooltip (localized sentence, neutral duration).
 pub fn format_estimate_verbose(e: Estimate) -> String {
     let d = format_duration(e.secs);

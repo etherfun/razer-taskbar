@@ -38,8 +38,25 @@ pub fn snap_size(h: i32) -> i32 {
     best
 }
 
-fn icon_font(h: i32) -> HFONT {
-    let h = snap_size(h);
+/// Cached icon font for `h` (snapped to Microsoft's magic sizes). Fonts live
+/// until process exit — a handful of handles, recreated only on DPI changes;
+/// create/delete per draw used to run on every repaint and hover relayout.
+/// Also serves the widget's battery glyph (same family + fallback). Handles
+/// are stored as raw ints because HFONT is not Send/Sync — GDI font handles
+/// are process-wide and usable from any thread, so this is only a type-level
+/// workaround.
+pub fn icon_font(h: i32) -> HFONT {
+    static CACHE: OnceLock<Mutex<HashMap<i32, isize>>> = OnceLock::new();
+    let snapped = snap_size(h);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    let handle = *cache
+        .entry(snapped)
+        .or_insert_with(|| create_icon_font(snapped).0 as isize);
+    HFONT(handle as *mut std::ffi::c_void)
+}
+
+fn create_icon_font(h: i32) -> HFONT {
     unsafe {
         let font = CreateFontW(
             h,
@@ -154,11 +171,12 @@ fn scan_ink_box(h: i32, kind: DeviceKind) -> Option<InkBox> {
         // Drawn at column `origin_x` so a negative left bearing stays inside
         // the bitmap. DT_VCENTER is omitted — it only shifts y, and horizontal
         // extents are what we measure (GDI rasterizes one bitmap per glyph
-        // and blits it, so they match the later on-screen draws).
+        // and blits them, so they match the later on-screen draws). DT_NOCLIP
+        // because the snapped font's line box can exceed the layout rect.
         let origin_x = h;
         let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
         let mut rc = RECT { left: origin_x, top: 0, right: w, bottom: h };
-        let _ = DrawTextW(mem, &mut buf, &mut rc, DT_SINGLELINE | DT_LEFT);
+        let _ = DrawTextW(mem, &mut buf, &mut rc, DT_SINGLELINE | DT_LEFT | DT_NOCLIP);
 
         let px = bits as *const u32;
         let mut min_x: Option<i32> = None;
@@ -178,7 +196,6 @@ fn scan_ink_box(h: i32, kind: DeviceKind) -> Option<InkBox> {
         }
 
         SelectObject(mem, old_font);
-        let _ = DeleteObject(font);
         SelectObject(mem, old_bmp);
         let _ = DeleteObject(hbmp);
         let _ = DeleteDC(mem);
@@ -216,11 +233,13 @@ pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8
             hdc,
             COLORREF(rgb.0 as u32 | ((rgb.1 as u32) << 8) | ((rgb.2 as u32) << 16)),
         );
+        // DT_NOCLIP: the snapped font's line box is usually taller than the
+        // layout box (a 16px font in a 14px slot), and without it DrawTextW
+        // shaves the glyph's top/bottom ink off.
         let mut rect = RECT { left: x - off, top: y, right: x - off + h * 2, bottom: y + h };
         let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
-        DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOCLIP);
         SelectObject(hdc, old_font);
-        let _ = DeleteObject(font);
         ink_w
     }
 }
@@ -234,7 +253,6 @@ fn glyph_metrics(hdc: HDC, h: i32, kind: DeviceKind) -> (i32, i32) {
         let mut abc = ABC { abcA: 0, abcB: 0, abcC: 0 };
         let ok = GetCharABCWidthsW(hdc, ch, ch, &mut abc).as_bool();
         SelectObject(hdc, old);
-        let _ = DeleteObject(font);
         if ok {
             (abc.abcA, abc.abcB as i32)
         } else {

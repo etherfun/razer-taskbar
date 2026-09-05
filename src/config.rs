@@ -28,8 +28,9 @@ pub struct Config {
     pub hover_devices: bool,
     /// Record battery samples to battery.db and predict usage time (`history.rs`).
     pub record_battery_history: bool,
-    /// Show the predicted remaining time in the taskbar widget (opt-in; the
-    /// widget widens to fit it).
+    /// Show the predicted remaining time as the widget's second row
+    /// (`history.rs`; the widget keeps its width — the prediction stacks
+    /// below the percentage instead of widening it).
     pub show_estimated_time: bool,
     /// Watcher cadence while recording is enabled — finer than the display
     /// poll so connect/charge/level transitions are timestamped precisely.
@@ -59,7 +60,7 @@ impl Default for Config {
             show_tray_icon: true,
             hover_devices: true,
             record_battery_history: true,
-            show_estimated_time: false,
+            show_estimated_time: true,
             history_poll_interval_secs: 5,
             language: "auto".into(),
             embed_into_taskbar: false,

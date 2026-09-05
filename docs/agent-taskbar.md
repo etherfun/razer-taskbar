@@ -5,7 +5,7 @@
 ## 窗口模型（`window.rs`）
 
 - 顶层 `WS_POPUP` + `WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE`，`HWND_TOPMOST`，`move_overlay` 定位（`SWP_NOACTIVATE | SWP_SHOWWINDOW`）。不是 `WS_CHILD`：子窗口会被 TranslucentTB 类 acrylic 盖住。
-- 尺寸：96 DPI 下 144×48，按 `GetDpiForWindow` 缩放。
+- 尺寸：96 DPI 下 144×40（双层内容压缩高度，任务栏带 48 内上下各留 4px，placement 自动居中），按 `GetDpiForWindow` 缩放。
 - `WM_NCHITTEST` 回 `HTTRANSPARENT`：覆盖层点击穿透，菜单只挂托盘图标（`WM_RBUTTONUP/DOWN` → `show_menu`）。
 
 ## 事件驱动布局（Taskbar-Lyrics 移植）
@@ -43,6 +43,7 @@
 
 ## 实验性嵌入模式（`embed_into_taskbar`，默认关）
 
+- **2026-09 在 Windows 26340（Insider）上确认失效**：子窗口存在（`EnumChildWindows` 可见、日志正常）但 DWM 不再合成带内分层子窗口的内容——无论新旧绘制代码均整窗不可见（对照实验：同机 overlay 模式渲染正常）。故本机应保持 `embed=false`；该模式留作未来 Windows 版本回测用。
 - `taskbar::set_taskbar_child`：Lyricify 任务栏歌词同款——跨进程 `SetParent` 进任务栏带（Win11 是 `Shell_TrayWnd`，Classic 是 `ReBarWindow32`），`WS_POPUP→WS_CHILD`、去 `WS_EX_TOPMOST`、保留 `WS_EX_LAYERED|NOACTIVATE`，并 `HWND_TOP` 保持兄弟第 0 位（压在 XAML 桥上）。子窗口随任务栏生灭，z 序争夺战（`arm_z_burst`/`z_covered`）整体跳过，改为每秒 `reassert_child_top`。
 - 坐标换算：定位数学输出带坐标，子窗口用父 CLIENT 坐标，差值即 `client_origin(parent)`。
 - 失败回退：`SetParent` 被拒（安全软件拦截等）置 `embed_failed` 粘性回退覆盖模式；explorer 重启后父窗被拆，`place_widget` 每轮校验 `is_child_of`，丢父即重嵌或回退。
@@ -50,9 +51,9 @@
 
 ## 绘制与菜单
 
-- `paint`：黑底整窗填充（colorkey 抠除）→ 只画字形/文字/阴影，TTB acrylic 可透出。字体 `Segoe Fluent Icons`（回退 `Segoe MDL2 Assets`）+ `Segoe UI Variable Text`（回退 `Segoe UI`），灰度抗锯齿；阴影 `0x202020`（纯黑会被抠掉）。
+- `paint`：黑底整窗填充（colorkey 抠除）→ 只画字形/文字/阴影，TTB acrylic 可透出。**双层布局（v3）**：设备类型图标（14px）独立于两行、全高垂直居中在左侧；其右为两行列：**图标列**（电池字形与状态图标在 `max(图标宽, 状态图标宽)` 的列内互相水平居中，共享一条垂直中心轴）+ **文本列**（两行文字同一 x 起笔）——上行 `[电池字形][百分比]`（字形 snap 20px、文字 14px semibold），下行 `[状态图标][预计时间]`（E823 时钟=放电、F607=充电；纯时长无 ~/+ 前缀 `format_estimate_plain`；文字 14px 常规，放电暗灰/充电白色）；无预测数据（功能关、无历史、离线）时回退单行全高居中（类型图标回到单行组内）。高度 40 / 宽度固定 144 基准，均不加宽。**竖向居中按墨迹而非行框**：`draw_shadowed_text` 内用 `GetGlyphOutlineW(GGO_METRICS)` 求字符串联合墨迹盒，算出行框不对称下伸留白造成的偏移量再平移矩形（`ink_center_delta`）——行框居中会让图标偏高、文字偏低。字体 `Segoe Fluent Icons`（回退 `Segoe MDL2 Assets`）+ `Segoe UI Variable Text`（回退 `Segoe UI`），灰度抗锯齿；阴影 `0x202020`（纯黑会被抠掉）。字体进程级缓存（`icons::icon_font` / `window::cached_text_font`，HFONT 以 isize 存储绕过非 Send/Sync），重绘零 CreateFont/DeleteObject。
 - 无设备/离线：灰色 + `--`。
-- 设备类型图标（`icons.rs`，纯 GDI 矢量）：鼠标 / 耳机 / 键盘 / 其他（USB dongle）。挂件布局 `[类型图标][电池字形][百分比]` 居中；无设备时不画类型图标。判定：V4 日志 `category` 字段（MOUSE/KEYBOARD/HEADSET/…）优先，回退 `device_kind` 产品名关键词，兜底 Other（`battery.rs` 有单测）。图标宽度经 `width_for` 参与居中计算。
+- 设备类型图标（`icons.rs`，纯 GDI 矢量）：鼠标 / 耳机 / 键盘 / 其他（USB dongle）。单行模式下挂件布局 `[类型图标][电池字形][百分比]` 居中；无设备时不画类型图标。判定：V4 日志 `category` 字段（MOUSE/KEYBOARD/HEADSET/…）优先，回退 `device_kind` 产品名关键词，兜底 Other（`battery.rs` 有单测）。图标宽度经 `width_for` 参与居中计算。注意：`draw`/`scan_ink_box` 必须 `DT_NOCLIP`——snap 后的字体行框常高于布局框（14px 槽位装 16px 字体），否则图标上下墨迹被 DrawTextW 裁掉。
 - 悬停设备面板（`hover.rs`）：挂件点击穿透收不到鼠标消息，`TIMER_HOVER`（120ms）轮询 `GetCursorPos`+`PtInRect` 检测悬停，静置 350ms 后显示。面板同为顶层分层 `NOACTIVATE` + `HTTRANSPARENT` 窗口（只读、不抢焦点、不挡点击）；光标在挂件或面板矩形外即隐藏。面板为圆角矩形（`RoundRect` 一笔填充+描边，直角落在 colorkey 黑上即透明），行布局 `[类型图标][电池字形][名称][充电闪电列（仅有个别行充电<50%时存在）][百分比]`，当前显示设备名称亮白。位置：底部任务栏向上弹出、顶部任务栏向下弹出，x 钳制进工作区；行内容/几何都有去重，无变化不重绘。菜单开关 `hover_devices`（默认开）。
 - 菜单（`show_menu`，托盘图标右键，刻意精简）：All devices + 已连接按名排序（快速切换）→ Settings… → Battery history… → Exit。ID 段：`ID_SETTINGS=1011`、`ID_DEVICE_BASE=2000`。
 - 设置窗口（`settings.rs`，"Settings…" 打开）：整合原菜单全部设置项，深色 Win11 风格同 `viewer.rs`（DWM 深色标题栏/圆角、卡片分区：挂件/电量记录/通用、owner-draw 左右侧 pill、DarkMode_Explorer 复选框与下拉）。单实例、跑在 UI 线程同一消息循环；所有改动即时应用 + 落盘（无 OK/Cancel），经 `window.rs` pub 辅助函数（`modify_config`/`set_shown_device`/`reposition_widget`/`config_snapshot`/`devices_arc`/`widget_hwnd`）改 `STATE.config` 并同步 UI 侧副作用（托盘重挂/隐藏、hover 隐藏、重排重绘、`i18n::set_setting` + tray/viewer/settings 三处 `sync_language`）。watcher 每轮重读 settings.json，改轮询/记录间隔无需重启。复选框/下拉的 `BM_SETCHECK`/`CB_SETCURSEL` 不回发 `BN_CLICKED`/`CBN_SELCHANGE`，刷新无回声问题。

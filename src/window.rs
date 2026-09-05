@@ -1,15 +1,17 @@
 //! Overlay widget floating above the taskbar (Taskbar-Lyrics style), native GDI battery UI.
 //!
 //! - Class `RazerTaskbarWidget`, top-level `WS_POPUP | WS_EX_LAYERED`, `HWND_TOPMOST`.
-//! - `WM_PAINT` draws a Win11-style battery glyph + percentage with text shadow
-//!   (readable over acrylic), black color-keyed transparent background.
+//! - `WM_PAINT` draws a Win11-style two-row widget — battery glyph +
+//!   percentage on top, predicted time below (see `history.rs`) — with text
+//!   shadow (readable over acrylic), black color-keyed transparent background.
 //! - Right-click menu lives on the tray icon (overlay is click-through).
 //! - Layout is event-driven (Taskbar-Lyrics port): `TaskbarCreated` broadcast
 //!   (explorer restart) and UIA structure-change events (`uia_events.rs`) both
 //!   trigger an immediately coalesced placement pass; the 1s timer stays as a
 //!   fallback poll that also drives the tray refresh.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
@@ -73,7 +75,10 @@ unsafe fn append_item(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u16, text: &'stat
 /// across moves, so only content/size changes need a real repaint).
 #[derive(Debug, Clone, PartialEq)]
 struct PaintSig {
-    label: String,
+    /// Row 1: the percentage ("100%") or "--" with no device.
+    top: String,
+    /// Row 2: compact predicted time ("~3h25m" / "+1h10m"); empty = no row.
+    bottom: String,
     level: u8,
     charging: bool,
     saver: bool,
@@ -360,20 +365,13 @@ fn dpi_scale(hwnd: HWND) -> f32 {
 
 fn widget_size(hwnd: HWND) -> (i32, i32) {
     let s = dpi_scale(hwnd);
-    // Widened while the predicted usage time shows next to the percentage.
-    let base_w = if state()
-        .map(|st| st.config.show_estimated_time)
-        .unwrap_or(false)
-    {
-        216.0
-    } else {
-        144.0
-    };
-    // Taskbar is 48px tall at 96 DPI: fill it edge-to-edge like TrafficMonitor
-    // instead of the old 32px-high floating look.
+    // 144px at 96 DPI fits the widest row (type icon + glyph + "100%"). The
+    // predicted time stacks as a second row instead of widening the widget.
+    // Height is compressed to 40px at 96 DPI (taskbar is 48): the two-row
+    // stack needs less than the full band, and placement centers it.
     (
-        ((base_w * s).round() as i32).max(96),
-        ((48.0 * s).round() as i32).max(32),
+        ((144.0 * s).round() as i32).max(96),
+        ((40.0 * s).round() as i32).max(32),
     )
 }
 
@@ -385,20 +383,22 @@ fn place_widget(hwnd: HWND) {
     let (w, h) = widget_size(hwnd);
     st.widget_w = w;
     st.widget_h = h;
-    let side = st.config.widget_side.clone();
-    let cfg = st.config.clone();
     let tray = st.tray;
 
+    // Borrow the config fields in place — this runs every second, and the
+    // old full `Config` clone allocated several Strings per pass just to
+    // read six scalars. The shared borrows end when compute_placement
+    // returns; everything below uses `st` freely again.
     let Some(pl) = taskbar::compute_placement(
         tray,
         w,
         h,
-        &side,
-        cfg.window_offset_left,
-        cfg.window_offset_top,
-        cfg.taskbar_left_space_win11,
-        cfg.taskbar_right_space_win11,
-        cfg.avoid_overlap_with_widgets,
+        &st.config.widget_side,
+        st.config.window_offset_left,
+        st.config.window_offset_top,
+        st.config.taskbar_left_space_win11,
+        st.config.taskbar_right_space_win11,
+        st.config.avoid_overlap_with_widgets,
     ) else {
         return;
     };
@@ -406,7 +406,7 @@ fn place_widget(hwnd: HWND) {
     // Experimental embed mode: keep the widget as a child of the taskbar band
     // (Lyricify-style) instead of a topmost overlay. The transition hides the
     // window, so it must run before the placement pass repositions it.
-    let want_embed = cfg.embed_into_taskbar && !st.embed_failed;
+    let want_embed = st.config.embed_into_taskbar && !st.embed_failed;
     if st.embedded != want_embed {
         if taskbar::set_taskbar_child(hwnd, pl.parent, want_embed) {
             st.embedded = want_embed;
@@ -702,13 +702,134 @@ fn handle_taskbar_created(hwnd: HWND) {
     place_widget(hwnd);
 }
 
-/// Win11-style battery UI: glyph + percentage, transparent background.
+/// Cached UI text font (Segoe UI Variable Text, falling back to Segoe UI),
+/// keyed by (pixel height, weight). Lives until process exit like the icon
+/// fonts — create/delete per repaint used to be this function's hot path.
+/// Handles are stored as raw ints because HFONT is not Send/Sync; GDI font
+/// handles are process-wide and usable from any thread.
+fn cached_text_font(height: i32, weight: i32) -> HFONT {
+    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), isize>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    let handle = *cache.entry((height, weight)).or_insert_with(|| unsafe {
+        let f = CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            ANTIALIASED_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            w!("Segoe UI Variable Text"),
+        );
+        // Fallback if the Variable font is missing (Win10 / older Win11).
+        let f = if f.is_invalid() {
+            CreateFontW(
+                height,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                ANTIALIASED_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                w!("Segoe UI"),
+            )
+        } else {
+            f
+        };
+        f.0 as isize
+    });
+    HFONT(handle as *mut std::ffi::c_void)
+}
+
+/// Vertical shift (px) so a DT_VCENTER draw of `text` centers the string's
+/// actual INK rather than its line box: line boxes carry asymmetric descent
+/// padding, so digits and Fluent icons ride visibly high inside tight rows.
+/// Union ink box of the string via GGO_METRICS, relative to the line box of
+/// the font currently selected in `hdc`; 0 when metrics are unavailable.
+unsafe fn ink_center_delta(hdc: HDC, text: &[u16]) -> i32 {
+    let mut tm = TEXTMETRICW::default();
+    if GetTextMetricsW(hdc, &mut tm).as_bool() && !text.is_empty() {
+        let (mut top, mut depth) = (i32::MIN, i32::MIN);
+        for &ch in text {
+            let mut gm = GLYPHMETRICS::default();
+            let mat = MAT2 {
+                eM11: FIXED { fract: 0, value: 1 },
+                eM12: FIXED { fract: 0, value: 0 },
+                eM21: FIXED { fract: 0, value: 0 },
+                eM22: FIXED { fract: 0, value: 1 },
+            };
+            if GetGlyphOutlineW(hdc, ch as u32, GGO_METRICS, &mut gm, 0, None, &mat)
+                != GDI_ERROR as u32
+            {
+                top = top.max(gm.gmptGlyphOrigin.y);
+                depth = depth.max(gm.gmBlackBoxY as i32 - gm.gmptGlyphOrigin.y);
+            }
+        }
+        if top >= i32::MIN / 2 {
+            return ((tm.tmDescent - tm.tmAscent) - (depth - top)) / 2;
+        }
+    }
+    0
+}
+
+/// Single-line text at `x`, vertically centered in `rect` by its INK, over a
+/// 1px drop shadow drawn first (never pure black — the color key would cut
+/// it out). DrawTextW only writes back into the buffer with DT_MODIFYSTRING,
+/// so one buffer serves both passes without cloning.
+unsafe fn draw_shadowed_text(
+    hdc: HDC,
+    font: HFONT,
+    text: &mut [u16],
+    x: i32,
+    rect: &RECT,
+    color: COLORREF,
+    shadow: COLORREF,
+) {
+    let _ = SelectObject(hdc, font);
+    let dy = ink_center_delta(hdc, text);
+    let mut r = RECT {
+        left: x + 1,
+        top: rect.top + 1 + dy,
+        right: rect.right,
+        bottom: rect.bottom + dy,
+    };
+    let _ = SetTextColor(hdc, shadow);
+    let _ = DrawTextW(hdc, text, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+    let mut r = RECT {
+        left: x,
+        top: rect.top + dy,
+        right: rect.right,
+        bottom: rect.bottom + dy,
+    };
+    let _ = SetTextColor(hdc, color);
+    let _ = DrawTextW(hdc, text, &mut r, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+}
+
+/// Two-row battery UI: row 1 = battery glyph + percentage, row 2 = status
+/// icon (E823 clock while discharging, F607 bolt while charging) + predicted
+/// time. The device-type icon stands alone, vertically centered across the
+/// full widget height. Transparent background.
 ///
-/// Design (v2): no chip background — magenta color-key keeps the window
-/// transparent so TTB acrylic / taskbar texture shows through. Only the
-/// glyph outline, proportional fill, bolt and text are drawn, all with a
-/// soft drop shadow for readability over busy backdrops. Layout is centered
-/// as a group and measured from the real text width (no fixed slots).
+/// Design (v3): the prediction stacks as a second, smaller row instead of
+/// widening the widget; without one (feature off, no history yet, device
+/// disconnected) row 1 is the only row, vertically centered, with the type
+/// icon back inside the single-row group. No chip background — the black
+/// color key keeps the window transparent so TTB acrylic / taskbar texture
+/// shows through. Every glyph and text gets a soft drop shadow for
+/// readability over busy backdrops; geometry is measured from real widths.
 fn paint(hwnd: HWND) {
     let device = {
         let st = state_mut();
@@ -725,26 +846,25 @@ fn paint(hwnd: HWND) {
         .unwrap_or((0, false));
     let saver = device.as_ref().map(|d| d.battery_saver).unwrap_or(false);
     let connected = device.as_ref().map(|d| d.is_connected).unwrap_or(false);
-    // Percentage text (+ predicted usage time when enabled). No device yet:
-    // dim "--".
-    let label = device
+    // Row 1: percentage (dim "--" with no device). Row 2: the bare duration
+    // (the row's status icon conveys charging) — needs the feature on, a
+    // connected device, and an estimate derived from recorded history.
+    let top_label = device
         .as_ref()
         .filter(|_| connected)
-        .map(|d| {
-            let mut l = format!("{}%", d.battery_percentage);
-            if st.config.show_estimated_time {
-                if let Some(e) = crate::history::estimate_for(&d.handle) {
-                    l.push_str(&format!(
-                        " · {}",
-                        crate::history::format_estimate_compact(e)
-                    ));
-                }
-            }
-            l
-        })
+        .map(|d| format!("{}%", d.battery_percentage))
         .unwrap_or_else(|| "--".into());
+    let bottom_label = if st.config.show_estimated_time && connected {
+        device
+            .as_ref()
+            .and_then(|d| crate::history::estimate_for(&d.handle))
+            .map(crate::history::format_estimate_plain)
+    } else {
+        None
+    };
     let sig = PaintSig {
-        label: label.clone(),
+        top: top_label.clone(),
+        bottom: bottom_label.clone().unwrap_or_default(),
         level,
         charging,
         saver,
@@ -775,11 +895,10 @@ fn paint(hwnd: HWND) {
             }
         }
         let mut ps = PAINTSTRUCT::default();
-        let screen_hdc = BeginPaint(hwnd, &mut ps);
-        if screen_hdc.is_invalid() {
+        let hdc = BeginPaint(hwnd, &mut ps);
+        if hdc.is_invalid() {
             return;
         }
-        let hdc = screen_hdc;
         // Transparent base: black color-key is cut out (LWA_COLORKEY),
         // so only drawn pixels are visible over acrylic/taskbar.
         let key_brush = CreateSolidBrush(COLORREF(0x00000000));
@@ -793,94 +912,23 @@ fn paint(hwnd: HWND) {
         let _ = DeleteObject(key_brush);
         let _ = SetBkMode(hdc, TRANSPARENT);
 
-        // Palette: white glyph/text, dark-gray shadow, level fill colors.
-        // Shadow must NOT be pure black — it would match the color key and
-        // be cut out. Grayscale (not ClearType) antialiasing avoids colored
-        // subpixel fringe around glyphs.
+        // Palette: white glyph/text, dim gray secondary row, dark-gray
+        // shadow. Shadow must NOT be pure black — it would match the color
+        // key and be cut out. Grayscale (not ClearType) antialiasing avoids
+        // colored subpixel fringe around glyphs.
         let fg_color = COLORREF(0x00FFFFFF);
         let dim = COLORREF(0x00B0B0B0);
         let shadow = COLORREF(0x00202020);
 
-        // Native Win11 glyphs: Segoe Fluent Icons battery (EBA0 series) +
-        // Segoe UI Variable Text for the percentage. Both ship with Win11.
-        // Icon fonts snap to Microsoft's magic pixel sizes (16/20/24/…)
-        // for crisp rendering.
-        let icon_h = crate::icons::snap_size((22.0 * scale).round() as i32);
-        let hicon_font = CreateFontW(
-            icon_h,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            ANTIALIASED_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            w!("Segoe Fluent Icons"),
-        );
-        // Fallback for Win10 (no Fluent Icons font).
-        let hicon_font = if hicon_font.is_invalid() {
-            CreateFontW(
-                icon_h,
-                0,
-                0,
-                0,
-                FW_NORMAL.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET.0 as u32,
-                OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                ANTIALIASED_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                w!("Segoe MDL2 Assets"),
-            )
-        } else {
-            hicon_font
-        };
-        let font_h = (16.0 * scale).round() as i32;
-        let hfont = CreateFontW(
-            font_h,
-            0,
-            0,
-            0,
-            FW_SEMIBOLD.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            ANTIALIASED_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            w!("Segoe UI Variable Text"),
-        );
-        // Fallback if the Variable font is missing (Win10 / older Win11).
-        let hfont = if hfont.is_invalid() {
-            CreateFontW(
-                font_h,
-                0,
-                0,
-                0,
-                FW_SEMIBOLD.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET.0 as u32,
-                OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                ANTIALIASED_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                w!("Segoe UI"),
-            )
-        } else {
-            hfont
-        };
+        // Fonts are process-cached (icons::icon_font / cached_text_font):
+        // four CreateFontW + two DeleteObject per repaint used to run here.
+        // Native Win11 glyphs: Segoe Fluent Icons battery (EBA0 series);
+        // icon fonts snap to Microsoft's magic pixel sizes (16/20/24/…)
+        // for crisp rendering. Row 1 is half the window now, so the glyph
+        // and percentage scale down from the single-row-era sizes.
+        let icon_h = crate::icons::snap_size((20.0 * scale).round() as i32);
+        let hicon_font = crate::icons::icon_font(icon_h);
+        let hfont = cached_text_font((14.0 * scale).round() as i32, FW_SEMIBOLD.0 as i32);
         let old_font = SelectObject(hdc, hfont);
 
         let (fr, fg, fb) = if connected {
@@ -889,7 +937,7 @@ fn paint(hwnd: HWND) {
             (0x80, 0x80, 0x80)
         };
         let text_color = if connected { fg_color } else { dim };
-        let mut wide: Vec<u16> = label.encode_utf16().collect();
+        let mut wide: Vec<u16> = top_label.encode_utf16().collect();
         // Measure text first so the glyph+text group can be centered.
         let mut measure = RECT {
             left: 0,
@@ -908,7 +956,7 @@ fn paint(hwnd: HWND) {
         // (Win11 per-level sets, 11 glyphs each): normal EBA0-EBAA, charging
         // bolt EBAB-EBB5, saver leaf EBB6-EBC0. A disconnected device draws
         // the plain (gray) normal glyph.
-        let state = if !connected {
+        let glyph_state = if !connected {
             crate::battery::BatteryGlyphState::Normal
         } else if saver {
             crate::battery::BatteryGlyphState::Saver
@@ -917,7 +965,7 @@ fn paint(hwnd: HWND) {
         } else {
             crate::battery::BatteryGlyphState::Normal
         };
-        let icon_ch = [crate::battery::battery_glyph(level, state) as u16];
+        let mut icon_ch = [crate::battery::battery_glyph(level, glyph_state) as u16];
         let mut icon_measure = RECT {
             left: 0,
             top: 0,
@@ -927,249 +975,140 @@ fn paint(hwnd: HWND) {
         let _ = SelectObject(hdc, hicon_font);
         DrawTextW(
             hdc,
-            &mut icon_ch.clone(),
+            &mut icon_ch,
             &mut icon_measure,
             DT_SINGLELINE | DT_CALCRECT | DT_LEFT,
         );
         let icon_w = (icon_measure.right - icon_measure.left).max(1);
         let _ = SelectObject(hdc, hfont);
-        // Geometry: [device-type icon] [battery glyph] [percentage], the
-        // group centered. The type icon is omitted while no device is
-        // shown ("--") — nothing meaningful to classify then.
-        let gap = (6.0 * scale).round() as i32;
+        // Row split: two stacked half-height rows while a prediction shows,
+        // otherwise row 1 spans the full height (the old single-row look).
+        let two_rows = bottom_label.is_some();
+        let top_rect = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: if two_rows { h / 2 } else { h },
+        };
+
+        // Row-2 content, measured up front so the column geometry can use
+        // it: [status icon] [gap] [time]. The discharging prediction gets
+        // the recent/clock glyph (E823), charging gets the charge glyph
+        // (F607) — Segoe Fluent Icons, same MDL2 fallback. The fonts are
+        // cached lookups, so they are created unconditionally and reused
+        // by the draw pass below.
+        let mut est_ch = [0u16; 1];
+        let mut est_wide: Vec<u16> = Vec::new();
+        let mut est_icon_w = 0;
+        let mut est_w = 0;
+        let est_icon_font =
+            crate::icons::icon_font(crate::icons::snap_size((14.0 * scale).round() as i32));
+        let est_font = cached_text_font((14.0 * scale).round() as i32, FW_NORMAL.0 as i32);
+        if let Some(est_text) = bottom_label.as_deref() {
+            est_ch[0] = if charging { '\u{F607}' } else { '\u{E823}' } as u16;
+            est_wide = est_text.encode_utf16().collect();
+            let _ = SelectObject(hdc, est_icon_font);
+            let mut m = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            DrawTextW(hdc, &mut est_ch, &mut m, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
+            est_icon_w = (m.right - m.left).max(1);
+            let _ = SelectObject(hdc, est_font);
+            let mut m = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            DrawTextW(hdc, &mut est_wide, &mut m, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
+            est_w = (m.right - m.left).max(1);
+            let _ = SelectObject(hdc, hfont);
+        }
+
+        // Geometry. Two rows: the type icon stands alone on the left,
+        // vertically centered across the FULL widget height (not tied to
+        // row 1). The two rows form a column with a shared ICON COLUMN: the
+        // bigger battery glyph and the smaller status icon center on one
+        // vertical axis, and both texts start at the same x — naive
+        // left-alignment made the narrow clock look off-center next to the
+        // wide battery glyph. Single row: the old centered [type icon]
+        // [glyph] [percentage] group. The type icon is omitted while no
+        // device is shown ("--").
+        let gap = (5.0 * scale).round() as i32;
         let kind = device.as_ref().map(|d| d.kind);
-        let kind_h = (16.0 * scale).round() as i32;
+        let kind_h = (14.0 * scale).round() as i32;
         let kind_w = kind
             .map(|k| crate::icons::width_for(hdc, kind_h, k))
             .unwrap_or(0);
         let kind_gap = if kind.is_some() { gap } else { 0 };
-        let group_w = kind_w + kind_gap + icon_w + gap + text_w;
-        let group_x = (w - group_w) / 2;
-        let icon_x = group_x + kind_w + kind_gap;
-        let text_x = icon_x + icon_w + gap;
+        let (group_x, icon_x, text_x, est_icon_x, est_text_x) = if two_rows {
+            let icon_col_w = icon_w.max(est_icon_w);
+            let row1_w = icon_col_w + gap + text_w;
+            let row2_w = icon_col_w + gap + est_w;
+            let group_w = kind_w + kind_gap + row1_w.max(row2_w);
+            let gx = (w - group_w) / 2;
+            let cx = gx + kind_w + kind_gap;
+            let tx = cx + icon_col_w + gap;
+            (
+                gx,
+                cx + (icon_col_w - icon_w) / 2,
+                tx,
+                cx + (icon_col_w - est_icon_w) / 2,
+                tx,
+            )
+        } else {
+            let group_w = kind_w + kind_gap + icon_w + gap + text_w;
+            let gx = (w - group_w) / 2;
+            let ix = gx + kind_w + kind_gap;
+            (gx, ix, ix + icon_w + gap, 0, 0)
+        };
         if let Some(k) = kind {
             let kc = if connected {
                 (0xFF, 0xFF, 0xFF)
             } else {
                 (0x80, 0x80, 0x80)
             };
-            crate::icons::draw(hdc, group_x, (h - kind_h) / 2, kind_h, k, kc);
+            let kind_y = (h - kind_h) / 2;
+            crate::icons::draw(hdc, group_x, kind_y, kind_h, k, kc);
         }
-        // Native icon glyph (level-tinted) with drop shadow.
+        // Level-tinted battery glyph with drop shadow.
         let icon_rgb = if connected {
             (fr, fg, fb)
         } else {
             (0x80, 0x80, 0x80)
         };
-        let _ = SelectObject(hdc, hicon_font);
-        let mut icon_shadow_rect = RECT {
-            left: icon_x + 1,
-            top: 1,
-            right: w,
-            bottom: h,
-        };
-        let _ = SetTextColor(hdc, shadow);
-        let _ = DrawTextW(
-            hdc,
-            &mut icon_ch.clone(),
-            &mut icon_shadow_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-        );
-        let mut icon_rect = RECT {
-            left: icon_x,
-            top: 0,
-            right: w,
-            bottom: h,
-        };
-        let _ = SetTextColor(
-            hdc,
-            COLORREF(icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16)),
-        );
-        DrawTextW(
-            hdc,
-            &mut icon_ch.clone(),
-            &mut icon_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-        );
-        let _ = SelectObject(hdc, hfont);
-        // Text with drop shadow (offset 1px, drawn first underneath).
-        let mut shadow_rect = RECT {
-            left: text_x + 1,
-            top: 1,
-            right: w,
-            bottom: h,
-        };
-        let _ = SetTextColor(hdc, shadow);
-        let _ = DrawTextW(
-            hdc,
-            &mut wide.clone(),
-            &mut shadow_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-        );
-        let mut text_rect = RECT {
-            left: text_x,
-            top: 0,
-            right: w,
-            bottom: h,
-        };
-        let _ = SetTextColor(hdc, text_color);
-        DrawTextW(
-            hdc,
-            &mut wide,
-            &mut text_rect,
-            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
-        );
+        let icon_color =
+            COLORREF(icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16));
+        draw_shadowed_text(hdc, hicon_font, &mut icon_ch, icon_x, &top_rect, icon_color, shadow);
+        draw_shadowed_text(hdc, hfont, &mut wide, text_x, &top_rect, text_color, shadow);
+
+        // Row 2: the prediction with its status icon, left-aligned under
+        // row 1, dimmed while discharging (white while charging). Icon and
+        // text share the row rect, so DT_VCENTER centers both on the same
+        // optical line.
+        if two_rows {
+            let est_rect = RECT {
+                left: 0,
+                top: h / 2,
+                right: w,
+                bottom: h,
+            };
+            let est_color = if charging { fg_color } else { dim };
+            draw_shadowed_text(
+                hdc,
+                est_icon_font,
+                &mut est_ch,
+                est_icon_x,
+                &est_rect,
+                est_color,
+                shadow,
+            );
+            draw_shadowed_text(
+                hdc,
+                est_font,
+                &mut est_wide,
+                est_text_x,
+                &est_rect,
+                est_color,
+                shadow,
+            );
+        }
         let _ = SelectObject(hdc, old_font);
-        let _ = DeleteObject(hfont);
-        let _ = DeleteObject(hicon_font);
         st.painted_sig = Some(sig);
         let _ = EndPaint(hwnd, &ps);
-    }
-}
-
-/// Draw the battery glyph (legacy GDI path, kept for reference).
-/// v2 design: 1px outline, inset fill with rounded ends, nub cap, and a
-/// white bolt with dark edge when charging (readable over any fill level).
-#[allow(dead_code, clippy::too_many_arguments)]
-fn draw_battery_glyph(
-    hdc: HDC,
-    body_x: i32,
-    body_y: i32,
-    body_w: i32,
-    body_h: i32,
-    cap_w: i32,
-    scale: f32,
-    level: u8,
-    charging: bool,
-    connected: bool,
-    fill_rgb: (u8, u8, u8),
-    fg: COLORREF,
-    shadow: COLORREF,
-) {
-    unsafe {
-        let cap_h = ((body_h as f32 * 0.45).round() as i32).max(5);
-        let cap_y = body_y + (body_h - cap_h) / 2;
-        // Shadow pass (offset +1,+1, black): outline + cap silhouettes.
-        let sh_pen = CreatePen(PS_SOLID, 1, shadow);
-        let old_pen = SelectObject(hdc, sh_pen);
-        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(
-            hdc,
-            body_x + 1,
-            body_y + 1,
-            body_x + body_w + 1,
-            body_y + body_h + 1,
-            5,
-            5,
-        );
-        let sh_cap = CreateSolidBrush(shadow);
-        let _ = SelectObject(hdc, sh_cap);
-        let _ = RoundRect(
-            hdc,
-            body_x + body_w + 2,
-            cap_y + 1,
-            body_x + body_w + 2 + cap_w,
-            cap_y + 1 + cap_h,
-            2,
-            2,
-        );
-        let _ = DeleteObject(sh_cap);
-        let _ = SelectObject(hdc, old_pen);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = DeleteObject(sh_pen);
-        // Foreground outline + cap.
-        let outline = CreatePen(PS_SOLID, 1, fg);
-        let old_pen = SelectObject(hdc, outline);
-        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(hdc, body_x, body_y, body_x + body_w, body_y + body_h, 5, 5);
-        let cap_brush = CreateSolidBrush(fg);
-        let _ = SelectObject(hdc, cap_brush);
-        let _ = RoundRect(
-            hdc,
-            body_x + body_w + 1,
-            cap_y,
-            body_x + body_w + 1 + cap_w,
-            cap_y + cap_h,
-            2,
-            2,
-        );
-        let _ = DeleteObject(cap_brush);
-        // Inset fill with rounded ends: inset 2px, radius follows body.
-        let (fr, fg_, fb) = if connected {
-            fill_rgb
-        } else {
-            (0x80, 0x80, 0x80)
-        };
-        let inner_w = (body_w - 4).max(0);
-        let fill_w = inner_w * level.clamp(0, 100) as i32 / 100;
-        if fill_w > 0 {
-            let fill = CreateSolidBrush(COLORREF(
-                fr as u32 | ((fg_ as u32) << 8) | ((fb as u32) << 16),
-            ));
-            let old_fill = SelectObject(hdc, fill);
-            let old_pen2 = SelectObject(hdc, GetStockObject(NULL_PEN));
-            let fx = body_x + 2;
-            let fy = body_y + 2;
-            let fh = (body_h - 4).max(1);
-            let _ = RoundRect(hdc, fx, fy, fx + fill_w.max(2), fy + fh, 3, 3);
-            let _ = SelectObject(hdc, old_pen2);
-            let _ = SelectObject(hdc, old_fill);
-            let _ = DeleteObject(fill);
-        }
-        // Charging bolt: white core + dark edge, centered on the glyph.
-        if charging {
-            let cx = body_x + body_w / 2;
-            let cy = body_y + body_h / 2;
-            let s = scale.max(1.0);
-            let pts = [
-                POINT {
-                    x: (cx as f32 + 1.6 * s) as i32,
-                    y: (cy as f32 - 5.5 * s) as i32,
-                },
-                POINT {
-                    x: (cx as f32 - 2.2 * s) as i32,
-                    y: (cy as f32 + 1.2 * s) as i32,
-                },
-                POINT {
-                    x: (cx as f32 - 0.2 * s) as i32,
-                    y: (cy as f32 + 1.2 * s) as i32,
-                },
-                POINT {
-                    x: (cx as f32 - 1.6 * s) as i32,
-                    y: (cy as f32 + 5.5 * s) as i32,
-                },
-                POINT {
-                    x: (cx as f32 + 2.2 * s) as i32,
-                    y: (cy as f32 - 1.2 * s) as i32,
-                },
-                POINT {
-                    x: (cx as f32 + 0.2 * s) as i32,
-                    y: (cy as f32 - 1.2 * s) as i32,
-                },
-            ];
-            // Dark edge: draw the polygon expanded by 1px first.
-            let edge = CreateSolidBrush(COLORREF(0x001A1A1A));
-            let _ = SelectObject(hdc, edge);
-            let grown: Vec<POINT> = pts.iter().map(|p| POINT { x: p.x, y: p.y }).collect();
-            let _ = Polygon(hdc, &pts);
-            let _ = DeleteObject(edge);
-            // White core, slightly smaller.
-            let core = CreateSolidBrush(COLORREF(0x00FFFFFF));
-            let _ = SelectObject(hdc, core);
-            let inset: Vec<POINT> = pts
-                .iter()
-                .map(|p| POINT {
-                    x: cx + ((p.x - cx) * 3 / 4),
-                    y: cy + ((p.y - cy) * 3 / 4),
-                })
-                .collect();
-            let _ = Polygon(hdc, &inset);
-            let _ = DeleteObject(core);
-            let _ = grown;
-        }
-        let _ = SelectObject(hdc, old_pen);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = DeleteObject(outline);
     }
 }
 
