@@ -180,6 +180,15 @@ pub fn invalidate_widget() {
     }
 }
 
+/// Force the next WM_PAINT to really redraw instead of hitting the
+/// `painted_sig` dedup. Needed after a hide/show cycle: the layered
+/// surface is re-created blank, and skipping the repaint would leave the
+/// widget transparent until the drawn content happens to change.
+pub fn invalidate_paint_cache() {
+    let st = state_mut();
+    st.painted_sig = None;
+}
+
 /// Switch the displayed device ("" = auto). Shared by the tray menu and the
 /// settings window: stamps `is_selected` so `pick_device_to_display` follows
 /// immediately (the watcher re-reads the config each cycle regardless).

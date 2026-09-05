@@ -29,7 +29,8 @@ use std::time::{Duration, Instant};
 
 use windows::core::{w, BSTR, VARIANT};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Dwm::DwmFlush;
+use windows::Win32::Graphics::Gdi::{ClientToScreen, InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,13 +335,49 @@ fn shrink_to_content(occupants: &mut [Occupant], self_hwnd: HWND) {
         if was_visible {
             unsafe {
                 let _ = ShowWindow(self_hwnd, SW_HIDE);
+                // Hiding a child of the tray exposes a region whose pixels
+                // live in the tray's own redirection surface — which still
+                // holds our last rendering there and is repainted lazily.
+                // BitBlt reads that surface, so without this flush the
+                // sampler sees our old position as the occupant's content
+                // (observed live: a phantom 178px block chasing a position
+                // we had already left). Force the repaint synchronously.
+                let parent = GetAncestor(self_hwnd, GA_PARENT);
+                if !parent.0.is_null() {
+                    let live = live.unwrap_or_default();
+                    let mut pt = POINT { x: 0, y: 0 };
+                    let _ = ClientToScreen(parent, &mut pt);
+                    let rc = RECT {
+                        left: live.left - pt.x,
+                        top: live.top - pt.y,
+                        right: live.right - pt.x,
+                        bottom: live.bottom - pt.y,
+                    };
+                    let _ = InvalidateRect(parent, Some(&rc), false);
+                    let _ = UpdateWindow(parent);
+                }
             }
+        }
+        // SW_HIDE is asynchronous w.r.t. composition, and a single BitBlt
+        // during DWM churn can return a torn or stale frame (observed live:
+        // our own text at a just-left position phantom-blocking 178px). The
+        // 3-frame per-column vote inside visible_content_rect filters those.
+        unsafe {
+            let _ = DwmFlush();
+            std::thread::sleep(Duration::from_millis(30));
         }
         let sampled = visible_content_rect(&o.rect);
         if was_visible {
             unsafe {
                 let _ = ShowWindow(self_hwnd, SW_SHOWNA);
+                // A shown layered child does not reliably get its surface
+                // back: DWM may consider the old surface valid while it has
+                // actually been dropped, leaving the widget permanently
+                // invisible (observed live after a hide/show cycle). Force a
+                // repaint so the colorkey surface is rebuilt.
+                let _ = InvalidateRect(self_hwnd, None, true);
             }
+            crate::window::invalidate_paint_cache();
         }
         o.content = sampled;
         if let Ok(mut c) = content_cache().lock() {
@@ -406,17 +443,6 @@ fn visible_content_rect(rect: &RECT) -> Option<RECT> {
         let old = SelectObject(hdc_mem, hbmp);
         // CAPTUREBLT: also capture layered windows above us so the sample
         // reflects what the user actually sees.
-        let ok = BitBlt(
-            hdc_mem,
-            0,
-            0,
-            w,
-            h,
-            hdc_screen,
-            rect.left,
-            rect.top,
-            SRCCOPY | CAPTUREBLT,
-        );
         let mut bits = vec![0u32; (w * h) as usize];
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -434,51 +460,86 @@ fn visible_content_rect(rect: &RECT) -> Option<RECT> {
             },
             ..Default::default()
         };
-        let rows = GetDIBits(
-            hdc_mem,
-            hbmp,
-            0,
-            h as u32,
-            Some(bits.as_mut_ptr() as *mut _),
-            &mut bmi,
-            DIB_RGB_COLORS,
-        );
-        let _ = SelectObject(hdc_mem, old);
-        let _ = DeleteObject(hbmp);
-        let _ = DeleteDC(hdc_mem);
-        let _ = ReleaseDC(None, hdc_screen);
-        if ok.is_err() || rows == 0 {
-            return None;
-        }
-        let at = |x: i32, y: i32| -> u32 { bits[(y * w + x) as usize] & 0x00FF_FFFF };
         let dist = |a: u32, b: u32| -> i32 {
             let dr = ((a & 0xFF) as i32 - (b & 0xFF) as i32).abs();
             let dg = (((a >> 8) & 0xFF) as i32 - ((b >> 8) & 0xFF) as i32).abs();
             let db = (((a >> 16) & 0xFF) as i32 - ((b >> 16) & 0xFF) as i32).abs();
             dr + dg + db
         };
-        // Per-column background = median of a vertical sample stride; the
-        // gradient drifts horizontally but is near-constant vertically.
+        // THREE captures spaced by a composition flush, combined per-column
+        // by majority vote. Per-column background = median of a vertical
+        // sample stride (the gradient drifts horizontally but is
+        // near-constant vertically); a column is ink when >=2 of its samples
+        // deviate from the column median. The vote filters single-frame
+        // phantoms: one BitBlt during DWM churn (a neighbour moving, our own
+        // hide) can carry stale or torn columns that pass for content.
+        let mut votes = vec![0u8; w as usize];
+        let mut ok_captures = 0u8;
         let mut samples: Vec<u32> = Vec::with_capacity((h / 4 + 1) as usize);
         let mut sorted: Vec<u32> = Vec::with_capacity(samples.capacity());
-        let (mut lo, mut hi) = (w, -1);
-        for x in 0..w {
-            samples.clear();
-            let mut y = 0;
-            while y < h {
-                samples.push(at(x, y));
-                y += 4;
+        for pass in 0..3 {
+            if pass > 0 {
+                let _ = DwmFlush();
+                std::thread::sleep(Duration::from_millis(30));
             }
-            sorted.clear();
-            sorted.extend_from_slice(&samples);
-            sorted.sort_unstable();
-            let bg = sorted[sorted.len() / 2];
-            let ink = samples.iter().filter(|&&c| dist(c, bg) > 60).count();
-            if ink >= 2 {
-                if x < lo {
-                    lo = x;
+            let ok = BitBlt(
+                hdc_mem,
+                0,
+                0,
+                w,
+                h,
+                hdc_screen,
+                rect.left,
+                rect.top,
+                SRCCOPY | CAPTUREBLT,
+            );
+            let rows = GetDIBits(
+                hdc_mem,
+                hbmp,
+                0,
+                h as u32,
+                Some(bits.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if ok.is_err() || rows == 0 {
+                continue;
+            }
+            ok_captures += 1;
+            let at = |x: i32, y: i32| -> u32 { bits[(y * w + x) as usize] & 0x00FF_FFFF };
+            for x in 0..w {
+                samples.clear();
+                let mut y = 0;
+                while y < h {
+                    samples.push(at(x, y));
+                    y += 4;
                 }
-                hi = x;
+                sorted.clear();
+                sorted.extend_from_slice(&samples);
+                sorted.sort_unstable();
+                let bg = sorted[sorted.len() / 2];
+                let ink = samples.iter().filter(|&&c| dist(c, bg) > 60).count();
+                if ink >= 2 {
+                    votes[x as usize] += 1;
+                }
+            }
+        }
+        let _ = SelectObject(hdc_mem, old);
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+        if ok_captures == 0 {
+            return None;
+        }
+        let need = ok_captures / 2 + 1;
+        let (mut lo, mut hi) = (w, -1);
+        for (x, &v) in votes.iter().enumerate() {
+            if v >= need {
+                let xi = x as i32;
+                if xi < lo {
+                    lo = xi;
+                }
+                hi = xi;
             }
         }
         if hi < lo {
@@ -495,6 +556,89 @@ fn visible_content_rect(rect: &RECT) -> Option<RECT> {
             right: rect.left + hi + 1,
             bottom: rect.bottom,
         })
+    }
+}
+
+/// Debug: write the captured band region to a BMP for offline inspection.
+fn dump_frame(rect: &RECT) {
+    use windows::Win32::Graphics::Gdi::*;
+    unsafe {
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 || w > 4096 || h > 256 {
+            return;
+        }
+        let hdc_screen = GetDC(None);
+        if hdc_screen.is_invalid() {
+            return;
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_screen);
+        let hbmp = CreateCompatibleBitmap(hdc_screen, w, h);
+        let old = SelectObject(hdc_mem, hbmp);
+        let _ = BitBlt(
+            hdc_mem,
+            0,
+            0,
+            w,
+            h,
+            hdc_screen,
+            rect.left,
+            rect.top,
+            SRCCOPY | CAPTUREBLT,
+        );
+        let mut bits = vec![0u32; (w * h) as usize];
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        GetDIBits(
+            hdc_mem,
+            hbmp,
+            0,
+            h as u32,
+            Some(bits.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        let _ = SelectObject(hdc_mem, old);
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(hdc_mem);
+        let _ = ReleaseDC(None, hdc_screen);
+        // BMP: file header + info header + BGRA rows (bottom-up not needed,
+        // we stored top-down already).
+        let row_bytes = (w * 3 + 3) & !3;
+        let data_size = row_bytes * h;
+        let mut out = vec![0u8; 54 + data_size as usize];
+        out[0..2].copy_from_slice(b"BM");
+        out[2..6].copy_from_slice(&(54 + data_size as u32).to_le_bytes());
+        out[10..14].copy_from_slice(&54u32.to_le_bytes());
+        out[14..18].copy_from_slice(&40u32.to_le_bytes());
+        out[18..22].copy_from_slice(&w.to_le_bytes());
+        out[22..26].copy_from_slice(&h.to_le_bytes());
+        out[26..28].copy_from_slice(&1u16.to_le_bytes());
+        out[28..30].copy_from_slice(&24u16.to_le_bytes());
+        out[34..38].copy_from_slice(&data_size.to_le_bytes());
+        for y in 0..h {
+            let dst_row = ((h - 1 - y) as usize) * row_bytes as usize + 54;
+            for x in 0..w {
+                let p = bits[(y * w + x) as usize];
+                let d = dst_row + (x * 3) as usize;
+                out[d] = (p & 0xFF) as u8;
+                out[d + 1] = ((p >> 8) & 0xFF) as u8;
+                out[d + 2] = ((p >> 16) & 0xFF) as u8;
+            }
+        }
+        let path = std::env::temp_dir().join("razer_sample_dump.bmp");
+        let _ = std::fs::write(&path, out);
+        eprintln!("razer-taskbar: sample frame dumped to {:?}", path);
     }
 }
 
