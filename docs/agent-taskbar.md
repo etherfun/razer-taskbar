@@ -18,7 +18,7 @@
 
 - **去抖**：`request_layout` 限频 250ms（`LAYOUT_DEBOUNCE`），被合并的请求置 `layout_pending`，由一次性 `TIMER_LAYOUT` 兜尾。
 - **去重**：`place_widget` 记录上次屏幕矩形（`last_layout`）与上次日志行（`last_log`），矩形不变则不 `InvalidateRect`（纯移动对分层窗口无需重绘）；日志仅在状态变化时输出。`paint` 以 `(label, level, charging, connected, w, h)` 签名去重，未变化时只 `BeginPaint/EndPaint` 验证更新区域。
-- **UIA 查询缓存**（`widgets_button_rect`）：`(rect, notify_left, seen)` 缓存 30s，`TrayNotifyWnd` 左边沿变化或 `TaskbarCreated` 时失效；`TaskbarDa=0`（天气板关闭）时直接跳过 UIA。
+- **UIA 查询缓存**（`widgets_button_rect`）：`(rect, notify_left, seen)` 缓存 30s，`TrayNotifyWnd` 左边沿变化或 `TaskbarCreated` 时失效；`TaskbarDa=0`（天气板关闭）时直接跳过 UIA。查询用 `FindFirst(TreeScope_Descendants, AutomationId="WidgetsButton")` 引擎侧搜索——旧版手工 ControlViewWalker 限深 DFS 在 26340 上从任务栏根节点走不动（板避让静默失效），Descendants 搜索不受影响。
 
 ## Z 序维护（防任务栏覆盖）
 

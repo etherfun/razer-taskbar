@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use windows::core::w;
+use windows::core::{w, BSTR, VARIANT};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -1215,13 +1215,13 @@ pub fn invalidate_widgets_cache() {
 /// `TaskbarFrame`). Returns `None` when UIA is unavailable (caller falls
 /// back to the registry-based estimate).
 ///
-/// The UIA walk is expensive (CoCreateInstance + bounded 400-node DFS) and
-/// the button only moves when the notify/tray geometry moves, so results are
-/// cached for `WIDGETS_CACHE_TTL` or until the notify edge shifts. When the
-/// board is disabled (registry `TaskbarDa=0`) the walk is skipped entirely.
+/// The UIA query is expensive (CoCreateInstance + engine-side tree search)
+/// and the button only moves when the notify/tray geometry moves, so results
+/// are cached for `WIDGETS_CACHE_TTL` or until the notify edge shifts. When
+/// the board is disabled (registry `TaskbarDa=0`) the search is skipped.
 pub fn widgets_button_rect() -> Option<RECT> {
     // Registry first: with the board off, UIA would report nothing — skip
-    // the walk (registry flips are picked up live on the next placement).
+    // the search (registry flips are picked up live on the next placement).
     if !widgets_shown() {
         return None;
     }
@@ -1248,7 +1248,7 @@ pub fn widgets_button_rect() -> Option<RECT> {
     rect
 }
 
-/// Uncached UIA walk for the `WidgetsButton` rect (see `widgets_button_rect`).
+/// Uncached UIA search for the `WidgetsButton` rect (see `widgets_button_rect`).
 fn widgets_button_rect_uia() -> Option<RECT> {
     use windows::Win32::System::Com::*;
     use windows::Win32::UI::Accessibility::*;
@@ -1260,40 +1260,22 @@ fn widgets_button_rect_uia() -> Option<RECT> {
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
         let tray = find_shell_tray()?;
         let root = uia.ElementFromHandle(tray).ok()?;
-        // TaskbarFrame -> WidgetsButton (depth-first, bounded).
-        let walker = uia.ControlViewWalker().ok()?;
-        let mut stack = vec![root];
-        let mut guard = 0;
-        while let Some(el) = stack.pop() {
-            guard += 1;
-            if guard > 400 {
-                break;
-            }
-            if let Ok(aid) = el.CurrentAutomationId() {
-                if aid == "WidgetsButton" {
-                    if let Ok(r) = el.CurrentBoundingRectangle() {
-                        return Some(RECT {
-                            left: r.left,
-                            top: r.top,
-                            right: r.right,
-                            bottom: r.bottom,
-                        });
-                    }
-                    return None;
-                }
-            }
-            let mut child = walker.GetFirstChildElement(&el).ok();
-            let mut n = 0;
-            while let Some(c) = child {
-                if n >= 30 {
-                    break;
-                }
-                stack.push(c.clone());
-                child = walker.GetNextSiblingElement(&c).ok();
-                n += 1;
-            }
-        }
-        None
+        // Engine-side descendant search. A manual ControlViewWalker DFS used
+        // to do this job, but the walker dead-ends at the tray root whenever
+        // the shell's control view hiccups (observed live on 26340: the
+        // walker returned no children at all while a plain descendant search
+        // still saw the whole tree), so the board reserve silently vanished.
+        // FindFirst pushes the traversal into the provider, which keeps
+        // working when the walker view does not.
+        let cond = uia
+            .CreatePropertyCondition(
+                UIA_AutomationIdPropertyId,
+                &VARIANT::from(BSTR::from("WidgetsButton")),
+            )
+            .ok()?;
+        let el = root.FindFirst(TreeScope_Descendants, &cond).ok()?;
+        let r = el.CurrentBoundingRectangle().ok()?;
+        Some(RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
     }
 }
 
