@@ -14,10 +14,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        Log.Install();
+
         // Single instance (port of find_existing_instance): the overlay is a
         // findable top-level window; embedded children need the enum fallback.
         if (SingleInstance.AnotherInstanceRunning())
         {
+            Log.Info("another instance running, exiting");
             return 0;
         }
 
@@ -29,6 +32,7 @@ internal static class Program
         string versionTag = Microsoft.WindowsAppSDK.Release.VersionTag;
         var minVersion = new PackageVersion(Microsoft.WindowsAppSDK.Runtime.Version.UInt64);
         App.XamlAvailable = Bootstrap.TryInitialize(majorMinorVersion, versionTag, minVersion, Bootstrap.InitializeOptions.None, out _);
+        Log.Info($"bootstrap ok={App.XamlAvailable}");
 
         // Startup order mirrors main.rs: config → history → i18n → threads.
         I18n.Init();
@@ -53,6 +57,18 @@ internal static class Program
         };
         widgetThread.SetApartmentState(ApartmentState.STA);
         widgetThread.Start();
+
+        // Test harness (headless verification of the XAML path): open the
+        // settings window after N seconds when this env var is set.
+        if (int.TryParse(Environment.GetEnvironmentVariable("RAZER_TASKBAR_OPEN_WINDOW_SECS"), out var openSecs) && openSecs > 0)
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(openSecs * 1000);
+                Log.Info("test harness: opening settings window");
+                App.ShowMainWindow(selectSettings: true);
+            });
+        }
 
         WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start(_ =>

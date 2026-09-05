@@ -41,6 +41,12 @@ public sealed partial class HistoryPage : Page
     private long _rangeDays = 30;
     private List<DeviceEntry> _devices = new();
 
+    /// <summary>Programmatic ItemsSource/SelectedIndex assignment fires
+    /// SelectionChanged synchronously; a re-entrant Reload would mutate the
+    /// collection while the first modification is still in progress (WinUI
+    /// COMException). Guard mirrors SettingsPage._suppress.</summary>
+    private bool _suppressSelection;
+
     public HistoryPage()
     {
         InitializeComponent();
@@ -61,11 +67,18 @@ public sealed partial class HistoryPage : Page
         Reload();
     }
 
-    private void Device_SelectionChanged(object sender, SelectionChangedEventArgs e) => Reload();
+    private void Device_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection)
+        {
+            return;
+        }
+        Reload();
+    }
 
     private void Range_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (RangeButtons.SelectedIndex < 0)
+        if (_suppressSelection || RangeButtons.SelectedIndex < 0)
         {
             return;
         }
@@ -93,18 +106,23 @@ public sealed partial class HistoryPage : Page
         var roster = HistoryService.ListDevices();
         _devices = roster.Select(r => new DeviceEntry(r.Handle, r.Name)).ToList();
         var selected = SelectedHandle();
-        DeviceCombo.ItemsSource = _devices;
-        var index = _devices.FindIndex(d => d.Handle == selected);
-        if (index >= 0)
+        _suppressSelection = true;
+        try
         {
-            if (DeviceCombo.SelectedIndex != index)
+            DeviceCombo.ItemsSource = _devices;
+            var index = _devices.FindIndex(d => d.Handle == selected);
+            if (index >= 0)
             {
                 DeviceCombo.SelectedIndex = index;
             }
+            else
+            {
+                DeviceCombo.SelectedIndex = _devices.Count > 0 ? 0 : -1;
+            }
         }
-        else
+        finally
         {
-            DeviceCombo.SelectedIndex = _devices.Count > 0 ? 0 : -1;
+            _suppressSelection = false;
         }
 
         // Range (viewer.rs: since = now - range_days*86400, 0 = all).

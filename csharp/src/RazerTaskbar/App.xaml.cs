@@ -30,6 +30,7 @@ public partial class App : Application
         // (the tray refresh is marshaled to the widget thread separately).
         I18n.LanguageChanged += SyncMainWindowLanguage;
         I18n.LanguageChanged += AppState.PostTrayRefresh;
+        LogXaml.Install(this);
     }
 
     /// <summary>Open (or focus) the single NavigationView window. Safe to call
@@ -43,12 +44,20 @@ public partial class App : Application
         }
         Instance._dispatcher.TryEnqueue(() =>
         {
-            if (Instance._mainWindow is null)
+            try
             {
-                Instance._mainWindow = new MainWindow();
+                if (Instance._mainWindow is null)
+                {
+                    Log.Info("creating MainWindow (first open)");
+                    Instance._mainWindow = new MainWindow();
+                }
+                Instance._mainWindow.OpenTab(selectSettings);
+                Instance._mainWindow.Activate();
             }
-            Instance._mainWindow.OpenTab(selectSettings);
-            Instance._mainWindow.Activate();
+            catch (Exception e)
+            {
+                Log.Error("ShowMainWindow failed", e);
+            }
         });
     }
 

@@ -283,6 +283,21 @@ public static class WidgetWindow
 
     private static IntPtr WndProcImpl(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
+        // A .NET exception escaping the WndProc delegate kills the process;
+        // the Rust wnd_proc could only abort via explicit panic. Log + stay.
+        try
+        {
+            return WndProcDispatch(hwnd, msg, wParam, lParam);
+        }
+        catch (Exception e)
+        {
+            Log.Error($"WndProc exception (msg=0x{msg:X})", e);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+    }
+
+    private static IntPtr WndProcDispatch(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
         var st = _state;
         if (st is null)
         {
@@ -526,11 +541,36 @@ public static class WidgetWindow
             }
             return;
         }
+        if (st.PaintedSig is null)
+        {
+            Log.Info("first paint: device=" + (device is null
+                ? "none"
+                : $"{device.Name} {device.BatteryPercentage}% connected={device.IsConnected}")
+                + $", store={AppState.Instance.Devices.Snapshot().Count}");
+        }
         var hdc = BeginPaint(hwnd, out var ps);
         if (hdc == 0)
         {
             return;
         }
+        try
+        {
+            PaintBody(hwnd, st, hdc, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel);
+        }
+        catch (Exception e)
+        {
+            Log.Error("paint failed", e);
+        }
+        finally
+        {
+            EndPaint(hwnd, ref ps);
+        }
+    }
+
+    private static void PaintBody(IntPtr hwnd, WidgetState st, IntPtr hdc, PaintSig sig, string topLabel,
+        RazerDevice? device, float scale, int w, int h,
+        bool connected, int level, bool charging, bool saver, string? bottomLabel)
+    {
         try
         {
             // Transparent base: black color-key is cut out, so only drawn
@@ -658,9 +698,9 @@ public static class WidgetWindow
             }
             st.PaintedSig = sig;
         }
-        finally
+        catch (Exception e)
         {
-            EndPaint(hwnd, ref ps);
+            Log.Error("paint body failed", e);
         }
     }
 

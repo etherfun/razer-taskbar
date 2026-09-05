@@ -8,6 +8,9 @@
 //   event and the poll loop re-parses every `polling_throttle_secs` as a
 //   fallback (settings are re-read from disk each pass, so edits apply
 //   without restart).
+//
+// .NET note: an unhandled exception on this thread kills the whole process
+// (the Rust build isolates thread panics), so every tick is guarded.
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -145,6 +148,25 @@ public sealed class RazerWatcher
         _devices = devices;
     }
 
+    /// <summary>Read a possibly-locked log file. Synapse keeps its logs open
+    /// WITHOUT FileShare.Read, so File.ReadAllText (read + share-read) fails
+    /// with "file in use"; Rust's fs::read_to_string opens fully shared and
+    /// works. Mirror that: read share ReadWrite|Delete.</summary>
+    private static string? ReadShared(string path)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            return reader.ReadToEnd();
+        }
+        catch (Exception e)
+        {
+            Log.Info($"read failed ({Path.GetFileName(path)}): {e.Message}");
+            return null;
+        }
+    }
+
     public static string? V3LogPath()
     {
         var localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
@@ -194,15 +216,34 @@ public sealed class RazerWatcher
 
     public void Run(int initialPollSeconds)
     {
+        try
+        {
+            RunLoop(initialPollSeconds);
+        }
+        catch (Exception e)
+        {
+            // .NET kills the whole process on an unhandled thread exception;
+            // the Rust build keeps running (thread-local panic). Never die.
+            Log.Error("watcher loop crashed", e);
+        }
+    }
+
+    private void RunLoop(int initialPollSeconds)
+    {
         // Initial parse so the widget shows something immediately.
         ParseOnce();
+        var initialDevices = _devices.Snapshot();
+        var v4Path = V4LogDir() is { } d0 ? LatestV4Log(d0) : null;
+        Log.Info(
+            $"watcher initial parse: devices={initialDevices.Count}, v4log={(v4Path is null ? "none" : Path.GetFileName(v4Path))}, " +
+            $"connected={initialDevices.Values.Count(d => d.IsConnected)}");
 
         long initialPollMs = initialPollSeconds * 1000L;
         long intervalMs = initialPollMs;
         long lastParse = Environment.TickCount64;
         long? dirtyAt = null;
 
-        using var signal = new SemaphoreSlim(0, int.MaxValue);
+        var signal = new SemaphoreSlim(0, int.MaxValue);
         var watchers = new List<FileSystemWatcher>();
         void Watch(FileSystemWatcher w)
         {
@@ -233,36 +274,60 @@ public sealed class RazerWatcher
         // on every parse either way.
         while (true)
         {
-            long now = Environment.TickCount64;
-            long pollDue = lastParse + intervalMs;
-            long due = dirtyAt is { } t ? Math.Min(t + (long)EventDebounce.TotalMilliseconds, pollDue) : pollDue;
-            long waitMs = due - now;
-            if (waitMs <= 0)
+            try
             {
-                // Re-resolve the V4 log in case Synapse rotated to a new file.
-                ParseOnce();
-                var cfg = ConfigService.Load();
-                if (cfg.RecordBatteryHistory)
-                {
-                    HistoryService.Record(_devices);
-                }
-                // Long-lived loop: re-read the throttle (edits apply live).
-                // While recording, the tighter record interval wins.
-                long poll = (long)Math.Clamp((long)cfg.PollingThrottleSecs, 0, long.MaxValue >> 1);
-                long hist = (long)Math.Clamp((long)cfg.HistoryPollIntervalSecs, 0, long.MaxValue >> 1);
-                intervalMs = cfg.RecordBatteryHistory && HistoryService.Ready()
-                    ? Math.Max(1, Math.Min(poll, hist))
-                    : Math.Max(2, poll);
+                Tick(signal, ref intervalMs, ref lastParse, ref dirtyAt);
+            }
+            catch (Exception e)
+            {
+                // One failed pass must not kill the thread (the process
+                // survives only if the exception is handled here).
+                Log.Error("watcher tick failed", e);
                 lastParse = Environment.TickCount64;
                 dirtyAt = null;
-                Drain(signal);
-                continue;
+                try
+                {
+                    Drain(signal);
+                }
+                catch (Exception)
+                {
+                }
+                Thread.Sleep(1000);
             }
-            if (signal.Wait((int)Math.Min(waitMs, int.MaxValue - 1)))
+        }
+    }
+
+    private void Tick(SemaphoreSlim signal, ref long intervalMs, ref long lastParse, ref long? dirtyAt)
+    {
+        long now = Environment.TickCount64;
+        long pollDue = lastParse + intervalMs;
+        long due = dirtyAt is { } t ? Math.Min(t + (long)EventDebounce.TotalMilliseconds, pollDue) : pollDue;
+        long waitMs = due - now;
+        if (waitMs <= 0)
+        {
+            // Re-resolve the V4 log in case Synapse rotated to a new file.
+            ParseOnce();
+            var cfg = ConfigService.Load();
+            if (cfg.RecordBatteryHistory)
             {
-                Drain(signal);
-                dirtyAt ??= Environment.TickCount64;
+                HistoryService.Record(_devices);
             }
+            // Long-lived loop: re-read the throttle (edits apply live).
+            // While recording, the tighter record interval wins.
+            long poll = (long)Math.Clamp((long)cfg.PollingThrottleSecs, 0, long.MaxValue >> 1);
+            long hist = (long)Math.Clamp((long)cfg.HistoryPollIntervalSecs, 0, long.MaxValue >> 1);
+            intervalMs = cfg.RecordBatteryHistory && HistoryService.Ready()
+                ? Math.Max(1, Math.Min(poll, hist))
+                : Math.Max(2, poll);
+            lastParse = Environment.TickCount64;
+            dirtyAt = null;
+            Drain(signal);
+            return;
+        }
+        if (signal.Wait((int)Math.Min(waitMs, int.MaxValue - 1)))
+        {
+            Drain(signal);
+            dirtyAt ??= Environment.TickCount64;
         }
     }
 
@@ -307,12 +372,8 @@ public sealed class RazerWatcher
         {
             return;
         }
-        string log;
-        try
-        {
-            log = File.ReadAllText(path);
-        }
-        catch (Exception)
+        var log = ReadShared(path);
+        if (log is null)
         {
             return;
         }
@@ -369,12 +430,8 @@ public sealed class RazerWatcher
         {
             return;
         }
-        string log;
-        try
-        {
-            log = File.ReadAllText(path);
-        }
-        catch (Exception)
+        var log = ReadShared(path);
+        if (log is null)
         {
             return;
         }
