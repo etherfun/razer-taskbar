@@ -24,6 +24,15 @@ use crate::battery::RazerDevice;
 
 pub type DeviceMap = HashMap<String, RazerDevice>;
 
+/// V4 connection rule: the device must appear in the last
+/// `connectingDeviceData` snapshot AND be powered on. Synapse keeps
+/// powered-off devices listed in the snapshot with `chargingStatus: "off"`
+/// (level frozen at the last value) — membership alone never shows them
+/// offline, which broke idle-auto-off detection (Razer Joro).
+pub fn v4_is_connected(ids: &std::collections::HashSet<String>, off: &std::collections::HashSet<String>, handle: &str) -> bool {
+    ids.contains(handle) && !off.contains(handle)
+}
+
 /// Deserialize `T`, treating an explicit JSON `null` as `T::default()`.
 ///
 /// `#[serde(default)]` only covers *missing* fields, but Synapse logs emit
@@ -268,16 +277,27 @@ impl RazerWatcher {
         };
 
         // Connection = membership in the LAST snapshot, matching either id
-        // (mirrors `lastMatch.info.some(serial === handle || container === handle)`).
+        // (mirrors `lastMatch.info.some(serial === handle || container === handle)`),
+        // AND powered on: Synapse keeps powered-off devices in the snapshot
+        // with `chargingStatus: "off"` (level frozen at the last value), so
+        // membership alone never shows them offline (Joro idle auto-off).
         let mut connected_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut off_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for v in &last_vals {
             if let Ok(d) = serde_json::from_value::<V4Device>(v.clone()) {
+                let off = d.power_status.charging_status == "off";
                 if !d.serial_number.is_empty() {
                     connected_ids.insert(d.serial_number.clone());
+                    if off {
+                        off_ids.insert(d.serial_number.clone());
+                    }
                 }
                 if !d.device_container_id.is_empty() {
                     connected_ids.insert(d.device_container_id.clone());
+                    if off {
+                        off_ids.insert(d.device_container_id.clone());
+                    }
                 }
             }
         }
@@ -312,7 +332,11 @@ impl RazerWatcher {
                         handle: handle.clone(),
                         battery_percentage: d.power_status.level.min(100),
                         is_charging: d.power_status.charging_status == "Charging",
-                        is_connected: connected_ids.contains(&handle),
+                        is_connected: crate::watcher::v4_is_connected(
+                            &connected_ids,
+                            &off_ids,
+                            &handle,
+                        ),
                         is_selected: shown.is_empty() || shown == handle,
                         kind: crate::battery::device_kind(&d.category, &d.name.en),
                     },
@@ -447,5 +471,27 @@ mod tests {
         let latest = RazerWatcher::latest_v4_log(&dir).unwrap();
         assert_eq!(latest.file_name().unwrap(), "systray_systrayv24.log");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real shapes from `systray_systrayv28.log`: a powered-off device STAYS
+    /// in the snapshot with `chargingStatus: "off"` and a frozen level.
+    const OFF_SNAPSHOT: &str = r#"[{"serialNumber":"632516H31000044","hasBattery":true,"deviceContainerId":"{C1}","powerStatus":{"chargingStatus":"NoCharge_BatteryFull","level":72},"name":{"en":"Razer Viper V3 HyperSpeed"},"category":"MOUSE"},{"serialNumber":"SI2522F18701637","hasBattery":true,"deviceContainerId":"{C1}","powerStatus":{"chargingStatus":"off","level":91},"name":{"en":"Razer Joro"},"category":"KEYBOARD"}]"#;
+
+    #[test]
+    fn v4_powered_off_device_in_snapshot_is_disconnected() {
+        let devs: Vec<V4Device> = serde_json::from_str(OFF_SNAPSHOT).unwrap();
+        let mut ids = std::collections::HashSet::new();
+        let mut off = std::collections::HashSet::new();
+        for d in &devs {
+            ids.insert(d.serial_number.clone());
+            if d.power_status.charging_status == "off" {
+                off.insert(d.serial_number.clone());
+            }
+        }
+        // Viper on, Joro powered off (but still listed).
+        assert!(crate::watcher::v4_is_connected(&ids, &off, "632516H31000044"));
+        assert!(!crate::watcher::v4_is_connected(&ids, &off, "SI2522F18701637"));
+        // A device that dropped out of the snapshot entirely stays offline.
+        assert!(!crate::watcher::v4_is_connected(&ids, &off, "GONE"));
     }
 }
