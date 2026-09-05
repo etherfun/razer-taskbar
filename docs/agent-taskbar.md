@@ -42,6 +42,7 @@
 - 身份：`OccupantKey(pid, class, 高度桶)`（不用裸 HWND，防复用误判）；`annotate_moves` 记 30s TTL、2px 抖动阈值，`moved` 粘性、`is_new` 首见。
 - 让位节奏：`try_hold_position` —— 无碰撞 hold；新碰撞进 grace（静态 1s / 移动或新来 3s，`waiting=true`，按 `Instant` 计时，事件驱动下更频繁调用不改变语义）；同 key 过期才 yield。`avoid_overlap=false` 时清空第三方 occupant（仅钉死原始锚点，天气板仍避让）。
 - 防弹射：`MAX_AVOID_JUMP_PX = 500`，非首轮、相对 live 位移超限则 stay + `capped=true`；首轮（`first=true`，窗口仍在 0,0）与 `TaskbarCreated` 后的重锚不设防。
+- 退场回位：hold 与跳跃上限都是"防其他挂件"的手段——band 内不再有任何第三方 occupant 时（挤开我们的那个已关闭），两者一并解除，直接回自然锚点，不再滞留原地（`alone_in_band`）。
 
 ## 实验性嵌入模式（`embed_into_taskbar`，默认关）
 

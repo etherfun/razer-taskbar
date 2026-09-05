@@ -798,7 +798,10 @@ pub struct Placement {
 /// taskbar and that rect does NOT overlap any occupant, the occupant must
 /// have placed itself around us (it has its own avoidance logic) — so we
 /// hold our current position instead of re-anchoring and jumping left.
-/// Only when our live rect actually collides do we yield.
+/// Only when our live rect actually collides do we yield. The rule needs an
+/// occupant to anti-leapfrog against: when the band holds none at all (the
+/// one that pushed us out closed), hold and jump cap both stand down and
+/// the widget re-anchors home.
 pub fn compute_placement(
     tray: HWND,
     self_hwnd: HWND,
@@ -891,6 +894,12 @@ pub fn compute_placement(
                 let or = br.right - bar.left;
                 or > min_x && ol < max_right
             });
+            // `true` when avoidance is on and the band has no third-party
+            // occupants at all. The hold and the jump cap both defend our
+            // position against other widgets — with everybody gone, holding
+            // would strand us wherever a since-closed occupant had pushed
+            // us, so both stand down and the widget goes home.
+            let alone_in_band = avoid_overlap && occupants.is_empty();
             let (mut held, mut waiting) = (false, false);
             let mut x = if !avoid_overlap {
                 // Pinned: raw anchor, no shifting, no hold.
@@ -905,18 +914,23 @@ pub fn compute_placement(
                 )
             } else if let Some(live) = window_rect(self_hwnd) {
                 let live_blockers = mark_blockers(&mut occupants, &live);
-                if let Some((hx, w8)) = try_hold_position(
-                    &bar,
-                    &live,
-                    w,
-                    h,
-                    side,
-                    offset_left,
-                    offset_top,
-                    min_x,
-                    max_right,
-                    &live_blockers,
-                ) {
+                let held_pos = if alone_in_band {
+                    None
+                } else {
+                    try_hold_position(
+                        &bar,
+                        &live,
+                        w,
+                        h,
+                        side,
+                        offset_left,
+                        offset_top,
+                        min_x,
+                        max_right,
+                        &live_blockers,
+                    )
+                };
+                if let Some((hx, w8)) = held_pos {
                     held = true;
                     waiting = w8;
                     // try_hold_position returns the live x WITHOUT the user
@@ -958,8 +972,10 @@ pub fn compute_placement(
             // Jump cap (see MAX_AVOID_JUMP_PX): refuse far yields, stay put.
             // First call (first=true, window still at 0,0) bypasses it via
             // hold_usable(): there is no position worth defending yet.
+            // `alone_in_band` bypasses it too: the cap defends against other
+            // widgets, and there are none — going home is not a catapult.
             let mut capped = false;
-            if avoid_overlap && !first {
+            if avoid_overlap && !first && !alone_in_band {
                 if let Some(live) = window_rect(self_hwnd) {
                     if hold_usable(&live, &bar, w, h) {
                         let reference = live.left - bar.left;
@@ -1011,23 +1027,31 @@ pub fn compute_placement(
             if !avoid_overlap {
                 occupants.clear();
             }
+            // Same as the Win11 branch: nobody left to defend against —
+            // stand down the hold and the jump cap, go home.
+            let alone_in_band = avoid_overlap && occupants.is_empty();
             let (mut held, mut waiting) = (false, false);
             let mut x = if !avoid_overlap {
                 anchor_x_classic(side, band_w, w, &[], &band)
             } else if let Some(live) = window_rect(self_hwnd) {
                 let live_blockers = mark_blockers(&mut occupants, &live);
-                if let Some((hx, w8)) = try_hold_position(
-                    &band,
-                    &live,
-                    w,
-                    h,
-                    side,
-                    offset_left,
-                    offset_top,
-                    2,
-                    band_w - 2,
-                    &live_blockers,
-                ) {
+                let held_pos = if alone_in_band {
+                    None
+                } else {
+                    try_hold_position(
+                        &band,
+                        &live,
+                        w,
+                        h,
+                        side,
+                        offset_left,
+                        offset_top,
+                        2,
+                        band_w - 2,
+                        &live_blockers,
+                    )
+                };
+                if let Some((hx, w8)) = held_pos {
                     held = true;
                     waiting = w8;
                     hx
@@ -1040,9 +1064,10 @@ pub fn compute_placement(
             x += offset_left;
             x = x.clamp(2, (band_w - w - 2).max(2));
             // Jump cap (see MAX_AVOID_JUMP_PX): refuse far yields, stay put.
-            // First call exempt — see Win11 branch.
+            // First call exempt — see Win11 branch. `alone_in_band` exempt
+            // too: the cap defends against other widgets, and there are none.
             let mut capped = false;
-            if avoid_overlap && !first {
+            if avoid_overlap && !first && !alone_in_band {
                 if let Some(live) = window_rect(self_hwnd) {
                     if hold_usable(&live, &band, w, h) {
                         let reference = live.left - band.left;
