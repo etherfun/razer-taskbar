@@ -108,6 +108,8 @@ struct AppState {
     z_burst_left: u32,
     /// Dedup for the "covered" log line.
     last_covered_log: Option<Instant>,
+    /// Last occupancy fingerprint (avoidance change detection).
+    last_occupancy: Option<u64>,
 }
 
 static mut STATE: Option<AppState> = None;
@@ -270,6 +272,7 @@ pub fn run_message_loop(devices: Arc<Mutex<DeviceMap>>, cfg: Config) {
             layout_pending: false,
             z_burst_left: 0,
             last_covered_log: None,
+            last_occupancy: None,
         });
         // Color-key transparency: BLACK key is cut out (LWA_COLORKEY).
         // Black (not magenta): glyph/text antialiased edges blend toward
@@ -456,12 +459,17 @@ unsafe extern "system" fn wnd_proc(
                     flush_pending_layout(hwnd);
                 }
                 TIMER_HOVER => {
-                    // Piggyback the z-order check on this 120ms tick: the
-                    // walk is a few syscalls, and coverage recovery drops
-                    // from ≤1s to ≤120ms (Taskbar-Lyrics parity — they
-                    // re-assert instantly on every UIA structure event).
+                    // Piggyback two cheap checks on this 120ms tick:
+                    // - z-order: recover from taskbar raises within ~120ms
+                    //   (plain SetWindowPos(HWND_TOPMOST) per second loses
+                    //   the race when the shell re-raises repeatedly);
+                    // - occupancy: occupant moves fire no UIA event, so the
+                    //   fingerprint detector is what makes avoidance fast.
                     if z_covered(hwnd) {
                         arm_z_burst(hwnd);
+                    }
+                    if occupancy_changed(hwnd) {
+                        request_layout(hwnd);
                     }
                     let enabled = state_mut().config.hover_devices;
                     hover::track(hwnd, enabled);
@@ -538,6 +546,18 @@ fn z_covered(hwnd: HWND) -> bool {
         Some(tray) => taskbar::tray_above(hwnd, tray),
         None => false,
     }
+}
+
+/// `true` when a taskbar child's geometry changed since the previous call
+/// (occupants moving in/out = avoidance must re-run soon).
+fn occupancy_changed(hwnd: HWND) -> bool {
+    let fp = state()
+        .map(|st| taskbar::occupancy_fingerprint(st.tray, hwnd))
+        .unwrap_or(0);
+    let st = state_mut();
+    let changed = st.last_occupancy != Some(fp);
+    st.last_occupancy = Some(fp);
+    changed
 }
 
 /// Arm the fast re-assert burst (see TIMER_Z_BURST). Only start it when it

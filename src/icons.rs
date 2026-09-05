@@ -76,23 +76,19 @@ fn icon_font(h: i32) -> HFONT {
     }
 }
 
-/// Advance width of `kind`'s glyph at box height `h`.
+/// Ink width of `kind`'s glyph at box height `h` (the drawn pixels, from
+/// ABC widths — the advance width includes side bearings that would make
+/// per-row centering look ragged).
 pub fn width_for(hdc: HDC, h: i32, kind: DeviceKind) -> i32 {
-    unsafe {
-        let font = icon_font(h);
-        let old = SelectObject(hdc, font);
-        let mut rect = RECT::default();
-        let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
-        DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
-        SelectObject(hdc, old);
-        let _ = DeleteObject(font);
-        (rect.right - rect.left).max(h / 3)
-    }
+    glyph_metrics(hdc, h, kind).1.max(h / 3)
 }
 
-/// Draw `kind` at top-left (x, y) in `rgb`, box height `h`.
-/// Returns the width used.
+/// Draw `kind`'s ink starting at x (the glyph's side bearing is compensated
+/// internally), vertically centered in the box height `h`. Returns the ink
+/// width used.
 pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8)) -> i32 {
+    let (a, ink_w) = glyph_metrics(hdc, h, kind);
+    let ink_w = ink_w.max(h / 3);
     unsafe {
         let font = icon_font(h);
         let old_font = SelectObject(hdc, font);
@@ -101,12 +97,29 @@ pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8
             hdc,
             COLORREF(rgb.0 as u32 | ((rgb.1 as u32) << 8) | ((rgb.2 as u32) << 16)),
         );
-        let mut rect = RECT { left: x, top: y, right: x + h * 2, bottom: y + h };
+        let mut rect = RECT { left: x - a, top: y, right: x - a + h * 2, bottom: y + h };
         let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
         DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        let w = (rect.right - rect.left).max(h / 3);
         SelectObject(hdc, old_font);
         let _ = DeleteObject(font);
-        w
+        ink_w
+    }
+}
+
+/// (A side bearing, B ink width) of the glyph at font height `h`.
+fn glyph_metrics(hdc: HDC, h: i32, kind: DeviceKind) -> (i32, i32) {
+    unsafe {
+        let font = icon_font(h);
+        let old = SelectObject(hdc, font);
+        let ch = glyph_for(kind) as u32;
+        let mut abc = ABC { abcA: 0, abcB: 0, abcC: 0 };
+        let ok = GetCharABCWidthsW(hdc, ch, ch, &mut abc).as_bool();
+        SelectObject(hdc, old);
+        let _ = DeleteObject(font);
+        if ok {
+            (abc.abcA, abc.abcB as i32)
+        } else {
+            (0, h / 2)
+        }
     }
 }

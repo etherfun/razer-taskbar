@@ -1341,10 +1341,55 @@ pub fn tray_above(widget: HWND, tray: HWND) -> bool {
     }
 }
 
+/// Cheap change detector for avoidance: a hash of the visible
+/// non-whitelisted taskbar children's rects. Plain occupant moves fire no
+/// UIA structure event, so this is how the UI thread notices them between
+/// placement passes (a few syscalls — safe on a fast poll).
+pub fn occupancy_fingerprint(parent: HWND, self_hwnd: HWND) -> u64 {
+    struct Ctx {
+        self_hwnd: HWND,
+        rects: Vec<(i32, i32, i32, i32)>,
+    }
+    unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = &mut *(lparam.0 as *mut Ctx);
+        if hwnd == ctx.self_hwnd {
+            return true.into();
+        }
+        if !is_window_visible(hwnd) {
+            return true.into();
+        }
+        let class = class_name(hwnd);
+        if WHITELIST.iter().any(|w| *w == class) {
+            return true.into();
+        }
+        if class == "RazerTaskbarWidget" || pid_of(hwnd) == own_pid() {
+            return true.into();
+        }
+        if let Some(r) = window_rect(hwnd) {
+            ctx.rects.push((r.left, r.top, r.right, r.bottom));
+        }
+        true.into()
+    }
+
+    let mut ctx = Ctx { self_hwnd, rects: Vec::new() };
+    unsafe {
+        let _ = EnumChildWindows(parent, Some(collect), LPARAM(&mut ctx as *mut _ as isize));
+    }
+    // FNV-1a over the sorted-independent rect list.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for (x, y, r, b) in &ctx.rects {
+        for v in [*x, *y, *r, *b] {
+            hash ^= v as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash ^ (ctx.rects.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
 /// Position a top-level overlay above the taskbar (Taskbar-Lyrics style).
 /// HWND_TOPMOST + SWP_NOACTIVATE: floats above the (possibly acrylic)
-/// taskbar without stealing focus. WS_EX_TRANSPARENT (set at creation) lets
-/// clicks pass through except when we explicitly handle them.
+/// taskbar without stealing focus. SWP_NOOWNERZORDER | SWP_NOSENDCHANGING
+/// mirror Taskbar-Lyrics (no owner-z interplay, no changing round-trip).
 pub fn move_overlay(widget: HWND, x: i32, y: i32, w: i32, h: i32) {
     unsafe {
         // SWP_NOOWNERZORDER | SWP_NOSENDCHANGING mirror Taskbar-Lyrics:
