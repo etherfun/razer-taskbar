@@ -3,6 +3,10 @@
 //! the rest of the UI, with Segoe MDL2 Assets as the Win10 fallback (it
 //! carries the same codepoints).
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::*;
@@ -76,18 +80,133 @@ fn icon_font(h: i32) -> HFONT {
     }
 }
 
-/// Ink width of `kind`'s glyph at box height `h` (the drawn pixels, from
-/// ABC widths — the advance width includes side bearings that would make
-/// per-row centering look ragged).
-pub fn width_for(hdc: HDC, h: i32, kind: DeviceKind) -> i32 {
-    glyph_metrics(hdc, h, kind).1.max(h / 3)
+/// Ink box of the glyph as actually rasterized: leftmost/rightmost drawn
+/// column relative to the text origin. ABC widths are unhinted design
+/// metrics, but GDI grid-fits at the small icon sizes, so each glyph's
+/// rendering drifts up to a pixel from them — enough to make stacked
+/// per-kind rows look ragged when centered on ABC. Measuring the rendered
+/// bitmap keeps the centering basis identical to the pixels on screen.
+type InkBox = (i32, i32);
+
+fn ink_cache() -> &'static Mutex<HashMap<(i32, u32), InkBox>> {
+    static CACHE: OnceLock<Mutex<HashMap<(i32, u32), InkBox>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Draw `kind`'s ink starting at x (the glyph's side bearing is compensated
-/// internally), vertically centered in the box height `h`. Returns the ink
-/// width used.
+fn ink_box(h: i32, kind: DeviceKind) -> Option<InkBox> {
+    let key = (snap_size(h), kind as u32);
+    if let Ok(cache) = ink_cache().lock() {
+        if let Some(hit) = cache.get(&key) {
+            return Some(*hit);
+        }
+    }
+    let scanned = scan_ink_box(key.0, kind);
+    if let Some(hit) = scanned {
+        if let Ok(mut cache) = ink_cache().lock() {
+            cache.insert(key, hit);
+        }
+    } else {
+        static LOGGED: AtomicBool = AtomicBool::new(false);
+        if !LOGGED.swap(true, Ordering::Relaxed) {
+            eprintln!("razer-taskbar: icon ink scan failed, falling back to ABC widths");
+        }
+    }
+    scanned
+}
+
+/// Render the glyph white-on-black into a memory DIB and scan the ink
+/// columns. Returns None when GDI could not produce the bitmap or the glyph
+/// drew nothing (missing font mapped to a blank).
+fn scan_ink_box(h: i32, kind: DeviceKind) -> Option<InkBox> {
+    unsafe {
+        let w = h * 3; // room for both side bearings
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return None;
+        }
+        let mem = CreateCompatibleDC(screen);
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // top-down rows
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+            .unwrap_or_default();
+        if hbmp.is_invalid() {
+            let _ = DeleteDC(mem);
+            let _ = ReleaseDC(None, screen);
+            return None;
+        }
+        let old_bmp = SelectObject(mem, hbmp);
+        let _ = PatBlt(mem, 0, 0, w, h, BLACKNESS);
+        let font = icon_font(h);
+        let old_font = SelectObject(mem, font);
+        let _ = SetBkMode(mem, TRANSPARENT);
+        let _ = SetTextColor(mem, COLORREF(0x00FFFFFF));
+        // Drawn at column `origin_x` so a negative left bearing stays inside
+        // the bitmap. DT_VCENTER is omitted — it only shifts y, and horizontal
+        // extents are what we measure (GDI rasterizes one bitmap per glyph
+        // and blits it, so they match the later on-screen draws).
+        let origin_x = h;
+        let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
+        let mut rc = RECT { left: origin_x, top: 0, right: w, bottom: h };
+        let _ = DrawTextW(mem, &mut buf, &mut rc, DT_SINGLELINE | DT_LEFT);
+
+        let px = bits as *const u32;
+        let mut min_x: Option<i32> = None;
+        let mut max_x: Option<i32> = None;
+        for x in 0..w {
+            for y in 0..h {
+                let p = *px.add((y * w + x) as usize);
+                // White ink on black; grayscale AA edges count from 0x10 up.
+                if (p & 0xFF) > 0x10 || ((p >> 8) & 0xFF) > 0x10 || ((p >> 16) & 0xFF) > 0x10 {
+                    if min_x.is_none() {
+                        min_x = Some(x);
+                    }
+                    max_x = Some(x);
+                    break;
+                }
+            }
+        }
+
+        SelectObject(mem, old_font);
+        let _ = DeleteObject(font);
+        SelectObject(mem, old_bmp);
+        let _ = DeleteObject(hbmp);
+        let _ = DeleteDC(mem);
+        let _ = ReleaseDC(None, screen);
+        min_x.map(|l| (l - origin_x, max_x.unwrap_or(l) - origin_x))
+    }
+}
+
+/// (origin→ink-left offset, ink width) at font height `h`: the scanned
+/// rasterization when available, else the (A, B) ABC widths.
+fn ink_metrics(hdc: HDC, h: i32, kind: DeviceKind) -> (i32, i32) {
+    if let Some((left, right)) = ink_box(h, kind) {
+        return (left, right - left + 1);
+    }
+    glyph_metrics(hdc, h, kind)
+}
+
+/// Ink width of `kind`'s glyph at box height `h` (the drawn pixels, not the
+/// advance width — side bearings would make per-row centering look ragged).
+pub fn width_for(hdc: HDC, h: i32, kind: DeviceKind) -> i32 {
+    ink_metrics(hdc, h, kind).1.max(h / 3)
+}
+
+/// Draw `kind`'s ink starting at x (the glyph's origin is back-computed from
+/// the measured ink offset), vertically centered in the box height `h`.
+/// Returns the ink width used.
 pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8)) -> i32 {
-    let (a, ink_w) = glyph_metrics(hdc, h, kind);
+    let (off, ink_w) = ink_metrics(hdc, h, kind);
     let ink_w = ink_w.max(h / 3);
     unsafe {
         let font = icon_font(h);
@@ -97,7 +216,7 @@ pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8
             hdc,
             COLORREF(rgb.0 as u32 | ((rgb.1 as u32) << 8) | ((rgb.2 as u32) << 16)),
         );
-        let mut rect = RECT { left: x - a, top: y, right: x - a + h * 2, bottom: y + h };
+        let mut rect = RECT { left: x - off, top: y, right: x - off + h * 2, bottom: y + h };
         let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
         DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
         SelectObject(hdc, old_font);
@@ -120,6 +239,47 @@ fn glyph_metrics(hdc: HDC, h: i32, kind: DeviceKind) -> (i32, i32) {
             (abc.abcA, abc.abcB as i32)
         } else {
             (0, h / 2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KINDS: [DeviceKind; 4] = [
+        DeviceKind::Headset,
+        DeviceKind::Keyboard,
+        DeviceKind::Mouse,
+        DeviceKind::Other,
+    ];
+
+    #[test]
+    fn ink_boxes_are_scanned_and_distinct() {
+        for k in KINDS {
+            let (off, w) = ink_metrics(unsafe { GetDC(None) }, 16, k);
+            // A real icon box: positive ink of plausible icon width, origin
+            // offset within a side bearing's range — not the (0, h/2)
+            // fallback, which would collapse every kind to the same 8px.
+            assert!(w > 4 && w <= 32, "kind {k:?}: ink width {w}");
+            assert!(off.abs() < 16, "kind {k:?}: ink offset {off}");
+        }
+        let kb = ink_metrics(unsafe { GetDC(None) }, 16, DeviceKind::Keyboard).1;
+        let mouse = ink_metrics(unsafe { GetDC(None) }, 16, DeviceKind::Mouse).1;
+        assert!(kb > mouse, "keyboard ink {kb} should exceed mouse ink {mouse}");
+    }
+
+    #[test]
+    fn ink_boxes_are_cached_deterministically() {
+        for k in KINDS {
+            let a = ink_box(16, k);
+            let b = ink_box(16, k);
+            assert_eq!(a, b, "kind {k:?}");
+            assert!(a.is_some(), "kind {k:?}: no scanned ink box");
+        }
+        let cached = ink_cache().lock().unwrap();
+        for k in KINDS {
+            assert!(cached.contains_key(&(16, k as u32)), "kind {k:?} not cached");
         }
     }
 }

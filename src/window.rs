@@ -450,6 +450,12 @@ unsafe extern "system" fn wnd_proc(
                     }
                     place_widget(hwnd, false);
                     tray::refresh();
+                    // Battery changes never move the rect, so place_widget's
+                    // changed-only invalidate would leave the digits frozen
+                    // until the widget happens to move. Invalidate each
+                    // second; paint() dedupes by signature, so an unchanged
+                    // second costs one BeginPaint/EndPaint.
+                    invalidate_widget();
                     // A layout request coalesced right before the poll tick
                     // should not wait for its own timer — flush it now.
                     flush_pending_layout(hwnd);

@@ -311,15 +311,18 @@ fn measure(rows: &[Row]) -> (i32, i32) {
         let _ = SelectObject(hdc, icon_font);
         let glyph_w = text_width(hdc, "\u{E85A}"); // widest battery glyph
         let _ = SelectObject(hdc, old);
-        let _ = DeleteObject(text_font);
-        let _ = DeleteObject(icon_font);
-        let _ = ReleaseDC(None, hdc);
-        // Device-type icon column: widest kind at this row height.
+        // Device-type icon column: widest kind at this row height. Must run
+        // while hdc is still valid — width_for measures the icon font, and a
+        // released DC used to silently degrade every kind to the h/2
+        // fallback, undersizing the panel.
         let kind_w = rows
             .iter()
             .map(|r| crate::icons::width_for(hdc, icon_h, r.kind))
             .max()
             .unwrap_or(0);
+        let _ = DeleteObject(text_font);
+        let _ = DeleteObject(icon_font);
+        let _ = ReleaseDC(None, hdc);
         let pad = (10.0 * scale).round() as i32;
         let gap = (6.0 * scale).round() as i32;
         let row_h = icon_h.max(text_h);
@@ -563,7 +566,10 @@ fn paint() {
             let iw = crate::icons::width_for(hdc, ibh, r.kind);
             crate::icons::draw(
                 hdc,
-                pad + (kind_w - iw) / 2,
+                // Round the leftover half-pixel up: integer division biased a
+                // narrower glyph (the mouse is 11px in the 16px column) 0.5px
+                // left of the column center.
+                pad + (kind_w - iw + 1) / 2,
                 top + (row_h - ibh) / 2,
                 ibh,
                 r.kind,

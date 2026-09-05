@@ -7,14 +7,16 @@
 //!   `[...] connectingDeviceData: [{...hasBattery...powerStatus...}]` — the whole
 //!   history is replayed (`watcherV4.ts` parity); the last snapshot decides
 //!   connection state.
-//! - `notify` watches the files; a poll loop re-parses every `polling_throttle_secs`
+//! - `notify` watches the files; a parse runs within 1s of any write event
+//!   and the poll loop re-parses every `polling_throttle_secs` as a fallback
 //!   (settings are re-read from disk each pass, so menu edits apply without restart).
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 use regex::Regex;
@@ -53,6 +55,11 @@ pub struct RazerWatcher {
 }
 
 impl RazerWatcher {
+    /// How soon after the first filesystem event of a burst a parse runs.
+    /// Synapse writes whole snapshot batches at once, so 1s coalesces the
+    /// burst without adding perceptible latency over the log itself.
+    const EVENT_DEBOUNCE: Duration = Duration::from_secs(1);
+
     pub fn new(devices: Arc<Mutex<DeviceMap>>) -> Self {
         Self {
             devices,
@@ -119,33 +126,61 @@ impl RazerWatcher {
             }
         }
 
+        // Parse when either comes due: a filesystem event (Synapse wrote
+        // fresh battery data — coalesced for EVENT_DEBOUNCE so a write burst
+        // costs one parse) or the fallback poll interval. The throttle config
+        // therefore bounds the idle cadence, not the reaction time. History
+        // sampling rides on every parse either way.
         let mut interval = poll;
+        let mut last_parse = Instant::now();
+        let mut dirty_at: Option<Instant> = None;
         loop {
-            // Drain filesystem events (debounced by the poll interval below).
-            while rx.try_recv().is_ok() {}
-            // Re-resolve the V4 log in case Synapse rotated to a new file.
-            self.parse_once();
-            // Battery history sampling rides on this cadence; recording
-            // wants a finer tick than the display poll so connect/charge/
-            // level transitions land on precise timestamps.
-            let cfg = crate::config::load();
-            if cfg.record_battery_history {
-                crate::history::record(&self.devices);
+            let poll_due = last_parse + interval;
+            let due = dirty_at
+                .map(|t| (t + Self::EVENT_DEBOUNCE).min(poll_due))
+                .unwrap_or(poll_due);
+            let now = Instant::now();
+            if now >= due {
+                // Re-resolve the V4 log in case Synapse rotated to a new file.
+                self.parse_once();
+                // Battery history sampling rides on this cadence; recording
+                // wants a finer tick than the display poll so connect/charge/
+                // level transitions land on precise timestamps.
+                let cfg = crate::config::load();
+                if cfg.record_battery_history {
+                    crate::history::record(&self.devices);
+                }
+                // TS applies `pollingThrottleSeconds` via watcher restart; this
+                // watcher is long-lived, so re-read it (menu edits apply live).
+                // While recording, the tighter record interval wins.
+                interval = if cfg.record_battery_history && crate::history::ready() {
+                    Duration::from_secs(
+                        cfg.polling_throttle_secs
+                            .min(cfg.history_poll_interval_secs)
+                            .max(1),
+                    )
+                } else {
+                    Duration::from_secs(cfg.polling_throttle_secs.max(2))
+                };
+                last_parse = Instant::now();
+                dirty_at = None;
+                while rx.try_recv().is_ok() {}
+                continue;
             }
-            std::thread::sleep(interval);
-            // TS applies `pollingThrottleSeconds` via watcher restart; this
-            // watcher is long-lived, so re-read it (menu edits apply live).
-            // While recording, the tighter record interval wins.
-            let cfg = crate::config::load();
-            interval = if cfg.record_battery_history && crate::history::ready() {
-                Duration::from_secs(
-                    cfg.polling_throttle_secs
-                        .min(cfg.history_poll_interval_secs)
-                        .max(1),
-                )
-            } else {
-                Duration::from_secs(cfg.polling_throttle_secs.max(2))
-            };
+            match rx.recv_timeout(due - now) {
+                Ok(_) => {
+                    while rx.try_recv().is_ok() {}
+                    if dirty_at.is_none() {
+                        dirty_at = Some(Instant::now());
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    // The watcher outlives the loop, so this never fires; idle
+                    // rather than spin on a closed channel if it ever does.
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
         }
     }
 

@@ -14,7 +14,7 @@
 
 1. **`TaskbarCreated` 广播**（`RegisterWindowMessageW` 注册，`handle_taskbar_created`）：explorer 重启后重新 `find_shell_tray` → `taskbar::reset_hold_state()` → `invalidate_widgets_cache()` → `tray::ensure_created` 重挂托盘图标 → 通知 UIA 线程 rebind → `place_widget(true)` 重新锚定。
 2. **UIA 结构变化事件**（`uia_events.rs`）：后台 MTA 线程在任务栏 `Windows.UI.Input.InputSite.WindowClass` 子元素上注册 `IUIAutomationStructureChangedEventHandler`（`TreeScope_Descendants`，找不到 InputSite 时退回整个 tray 根），回调只做 `PostMessageW(WM_APP_LAYOUT)`。线程收到 rebind 信号或每 30s 检查任务栏 HWND 变化后拆旧注册重建（`ensureInitialized` 模式）。HWND 跨线程以裸地址（isize）传递。
-3. **1s 定时器**（`TIMER_ID`）：兜底轮询 + `tray::refresh()`。
+3. **1s 定时器**（`TIMER_ID`）：兜底轮询 + `tray::refresh()` + 每秒失效重绘（电量变化不改矩形，靠这一步上屏；`paint` 按签名去重，未变化只 `BeginPaint/EndPaint`）。
 
 - **去抖**：`request_layout` 限频 250ms（`LAYOUT_DEBOUNCE`），被合并的请求置 `layout_pending`，由一次性 `TIMER_LAYOUT` 兜尾。
 - **去重**：`place_widget` 记录上次屏幕矩形（`last_layout`）与上次日志行（`last_log`），矩形不变则不 `InvalidateRect`（纯移动对分层窗口无需重绘）；日志仅在状态变化时输出。`paint` 以 `(label, level, charging, connected, w, h)` 签名去重，未变化时只 `BeginPaint/EndPaint` 验证更新区域。

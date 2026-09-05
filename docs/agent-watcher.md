@@ -16,8 +16,8 @@
 
 ## 监听循环（`RazerWatcher::run`）
 
-- 首次 `parse_once` 让挂件立即有内容；`notify` 监听 V3 文件 + V4 目录（仅唤醒作用，事件直接 drain）。
-- 每轮 `parse_once` 后 `sleep(polling_throttle_secs)`，且每轮重读 `config::load()`：菜单改轮询间隔/显示设备即时生效；`polling_throttle_secs` 下限钳制 2s。
+- 首次 `parse_once` 让挂件立即有内容；`notify` 监听 V3 文件 + V4 目录，事件驱动解析：首个事件置脏，去抖 1s（`EVENT_DEBOUNCE`，整批写入只解析一次）后立即 `parse_once`。
+- `polling_throttle_secs` 退化为无事件时的兜底轮询节奏（记录历史时取 `min(polling_throttle_secs, history_poll_interval_secs)`），每轮重读 `config::load()`：菜单改轮询间隔/显示设备即时生效；下限钳制 2s。历史采样骑在每次解析上（事件驱动后过渡点更准时）。
 
 ## 显示选择（`battery::pick_device_to_display`）
 
