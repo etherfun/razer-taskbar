@@ -20,6 +20,8 @@ pub struct RazerDevice {
     pub handle: String,
     pub battery_percentage: u8,
     pub is_charging: bool,
+    /// Device-side battery saver / low-power mode (Synapse `lowPowerMode`).
+    pub battery_saver: bool,
     pub is_connected: bool,
     pub is_selected: bool,
     pub kind: DeviceKind,
@@ -72,24 +74,29 @@ pub fn pick_device_to_display(devices: &DeviceMap) -> Option<RazerDevice> {
     candidates.first().cloned().cloned()
 }
 
-/// Native Win11 battery glyph (Segoe Fluent Icons, U+E850-E859).
-/// Measured by rendering (2026-09): E850-E859 are the 10 level steps with a
-/// steadily growing interior fill; **E85A is NOT "full"** in the current
-/// font — it renders as an outline with a plug/bolt-like mark that reads as
-/// a charging icon, so levels above 90% use E859 (the fullest fill).
-pub fn fluent_battery_glyph(level: u8) -> char {
-    match level {
-        0..=9 => '\u{E850}',
-        10..=19 => '\u{E851}',
-        20..=29 => '\u{E852}',
-        30..=39 => '\u{E853}',
-        40..=49 => '\u{E854}',
-        50..=59 => '\u{E855}',
-        60..=69 => '\u{E856}',
-        70..=79 => '\u{E857}',
-        80..=89 => '\u{E858}',
-        _ => '\u{E859}',
-    }
+/// Which glyph series the battery uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryGlyphState {
+    /// E850-E859: the classic 10-step series (E85A is not a battery glyph in
+    /// the current font), topped up at 100% by the painter.
+    Normal,
+    /// EBAB-EBB5: Win11 per-level charging batteries (bolt inside).
+    Charging,
+    /// EBB6-EBC0: Win11 battery-saver batteries (leaf inside).
+    Saver,
+}
+
+/// Win11 battery glyph for `level` (0-100) in `state`. Each series has 11
+/// glyphs, one per 10% step; the classic series has only 10 (0-90%), the
+/// painter tops up the last segment at 100%.
+pub fn battery_glyph(level: u8, state: BatteryGlyphState) -> char {
+    let idx = ((level as u32).min(100) + 5) / 10; // 0..=10, rounded to 10%
+    let (base, max_idx) = match state {
+        BatteryGlyphState::Normal => (0xE850u32, 9),
+        BatteryGlyphState::Charging => (0xEBAB, 10),
+        BatteryGlyphState::Saver => (0xEBB6, 10),
+    };
+    char::from_u32(base + idx.min(max_idx)).unwrap_or('\u{E850}')
 }
 
 /// Win11 Fluent battery fill color by level (native GDI, no PNG assets).
@@ -113,10 +120,29 @@ mod tests {
             handle: handle.into(),
             battery_percentage: level,
             is_charging: charging,
+            battery_saver: false,
             is_connected: true,
             is_selected: selected,
             kind: DeviceKind::Other,
         }
+    }
+
+    #[test]
+    fn battery_glyph_series_mapping() {
+        use BatteryGlyphState::*;
+        // Normal: classic 10-step series, capped at E859.
+        assert_eq!(battery_glyph(0, Normal), '\u{E850}');
+        assert_eq!(battery_glyph(72, Normal), '\u{E857}');
+        assert_eq!(battery_glyph(100, Normal), '\u{E859}');
+        // Charging / saver: 11-glyph series, 100% hits the last one.
+        assert_eq!(battery_glyph(0, Charging), '\u{EBAB}');
+        assert_eq!(battery_glyph(72, Charging), '\u{EBB2}');
+        assert_eq!(battery_glyph(100, Charging), '\u{EBB5}');
+        assert_eq!(battery_glyph(30, Saver), '\u{EBB9}');
+        assert_eq!(battery_glyph(100, Saver), '\u{EBC0}');
+        // Rounding: 0-4% stays on the empty glyph, 5% rounds up a step.
+        assert_eq!(battery_glyph(4, Normal), '\u{E850}');
+        assert_eq!(battery_glyph(5, Normal), '\u{E851}');
     }
 
     #[test]

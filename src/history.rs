@@ -598,12 +598,17 @@ mod tests {
 
     #[test]
     fn estimate_text() {
+        // format_estimate_verbose is localized: pin English (serialized with
+        // the i18n test via its lock — the language is global state).
+        crate::i18n::set_setting(crate::i18n::EN);
+        let _lock = crate::i18n::test_lock();
         let e = Estimate { secs: 3 * 3600 + 25 * 60, charging: false };
         assert_eq!(format_estimate_compact(e), "~3h25m");
         assert_eq!(format_estimate_verbose(e), "~3h25m left");
         let c = Estimate { secs: 70 * 60, charging: true };
         assert_eq!(format_estimate_compact(c), "+1h10m");
         assert_eq!(format_estimate_verbose(c), "full in 1h10m");
+        crate::i18n::set_setting(crate::i18n::AUTO);
     }
 
     #[test]

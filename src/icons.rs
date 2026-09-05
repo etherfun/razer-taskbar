@@ -127,38 +127,3 @@ fn dongle(hdc: HDC, brush: HBRUSH, x: i32, y: i32, h: i32, w: i32) {
     }
 }
 
-/// Win11-style charging bolt overlay: white bolt with a dark outline so it
-/// reads over any fill color. Drawn on top of the (level) battery glyph,
-/// centered at (cx, cy) with total height `h` (≈ the glyph's inner body).
-/// Same zigzag shape as the tray icon.
-pub fn draw_bolt(hdc: HDC, cx: i32, cy: i32, h: i32) {
-    unsafe {
-        // Unit zigzag: 4 wide, 9 tall (tray icon shape, normalized).
-        const UNIT: [(i32, i32); 6] = [(3, 0), (0, 5), (2, 5), (1, 9), (4, 4), (2, 4)];
-        let s = h as f32 / 9.0;
-        let pts: Vec<POINT> = UNIT
-            .iter()
-            .map(|(x, y)| POINT {
-                x: cx + (((*x as f32 - 2.0) * s).round() as i32),
-                y: cy + (((*y as f32 - 4.5) * s).round() as i32),
-            })
-            .collect();
-        // Dark bolt with a thick dark pen (the outline), then a white core
-        // with the pen removed — the pen width becomes the outline width.
-        let pen_w = (h / 4).max(2);
-        let pen = CreatePen(PS_SOLID, pen_w, COLORREF(0x001A1A1A));
-        let edge = CreateSolidBrush(COLORREF(0x001A1A1A));
-        let core = CreateSolidBrush(COLORREF(0x00FFFFFF));
-        let old_pen = SelectObject(hdc, pen);
-        let old_brush = SelectObject(hdc, edge);
-        let _ = Polygon(hdc, &pts);
-        let _ = SelectObject(hdc, core);
-        let _ = SelectObject(hdc, GetStockObject(NULL_PEN));
-        let _ = Polygon(hdc, &pts);
-        let _ = SelectObject(hdc, old_pen);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = DeleteObject(pen);
-        let _ = DeleteObject(edge);
-        let _ = DeleteObject(core);
-    }
-}

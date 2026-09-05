@@ -76,6 +76,7 @@ struct PaintSig {
     label: String,
     level: u8,
     charging: bool,
+    saver: bool,
     connected: bool,
     w: i32,
     h: i32,
@@ -648,6 +649,7 @@ fn paint(hwnd: HWND) {
         .as_ref()
         .map(|d| (d.battery_percentage, d.is_charging))
         .unwrap_or((0, false));
+    let saver = device.as_ref().map(|d| d.battery_saver).unwrap_or(false);
     let connected = device.as_ref().map(|d| d.is_connected).unwrap_or(false);
     // Percentage text (+ predicted usage time when enabled). No device yet:
     // dim "--".
@@ -671,6 +673,7 @@ fn paint(hwnd: HWND) {
         label: label.clone(),
         level,
         charging,
+        saver,
         connected,
         w,
         h,
@@ -825,10 +828,20 @@ fn paint(hwnd: HWND) {
             DT_SINGLELINE | DT_CALCRECT | DT_LEFT,
         );
         let text_w = (measure.right - measure.left).max(1);
-        // Measure the native icon glyph the same way (always the plain level
-        // glyph; the charging state is a bolt OVERLAY drawn on top of it —
-        // Win11 style — instead of the old combined MDL2 charging glyph).
-        let icon_ch = [crate::battery::fluent_battery_glyph(level) as u16];
+        // Measure the native icon glyph the same way. Glyph series by state
+        // (Win11 per-level sets): saver leaf EBB6-EBC0, charging bolt
+        // EBAB-EBB5, normal E850-E859 (E85A is not a battery glyph in the
+        // current font). A disconnected device draws the plain (gray) glyph.
+        let state = if !connected {
+            crate::battery::BatteryGlyphState::Normal
+        } else if saver {
+            crate::battery::BatteryGlyphState::Saver
+        } else if charging {
+            crate::battery::BatteryGlyphState::Charging
+        } else {
+            crate::battery::BatteryGlyphState::Normal
+        };
+        let icon_ch = [crate::battery::battery_glyph(level, state) as u16];
         let mut icon_measure = RECT {
             left: 0,
             top: 0,
@@ -902,38 +915,6 @@ fn paint(hwnd: HWND) {
             &mut icon_rect,
             DT_SINGLELINE | DT_VCENTER | DT_LEFT,
         );
-        // E859 (the fullest level glyph) leaves the last of its 10 interior
-        // segments empty; at full charge top that segment up so the battery
-        // reads completely full. Measured: the empty slot spans x ≈
-        // [0.75, 0.84] font-heights from the glyph origin, vertically
-        // centered (±0.18 font-heights).
-        if level >= 100 && connected {
-            let brush = CreateSolidBrush(COLORREF(
-                icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16),
-            ));
-            let old_brush = SelectObject(hdc, brush);
-            let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-            let _ = Rectangle(
-                hdc,
-                icon_x + (0.75 * icon_h as f32).round() as i32,
-                (h as f32 / 2.0 - 0.18 * icon_h as f32).round() as i32,
-                icon_x + (0.84 * icon_h as f32).round() as i32 + 1,
-                (h as f32 / 2.0 + 0.18 * icon_h as f32).round() as i32 + 1,
-            );
-            let _ = SelectObject(hdc, old_pen);
-            let _ = SelectObject(hdc, old_brush);
-            let _ = DeleteObject(brush);
-        }
-        // Charging bolt overlay on the level glyph (Win11 style). The glyph
-        // body is ~36% of the font height; the bolt spans ~70% of it.
-        if charging && connected {
-            crate::icons::draw_bolt(
-                hdc,
-                icon_x + icon_w / 2,
-                h / 2,
-                ((icon_h as f32) * 0.36 * 0.7).round() as i32,
-            );
-        }
         let _ = SelectObject(hdc, hfont);
         // Text with drop shadow (offset 1px, drawn first underneath).
         let mut shadow_rect = RECT {

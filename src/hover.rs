@@ -19,7 +19,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::battery::{color_for, fluent_battery_glyph, pick_device_to_display, DeviceKind, DeviceMap};
+use crate::battery::{
+    battery_glyph, color_for, pick_device_to_display, BatteryGlyphState, DeviceKind, DeviceMap,
+};
 use crate::taskbar::window_rect;
 
 const CLASS_NAME: PCWSTR = w!("RazerTaskbarHover");
@@ -37,6 +39,7 @@ struct Row {
     eta: String,
     level: u8,
     charging: bool,
+    saver: bool,
     connected: bool,
     displayed: bool,
     kind: DeviceKind,
@@ -144,6 +147,7 @@ fn no_devices_row() -> Row {
         eta: String::new(),
         level: 0,
         charging: false,
+        saver: false,
         connected: false,
         displayed: false,
         kind: DeviceKind::Other,
@@ -177,6 +181,7 @@ fn snapshot_rows() -> Vec<Row> {
                 .unwrap_or_default(),
             level: d.battery_percentage,
             charging: d.is_charging,
+            saver: d.battery_saver,
             connected: d.is_connected,
             displayed: d.is_connected && d.handle == shown,
             kind: d.kind,
@@ -562,43 +567,24 @@ fn paint() {
                 r.kind,
                 kind_rgb,
             );
-            // Battery glyph (level variant; charging is a bolt overlay).
-            let mut glyph: Vec<u16> = vec![fluent_battery_glyph(r.level) as u16];
+            // Battery glyph: per-state Win11 series (saver leaf / charging
+            // bolt / plain level), level-tinted. No E859 top-up needed —
+            // the charging/saver series have real 100% glyphs, and the
+            // normal series tops up in window.rs only.
+            let state = if !r.connected {
+                BatteryGlyphState::Normal
+            } else if r.saver {
+                BatteryGlyphState::Saver
+            } else if r.charging {
+                BatteryGlyphState::Charging
+            } else {
+                BatteryGlyphState::Normal
+            };
+            let mut glyph: Vec<u16> = vec![battery_glyph(r.level, state) as u16];
             let mut grc = RECT { left: glyph_x, top, right: glyph_x + glyph_w + 4, bottom };
             let _ = SelectObject(hdc, icon_font);
             let _ = SetTextColor(hdc, level_color);
             DrawTextW(hdc, &mut glyph, &mut grc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            // E859 (the fullest glyph) leaves the last of its 10 interior
-            // segments empty; at full charge top that segment up (same
-            // measured slot fractions as window.rs, in glyph-color gray for
-            // disconnected devices).
-            if r.level >= 100 {
-                let (ur, ug, ub) = if r.connected { color_for(r.level) } else { (0x80, 0x80, 0x80) };
-                let brush = CreateSolidBrush(COLORREF(
-                    ur as u32 | ((ug as u32) << 8) | ((ub as u32) << 16),
-                ));
-                let old_brush = SelectObject(hdc, brush);
-                let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
-                let cy = (top + bottom) / 2;
-                let _ = Rectangle(
-                    hdc,
-                    glyph_x + (0.75 * icon_h as f32).round() as i32,
-                    cy - (0.18 * icon_h as f32).round() as i32,
-                    glyph_x + (0.84 * icon_h as f32).round() as i32 + 1,
-                    cy + (0.18 * icon_h as f32).round() as i32 + 1,
-                );
-                let _ = SelectObject(hdc, old_pen);
-                let _ = SelectObject(hdc, old_brush);
-                let _ = DeleteObject(brush);
-            }
-            if r.charging && r.connected {
-                crate::icons::draw_bolt(
-                    hdc,
-                    glyph_x + glyph_w / 2,
-                    (top + bottom) / 2,
-                    ((icon_h as f32) * 0.36 * 0.7).round() as i32,
-                );
-            }
             // Name: the device the widget shows is bright white, other
             // connected ones slightly dimmer, disconnected ones gray.
             let name_color = if r.displayed {

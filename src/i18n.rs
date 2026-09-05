@@ -114,11 +114,18 @@ fn translate(s: &'static str) -> &'static str {
 }
 
 #[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn translation_basics() {
+        let _g = test_lock();
         set_setting(EN);
         assert_eq!(tr("Exit"), "Exit");
         assert_eq!(tr("unknown key"), "unknown key");

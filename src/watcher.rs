@@ -224,18 +224,19 @@ impl RazerWatcher {
             let connected = loaded_idx > removed_idx;
             // V3 has no category: classify by product-name keywords.
             let kind = crate::battery::device_kind("", &name);
-            devices.insert(
-                handle.clone(),
-                RazerDevice {
-                    name,
-                    handle: handle.clone(),
-                    battery_percentage: level,
-                    is_charging: charging,
-                    is_connected: connected,
-                    is_selected: shown.is_empty() || shown == *handle,
-                    kind,
-                },
-            );
+                devices.insert(
+                    handle.clone(),
+                    RazerDevice {
+                        name,
+                        handle: handle.clone(),
+                        battery_percentage: level,
+                        is_charging: charging,
+                        battery_saver: false,
+                        is_connected: connected,
+                        is_selected: shown.is_empty() || shown == *handle,
+                        kind,
+                    },
+                );
         }
     }
 
@@ -337,6 +338,7 @@ impl RazerWatcher {
                         handle: handle.clone(),
                         battery_percentage: d.power_status.level.min(100),
                         is_charging: d.power_status.charging_status == "Charging",
+                        battery_saver: d.low_power_mode != 0,
                         is_connected: crate::watcher::v4_is_connected(
                             &connected_ids,
                             &off_ids,
@@ -385,6 +387,9 @@ struct V4Device {
     /// "MOUSE" / "KEYBOARD" / "HEADSET" / … — drives the device-type icon.
     #[serde(default, deserialize_with = "null_to_default")]
     category: String,
+    /// Device-side battery saver / low-power mode: 0 = off, nonzero = on.
+    #[serde(default, deserialize_with = "null_to_default")]
+    low_power_mode: i64,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
