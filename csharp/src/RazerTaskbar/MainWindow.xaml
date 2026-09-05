@@ -19,6 +19,9 @@
         <NavigationView
             x:Name="Nav"
             Grid.Row="1"
+            PaneDisplayMode="Left"
+            IsPaneOpen="True"
+            OpenPaneLength="180"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             SelectionChanged="Nav_SelectionChanged">

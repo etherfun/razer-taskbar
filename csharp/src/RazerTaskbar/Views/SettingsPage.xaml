@@ -7,7 +7,7 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel MaxWidth="760" HorizontalAlignment="Left" Margin="16,8,16,16" Spacing="4">
+        <StackPanel MaxWidth="1100" HorizontalAlignment="Center" Margin="16,8,16,16" Spacing="4">
 
             <!-- ============ Widget ============ -->
             <TextBlock x:Name="HeaderWidget" Style="{StaticResource SettingsSectionStyle}" />

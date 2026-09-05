@@ -97,6 +97,16 @@ public static class I18n
         "Cycles & charging sessions ({} recorded)" => "周期与充电会话（共 {} 条）",
         "USE" => "用电",
         "CHARGE" => "充电",
+        // Settings row descriptions
+        "Which device's battery the widget displays." => "挂件显示哪台设备的电量。",
+        "Anchor the widget on the left or right side of the taskbar." => "将挂件锚定在任务栏左侧或右侧。",
+        "Second row with the predicted remaining / time-to-full duration." => "第二行显示预计剩余 / 充满时长。",
+        "Notification-area icon with tooltip and menu." => "带提示与菜单的通知区图标。",
+        "Hover the widget to list every known device." => "悬停挂件列出所有已知设备。",
+        "Display refresh cadence (seconds) when there is no log activity." => "无日志活动时的显示刷新间隔(秒)。",
+        "Sample battery.db and predict usage time." => "采样 battery.db 并预测可用时长。",
+        "Sampling cadence while recording is enabled (seconds)." => "记录启用时的采样间隔(秒)。",
+        "UI language. Auto follows the Windows UI language." => "界面语言。自动跟随 Windows 界面语言。",
         // History page export + compare
         "Export" => "导出",
         "Time range" => "时间范围",

@@ -102,13 +102,24 @@ public static class TaskbarLocator
             {
                 minX = Math.Max(minX, startLeft + startW + 2 + Math.Max(0, leftSpaceWin11));
             }
-            // Right-side usable band ends where the board begins (when known).
+            // Right-side usable band ends where the board begins — but only
+            // when the board is actually adjacent to the tray (right half).
+            // On newer builds the widgets entry lives at the LEFT edge
+            // (observed boardLeft=0 on 26340); capping the right anchor by it
+            // would drag the widget to x=2, so the left min_x zone covers it.
             int maxRight = notifyLeft + 2;
-            if (side != "left" && boardLeft is { } bl)
+            if (side != "left" && boardLeft is { } bl && bl > barW / 2)
             {
                 maxRight = Math.Min(maxRight, bl - 2);
             }
 
+            var diag = $"side={side} notifyLeft={notifyLeft} boardLeft={(boardLeft is { } blv ? blv.ToString() : "none")} " +
+                     $"startL={startLeft} startW={startW} min_x={minX} max_right={maxRight} w={w}";
+            if (diag != _lastPlacementDiag)
+            {
+                Log.Info("placement: " + diag);
+                _lastPlacementDiag = diag;
+            }
             int x = AnchorXWin11(side, maxRight - 2, minX, w) + offsetLeft;
             // The board reserve is a hard floor for LEFT-anchored widgets:
             // clamp() alone could push us back onto the weather board when
@@ -167,6 +178,7 @@ public static class TaskbarLocator
     private static readonly TimeSpan WidgetsCacheTtl = TimeSpan.FromSeconds(30);
 
     private static readonly object WidgetsCacheLock = new();
+    private static string? _lastPlacementDiag;
     private static WidgetsRectCache? _widgetsCache;
 
     /// <summary>Drop the cached widgets board rect (taskbar rebuilt → TaskbarCreated).</summary>
