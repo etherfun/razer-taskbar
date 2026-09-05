@@ -727,9 +727,11 @@ fn paint(hwnd: HWND) {
         let dim = COLORREF(0x00B0B0B0);
         let shadow = COLORREF(0x00202020);
 
-        // Native Win11 glyphs: Segoe Fluent Icons battery (E850-E85A) +
+        // Native Win11 glyphs: Segoe Fluent Icons battery (EBA0 series) +
         // Segoe UI Variable Text for the percentage. Both ship with Win11.
-        let icon_h = (22.0 * scale).round() as i32;
+        // Icon fonts snap to Microsoft's magic pixel sizes (16/20/24/…)
+        // for crisp rendering.
+        let icon_h = crate::icons::snap_size((22.0 * scale).round() as i32);
         let hicon_font = CreateFontW(
             icon_h,
             0,

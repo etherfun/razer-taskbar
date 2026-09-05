@@ -208,6 +208,8 @@ fn scale_of() -> f32 {
 }
 
 fn create_icon_font(h: i32) -> HFONT {
+    // Snap to Microsoft's magic icon sizes (16/20/24/…) for crisp glyphs.
+    let h = crate::icons::snap_size(h);
     unsafe {
         let f = CreateFontW(
             h,
@@ -292,7 +294,7 @@ fn measure(rows: &[Row]) -> (i32, i32) {
     unsafe {
         let hdc = GetDC(None);
         let text_h = (14.0 * scale).round() as i32;
-        let icon_h = (15.0 * scale).round() as i32;
+        let icon_h = crate::icons::snap_size((15.0 * scale).round() as i32);
         let text_font = create_text_font(text_h);
         let icon_font = create_icon_font(icon_h);
         let old = SelectObject(hdc, text_font);
@@ -504,7 +506,7 @@ fn paint() {
         let pad = (10.0 * scale).round() as i32;
         let gap = (6.0 * scale).round() as i32;
         let text_h = (14.0 * scale).round() as i32;
-        let icon_h = (15.0 * scale).round() as i32;
+        let icon_h = crate::icons::snap_size((15.0 * scale).round() as i32);
         let row_h = icon_h.max(text_h);
         let row_gap = (3.0 * scale).round() as i32;
         let icon_font = create_icon_font(icon_h);

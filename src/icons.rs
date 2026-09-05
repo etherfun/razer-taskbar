@@ -19,7 +19,23 @@ pub fn glyph_for(kind: DeviceKind) -> char {
     }
 }
 
+/// Per Microsoft: the icon font renders crisply only at these pixel sizes;
+/// anything else comes out unclear or blurry. Snap requests to the nearest
+/// (ties go to the larger size).
+pub const ICON_SIZES: [i32; 7] = [16, 20, 24, 32, 40, 48, 64];
+
+pub fn snap_size(h: i32) -> i32 {
+    let mut best = ICON_SIZES[0];
+    for s in ICON_SIZES {
+        if (s - h).abs() <= (best - h).abs() {
+            best = s;
+        }
+    }
+    best
+}
+
 fn icon_font(h: i32) -> HFONT {
+    let h = snap_size(h);
     unsafe {
         let font = CreateFontW(
             h,
