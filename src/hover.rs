@@ -303,11 +303,6 @@ fn measure(rows: &[Row]) -> (i32, i32) {
         let eta_w = if any_eta { eta_w } else { 0 };
         let _ = SelectObject(hdc, icon_font);
         let glyph_w = text_width(hdc, "\u{E85A}"); // widest battery glyph
-        let bolt_w = if rows.iter().any(|r| r.charging && r.level < 50) {
-            text_width(hdc, "\u{EA93}")
-        } else {
-            0
-        };
         let _ = SelectObject(hdc, old);
         let _ = DeleteObject(text_font);
         let _ = DeleteObject(icon_font);
@@ -323,12 +318,9 @@ fn measure(rows: &[Row]) -> (i32, i32) {
         let row_h = icon_h.max(text_h);
         let row_gap = (3.0 * scale).round() as i32;
         let n = rows.len() as i32;
-        // Columns: [type icon] [glyph] [name] [bolt?] [eta?] [pct] — bolt and
-        // eta only exist when some row needs them.
+        // Columns: [type icon] [glyph] [name] [eta?] [pct] — charging is a
+        // bolt overlay on the glyph, so it needs no column of its own.
         let mut cols = kind_w + gap + glyph_w + gap + name_w + gap;
-        if bolt_w > 0 {
-            cols += bolt_w + gap;
-        }
         if eta_w > 0 {
             cols += eta_w + gap;
         }
@@ -522,13 +514,11 @@ fn paint() {
         }
         let any_eta = rows.iter().any(|r| !r.eta.is_empty());
         let eta_w = if any_eta { eta_w } else { 0 };
-        let any_charging = rows.iter().any(|r| r.charging && r.level < 50);
         let _ = SelectObject(hdc, icon_font);
         let glyph_w = text_width(hdc, "\u{E85A}");
-        let bolt_w = if any_charging { text_width(hdc, "\u{EA93}") } else { 0 };
         let _ = SelectObject(hdc, old);
 
-        // Columns: [type icon] [battery glyph] [name ...] [bolt?] [eta?] [pct].
+        // Columns: [type icon] [battery glyph] [name ...] [eta?] [pct].
         let kind_w = rows
             .iter()
             .map(|r| crate::icons::width_for(icon_h, r.kind))
@@ -536,8 +526,7 @@ fn paint() {
             .unwrap_or(0);
         let pct_right = w - pad;
         let pct_left = pct_right - pct_w;
-        // Columns grow leftward from the percentage: predicted time first,
-        // then the standalone bolt.
+        // Columns grow leftward from the percentage: predicted time first.
         let mut left = pct_left - gap;
         let (eta_left, eta_right) = if any_eta {
             let r = left;
@@ -546,13 +535,6 @@ fn paint() {
             (l, r)
         } else {
             (0, 0)
-        };
-        let bolt_x = if bolt_w > 0 {
-            let x = left - bolt_w;
-            left = x - gap;
-            x
-        } else {
-            0
         };
         let glyph_x = pad + kind_w + gap;
         let name_left = glyph_x + glyph_w + gap;
@@ -580,12 +562,20 @@ fn paint() {
                 r.kind,
                 kind_rgb,
             );
-            // Battery glyph (level variant; bolt variant when charging >= 50%).
-            let mut glyph: Vec<u16> = vec![fluent_battery_glyph(r.level, r.charging) as u16];
+            // Battery glyph (level variant; charging is a bolt overlay).
+            let mut glyph: Vec<u16> = vec![fluent_battery_glyph(r.level) as u16];
             let mut grc = RECT { left: glyph_x, top, right: glyph_x + glyph_w + 4, bottom };
             let _ = SelectObject(hdc, icon_font);
             let _ = SetTextColor(hdc, level_color);
             DrawTextW(hdc, &mut glyph, &mut grc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            if r.charging && r.connected {
+                crate::icons::draw_bolt(
+                    hdc,
+                    glyph_x + glyph_w / 2,
+                    (top + bottom) / 2,
+                    ((icon_h as f32) * 0.36 * 0.7).round() as i32,
+                );
+            }
             // Name: the device the widget shows is bright white, other
             // connected ones slightly dimmer, disconnected ones gray.
             let name_color = if r.displayed {
@@ -611,19 +601,6 @@ fn paint() {
                     &mut nrc,
                     DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS,
                 );
-            }
-            // Standalone charging bolt for charging rows below 50%.
-            if any_charging && r.charging && r.level < 50 {
-                let mut bolt: Vec<u16> = "\u{EA93}".encode_utf16().collect();
-                let mut brc = RECT {
-                    left: bolt_x,
-                    top,
-                    right: bolt_x + bolt_w + 4,
-                    bottom,
-                };
-                let _ = SelectObject(hdc, icon_font);
-                let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
-                DrawTextW(hdc, &mut bolt, &mut brc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             }
             // Predicted usage time / time-to-full (right-aligned, dim).
             if any_eta && !r.eta.is_empty() {

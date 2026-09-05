@@ -72,13 +72,12 @@ pub fn pick_device_to_display(devices: &DeviceMap) -> Option<RazerDevice> {
     candidates.first().cloned().cloned()
 }
 
-/// Native Win11 battery glyph (Segoe Fluent Icons / MDL2 Assets, U+E850-E85A).
-/// 11 steps verified by rendering: E850 empty .. E85A full, EA93 charging.
-/// Charging shows the bolt variant when level >= 50, plain level below.
-pub fn fluent_battery_glyph(level: u8, charging: bool) -> char {
-    if charging && level >= 50 {
-        return '\u{EA93}';
-    }
+/// Native Win11 battery glyph (Segoe Fluent Icons, U+E850-E859).
+/// Measured by rendering (2026-09): E850-E859 are the 10 level steps with a
+/// steadily growing interior fill; **E85A is NOT "full"** in the current
+/// font — it renders as an outline with a plug/bolt-like mark that reads as
+/// a charging icon, so levels above 90% use E859 (the fullest fill).
+pub fn fluent_battery_glyph(level: u8) -> char {
     match level {
         0..=9 => '\u{E850}',
         10..=19 => '\u{E851}',
@@ -89,8 +88,7 @@ pub fn fluent_battery_glyph(level: u8, charging: bool) -> char {
         60..=69 => '\u{E856}',
         70..=79 => '\u{E857}',
         80..=89 => '\u{E858}',
-        90..=99 => '\u{E859}',
-        _ => '\u{E85A}',
+        _ => '\u{E859}',
     }
 }
 

@@ -825,8 +825,10 @@ fn paint(hwnd: HWND) {
             DT_SINGLELINE | DT_CALCRECT | DT_LEFT,
         );
         let text_w = (measure.right - measure.left).max(1);
-        // Measure the native icon glyph the same way.
-        let icon_ch = [crate::battery::fluent_battery_glyph(level, charging) as u16];
+        // Measure the native icon glyph the same way (always the plain level
+        // glyph; the charging state is a bolt OVERLAY drawn on top of it —
+        // Win11 style — instead of the old combined MDL2 charging glyph).
+        let icon_ch = [crate::battery::fluent_battery_glyph(level) as u16];
         let mut icon_measure = RECT {
             left: 0,
             top: 0,
@@ -900,6 +902,16 @@ fn paint(hwnd: HWND) {
             &mut icon_rect,
             DT_SINGLELINE | DT_VCENTER | DT_LEFT,
         );
+        // Charging bolt overlay on the level glyph (Win11 style). The glyph
+        // body is ~36% of the font height; the bolt spans ~70% of it.
+        if charging && connected {
+            crate::icons::draw_bolt(
+                hdc,
+                icon_x + icon_w / 2,
+                h / 2,
+                ((icon_h as f32) * 0.36 * 0.7).round() as i32,
+            );
+        }
         let _ = SelectObject(hdc, hfont);
         // Text with drop shadow (offset 1px, drawn first underneath).
         let mut shadow_rect = RECT {
