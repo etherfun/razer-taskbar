@@ -197,11 +197,39 @@ pub fn set_shown_device(handle: &str) {
 
 /// True if a widget window from a previous instance already exists.
 /// Overlay mode uses a top-level WS_POPUP, which FindWindow CAN see.
+/// Embed mode parents the widget into the taskbar band, where only an
+/// EnumChildWindows walk can find it.
 pub fn find_existing_instance() -> bool {
     unsafe {
-        FindWindowW(CLASS_NAME, WINDOW_TITLE)
+        if FindWindowW(CLASS_NAME, WINDOW_TITLE)
             .map(|h| !h.0.is_null())
             .unwrap_or(false)
+        {
+            return true;
+        }
+        let Some(tray) = taskbar::find_shell_tray() else {
+            return false;
+        };
+        struct Ctx {
+            found: bool,
+            want: Vec<u16>,
+        }
+        unsafe extern "system" fn proc_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+            let mut name = [0u16; 64];
+            let n = GetClassNameW(hwnd, &mut name) as usize;
+            if name[..n] == ctx.want[..] {
+                ctx.found = true;
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+        let mut ctx = Ctx {
+            found: false,
+            want: CLASS_NAME.to_string().unwrap().encode_utf16().collect(),
+        };
+        let _ = EnumChildWindows(tray, Some(proc_cb), LPARAM(&mut ctx as *mut Ctx as isize));
+        ctx.found
     }
 }
 
