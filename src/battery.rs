@@ -74,29 +74,28 @@ pub fn pick_device_to_display(devices: &DeviceMap) -> Option<RazerDevice> {
     candidates.first().cloned().cloned()
 }
 
-/// Which glyph series the battery uses.
+/// Which glyph series the battery uses. All three are 11-glyph sets, one
+/// per 10% step (verified mapped + rendering in the installed
+/// SegoeIcons.ttf).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryGlyphState {
-    /// E850-E859: the classic 10-step series (E85A is not a battery glyph in
-    /// the current font), topped up at 100% by the painter.
+    /// EBA0-EBAA: normal level batteries (0% .. 100%).
     Normal,
-    /// EBAB-EBB5: Win11 per-level charging batteries (bolt inside).
+    /// EBAB-EBB5: charging batteries (bolt inside).
     Charging,
-    /// EBB6-EBC0: Win11 battery-saver batteries (leaf inside).
+    /// EBB6-EBC0: battery-saver batteries (leaf inside).
     Saver,
 }
 
-/// Win11 battery glyph for `level` (0-100) in `state`. Each series has 11
-/// glyphs, one per 10% step; the classic series has only 10 (0-90%), the
-/// painter tops up the last segment at 100%.
+/// Win11 battery glyph for `level` (0-100) in `state`.
 pub fn battery_glyph(level: u8, state: BatteryGlyphState) -> char {
     let idx = ((level as u32).min(100) + 5) / 10; // 0..=10, rounded to 10%
-    let (base, max_idx) = match state {
-        BatteryGlyphState::Normal => (0xE850u32, 9),
-        BatteryGlyphState::Charging => (0xEBAB, 10),
-        BatteryGlyphState::Saver => (0xEBB6, 10),
+    let base = match state {
+        BatteryGlyphState::Normal => 0xEBA0,
+        BatteryGlyphState::Charging => 0xEBAB,
+        BatteryGlyphState::Saver => 0xEBB6,
     };
-    char::from_u32(base + idx.min(max_idx)).unwrap_or('\u{E850}')
+    char::from_u32(base + idx).unwrap_or('\u{EBA0}')
 }
 
 /// Win11 Fluent battery fill color by level (native GDI, no PNG assets).
@@ -130,10 +129,10 @@ mod tests {
     #[test]
     fn battery_glyph_series_mapping() {
         use BatteryGlyphState::*;
-        // Normal: classic 10-step series, capped at E859.
-        assert_eq!(battery_glyph(0, Normal), '\u{E850}');
-        assert_eq!(battery_glyph(72, Normal), '\u{E857}');
-        assert_eq!(battery_glyph(100, Normal), '\u{E859}');
+        // Normal: EBA0-EBAA, one glyph per 10% (EBAA is truly full).
+        assert_eq!(battery_glyph(0, Normal), '\u{EBA0}');
+        assert_eq!(battery_glyph(72, Normal), '\u{EBA7}');
+        assert_eq!(battery_glyph(100, Normal), '\u{EBAA}');
         // Charging / saver: 11-glyph series, 100% hits the last one.
         assert_eq!(battery_glyph(0, Charging), '\u{EBAB}');
         assert_eq!(battery_glyph(72, Charging), '\u{EBB2}');
@@ -141,8 +140,8 @@ mod tests {
         assert_eq!(battery_glyph(30, Saver), '\u{EBB9}');
         assert_eq!(battery_glyph(100, Saver), '\u{EBC0}');
         // Rounding: 0-4% stays on the empty glyph, 5% rounds up a step.
-        assert_eq!(battery_glyph(4, Normal), '\u{E850}');
-        assert_eq!(battery_glyph(5, Normal), '\u{E851}');
+        assert_eq!(battery_glyph(4, Normal), '\u{EBA0}');
+        assert_eq!(battery_glyph(5, Normal), '\u{EBA1}');
     }
 
     #[test]

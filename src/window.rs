@@ -829,9 +829,9 @@ fn paint(hwnd: HWND) {
         );
         let text_w = (measure.right - measure.left).max(1);
         // Measure the native icon glyph the same way. Glyph series by state
-        // (Win11 per-level sets): saver leaf EBB6-EBC0, charging bolt
-        // EBAB-EBB5, normal E850-E859 (E85A is not a battery glyph in the
-        // current font). A disconnected device draws the plain (gray) glyph.
+        // (Win11 per-level sets, 11 glyphs each): normal EBA0-EBAA, charging
+        // bolt EBAB-EBB5, saver leaf EBB6-EBC0. A disconnected device draws
+        // the plain (gray) normal glyph.
         let state = if !connected {
             crate::battery::BatteryGlyphState::Normal
         } else if saver {
