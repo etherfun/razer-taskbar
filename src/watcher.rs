@@ -28,7 +28,8 @@ pub type DeviceMap = HashMap<String, RazerDevice>;
 /// `connectingDeviceData` snapshot AND be powered on. Synapse keeps
 /// powered-off devices listed in the snapshot with `chargingStatus: "off"`
 /// (level frozen at the last value) — membership alone never shows them
-/// offline, which broke idle-auto-off detection (Razer Joro).
+/// offline, which broke idle-auto-off detection (Razer Joro). An empty
+/// charging status (null powerStatus on wired replug) counts as off too.
 pub fn v4_is_connected(ids: &std::collections::HashSet<String>, off: &std::collections::HashSet<String>, handle: &str) -> bool {
     ids.contains(handle) && !off.contains(handle)
 }
@@ -281,12 +282,16 @@ impl RazerWatcher {
         // AND powered on: Synapse keeps powered-off devices in the snapshot
         // with `chargingStatus: "off"` (level frozen at the last value), so
         // membership alone never shows them offline (Joro idle auto-off).
+        // A null powerStatus (transitional snapshot seen on wired (re)plug)
+        // is treated the same as off — it carries no level and would flash
+        // a bogus 0%.
         let mut connected_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut off_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for v in &last_vals {
             if let Ok(d) = serde_json::from_value::<V4Device>(v.clone()) {
-                let off = d.power_status.charging_status == "off";
+                let off = d.power_status.charging_status.is_empty()
+                    || d.power_status.charging_status == "off";
                 if !d.serial_number.is_empty() {
                     connected_ids.insert(d.serial_number.clone());
                     if off {
@@ -493,5 +498,24 @@ mod tests {
         assert!(!crate::watcher::v4_is_connected(&ids, &off, "SI2522F18701637"));
         // A device that dropped out of the snapshot entirely stays offline.
         assert!(!crate::watcher::v4_is_connected(&ids, &off, "GONE"));
+    }
+
+    /// Transitional snapshot seen on wired (re)plug at 11:01:45: the device
+    /// is listed with a NULL powerStatus (deserializes to level 0, empty
+    /// charging status). Must not flash as connected at 0%.
+    #[test]
+    fn v4_null_power_status_is_disconnected() {
+        let json = r#"[{"serialNumber":"S","hasBattery":true,"deviceContainerId":"C","powerStatus":null,"name":{"en":"Razer Joro"},"category":"KEYBOARD"}]"#;
+        let devs: Vec<V4Device> = serde_json::from_str(json).unwrap();
+        assert_eq!(devs[0].power_status.level, 0);
+        assert_eq!(devs[0].power_status.charging_status, "");
+        let mut ids = std::collections::HashSet::new();
+        let mut off = std::collections::HashSet::new();
+        let d = &devs[0];
+        ids.insert(d.serial_number.clone());
+        if d.power_status.charging_status.is_empty() || d.power_status.charging_status == "off" {
+            off.insert(d.serial_number.clone());
+        }
+        assert!(!crate::watcher::v4_is_connected(&ids, &off, "S"));
     }
 }
