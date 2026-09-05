@@ -20,6 +20,7 @@ mod history;
 mod hover;
 mod i18n;
 mod icons;
+mod settings;
 mod taskbar;
 mod tray;
 mod uia_events;

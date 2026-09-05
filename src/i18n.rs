@@ -99,6 +99,16 @@ fn translate(s: &'static str) -> &'static str {
         "Cycles & charging sessions ({} recorded)" => "周期与充电会话（共 {} 条）",
         "USE" => "用电",
         "CHARGE" => "充电",
+        // Settings window (settings.rs) + the trimmed menu entry
+        "Settings…" => "设置…",
+        "Settings — Razer Taskbar" => "设置 — Razer Taskbar",
+        "Widget" => "挂件",
+        "History" => "电量记录",
+        "General" => "通用",
+        "Shown device" => "显示设备",
+        "Widget side" => "挂件位置",
+        "Left" => "左侧",
+        "Right" => "右侧",
         _ => s,
     }
 }

@@ -26,8 +26,8 @@ cargo run --release
 cargo build --release   # -> target/release/razer-taskbar.exe (~1.3 MB)
 ```
 
-No installer: copy the single exe anywhere and run it. Use the widget's
-right-click menu to enable *Run at startup* (writes `HKCU\...\Run\RazerTaskbar`).
+No installer: copy the single exe anywhere and run it. Enable *Run at
+startup* in the Settings window (writes `HKCU\...\Run\RazerTaskbar`).
 
 ## How it works
 
@@ -72,14 +72,14 @@ level-colored percentage — with the device the widget currently shows
 highlighted. Since the overlay is click-through and receives no mouse
 input, hover is detected by polling the cursor on a 120ms timer; the panel
 itself is topmost, never takes focus and is click-through too. Toggle via
-the *Show devices on hover* menu item (`hover_devices` in settings.json,
-default on).
+*Show devices on hover* in the Settings window (`hover_devices` in
+settings.json, default on).
 
 ### Battery history & predicted usage time
 
 Every parse pass also samples the devices into `%APPDATA%\razer-taskbar\battery.db`
 (SQLite, retained forever): a point is written when (connected, charging,
-level) changes, plus a 15-min heartbeat; the *Record interval* menu item
+level) changes, plus a 15-min heartbeat; the *Record interval* setting
 controls how fast the watcher polls for this (1–30s, default 5s).
 
 From that history the widget predicts per device:
@@ -126,26 +126,31 @@ hover panel. The type comes from the Synapse V4 log's `category` field
 (MOUSE / KEYBOARD / HEADSET / …), falling back to product-name keywords for
 V3 logs and unknown categories.
 
-## Menu (right-click the tray icon)
+## Menu (right-click the tray icon) & Settings window
 
-The overlay itself is click-through, so the tray icon carries the menu:
+The overlay itself is click-through, so the tray icon carries the menu. It
+stays deliberately small — quick device switching plus entry points:
 
 * Device list (radio, incl. *All devices*)
-* Poll interval (5/10/15/30/60s)
-* Record battery history + Record interval (1/2/5/10/30s)
-* Show time remaining on widget
+* Settings… (opens the settings window)
 * Battery history… (viewer window)
-* Language (Auto / English / 中文)
-* Widget on left/right
-* Run at startup
-* Show tray icon
-* Avoid overlap (widgets board always avoided)
-* Show devices on hover
 * Exit
 
+Everything else lives in the **Settings** window (dark Win11-style page,
+same chrome as the history viewer), organized into three sections:
+
+* **Widget** — shown device, widget side (left/right), show time remaining,
+  avoid overlap, show tray icon, show devices on hover
+* **History** — poll interval (5/10/15/30/60s), record battery history,
+  record interval (1/2/5/10/30s)
+* **General** — language (Auto / English / 中文), run at startup
+
+Every change applies and persists immediately (no OK/Cancel); the watcher
+re-reads settings.json each cycle, so nothing needs a restart.
+
 The UI ships in English and Chinese; **Auto** (default) follows the Windows
-UI language, switches apply live from the menu (`language` in
-settings.json). Compact durations (`3h25m`) stay locale-neutral.
+UI language, switches apply live (`language` in settings.json). Compact
+durations (`3h25m`) stay locale-neutral.
 
 Config lives in `%APPDATA%\razer-taskbar\settings.json`.
 

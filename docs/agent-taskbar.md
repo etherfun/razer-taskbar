@@ -49,7 +49,8 @@
 - 无设备/离线：灰色 + `--`。
 - 设备类型图标（`icons.rs`，纯 GDI 矢量）：鼠标 / 耳机 / 键盘 / 其他（USB dongle）。挂件布局 `[类型图标][电池字形][百分比]` 居中；无设备时不画类型图标。判定：V4 日志 `category` 字段（MOUSE/KEYBOARD/HEADSET/…）优先，回退 `device_kind` 产品名关键词，兜底 Other（`battery.rs` 有单测）。图标宽度经 `width_for` 参与居中计算。
 - 悬停设备面板（`hover.rs`）：挂件点击穿透收不到鼠标消息，`TIMER_HOVER`（120ms）轮询 `GetCursorPos`+`PtInRect` 检测悬停，静置 350ms 后显示。面板同为顶层分层 `NOACTIVATE` + `HTTRANSPARENT` 窗口（只读、不抢焦点、不挡点击）；光标在挂件或面板矩形外即隐藏。面板为圆角矩形（`RoundRect` 一笔填充+描边，直角落在 colorkey 黑上即透明），行布局 `[类型图标][电池字形][名称][充电闪电列（仅有个别行充电<50%时存在）][百分比]`，当前显示设备名称亮白。位置：底部任务栏向上弹出、顶部任务栏向下弹出，x 钳制进工作区；行内容/几何都有去重，无变化不重绘。菜单开关 `hover_devices`（默认开）。
-- 菜单（`show_menu`，托盘图标右键）：All devices + 已连接按名排序；轮询 5/10/15/30/60s；左右侧；自启动；托盘显隐；`avoid_overlap` 开关；`hover_devices` 开关；Exit。ID 段：`ID_POLL_BASE=1100`、`ID_DEVICE_BASE=2000`。
+- 菜单（`show_menu`，托盘图标右键，刻意精简）：All devices + 已连接按名排序（快速切换）→ Settings… → Battery history… → Exit。ID 段：`ID_SETTINGS=1011`、`ID_DEVICE_BASE=2000`。
+- 设置窗口（`settings.rs`，"Settings…" 打开）：整合原菜单全部设置项，深色 Win11 风格同 `viewer.rs`（DWM 深色标题栏/圆角、卡片分区：挂件/电量记录/通用、owner-draw 左右侧 pill、DarkMode_Explorer 复选框与下拉）。单实例、跑在 UI 线程同一消息循环；所有改动即时应用 + 落盘（无 OK/Cancel），经 `window.rs` pub 辅助函数（`modify_config`/`set_shown_device`/`reposition_widget`/`config_snapshot`/`devices_arc`/`widget_hwnd`）改 `STATE.config` 并同步 UI 侧副作用（托盘重挂/隐藏、hover 隐藏、重排重绘、`i18n::set_setting` + tray/viewer/settings 三处 `sync_language`）。watcher 每轮重读 settings.json，改轮询/记录间隔无需重启。复选框/下拉的 `BM_SETCHECK`/`CB_SETCURSEL` 不回发 `BN_CLICKED`/`CBN_SELCHANGE`，刷新无回声问题。
 - 托盘（`tray.rs`）：16×16 GDI 图标（轮廓+填充+闪电）+ tooltip，仅为菜单入口兜底；`refresh()` 按 (tooltip, 电量状态) 签名去重，`ensure_created` 重置签名（explorer 重启重挂后必须真正重画）。
 
 ## 禁区

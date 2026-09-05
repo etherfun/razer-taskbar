@@ -22,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::battery::{color_for, pick_device_to_display};
 use crate::config::{self, Config};
 use crate::hover;
+use crate::settings;
 use crate::taskbar;
 use crate::tray;
 use crate::uia_events;
@@ -54,24 +55,16 @@ const LAYOUT_DEBOUNCE: Duration = Duration::from_millis(LAYOUT_DEBOUNCE_MS as u6
 const WM_APP_LAYOUT: u32 = WM_APP + 2;
 
 const ID_EXIT: u16 = 1001;
-const ID_AUTOSTART: u16 = 1002;
-const ID_SIDE_LEFT: u16 = 1003;
-const ID_SIDE_RIGHT: u16 = 1004;
-const ID_TRAY_ICON: u16 = 1005;
-const ID_AVOID_OVERLAP: u16 = 1006;
-const ID_HOVER_DEVICES: u16 = 1007;
-const ID_RECORD_HISTORY: u16 = 1008;
-const ID_SHOW_EST_TIME: u16 = 1009;
 const ID_HISTORY_VIEW: u16 = 1010;
-const ID_POLL_BASE: u16 = 1100; // + seconds/5 index (5,10,15,30,60)
-const ID_REC_BASE: u16 = 1150; // + index (1,2,5,10,30)
-const ID_LANG_BASE: u16 = 1170; // + index (auto, en, zh)
+const ID_SETTINGS: u16 = 1011;
 const ID_DEVICE_BASE: u16 = 2000;
 
 /// Append one dynamically-translated menu item (`tr` applied; UTF-16 copy).
 unsafe fn append_item(menu: HMENU, flags: MENU_ITEM_FLAGS, id: u16, text: &'static str) {
-    let wide: Vec<u16> =
-        crate::i18n::tr(text).encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = crate::i18n::tr(text)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(wide.as_ptr()));
 }
 
@@ -92,6 +85,9 @@ struct AppState {
     devices: Arc<Mutex<DeviceMap>>,
     config: Config,
     tray: HWND,
+    /// The overlay window itself (settings.rs needs it to re-create the tray
+    /// icon and to re-run the placement pass after config edits).
+    hwnd: HWND,
     widget_w: i32,
     widget_h: i32,
     /// Registered "TaskbarCreated" message id (0 until registered).
@@ -127,6 +123,69 @@ fn state() -> Option<&'static AppState> {
     unsafe {
         STATE.as_ref()
     }
+}
+
+// — Settings-window surface (`settings.rs` runs on this same UI thread) —
+
+/// Apply a config mutation to the widget's copy and persist it. All settings
+/// edits flow through here so `STATE.config` stays the single authoritative
+/// value; consumers without a UI-thread presence (watcher, history) read the
+/// rewritten settings.json on their own cadence.
+pub fn modify_config(f: impl FnOnce(&mut Config)) {
+    let st = state_mut();
+    f(&mut st.config);
+    config::save(&st.config);
+}
+
+/// Snapshot for initializing/refreshing the settings window's controls.
+pub fn config_snapshot() -> Config {
+    state().map(|s| s.config.clone()).unwrap_or_default()
+}
+
+pub fn devices_arc() -> Option<Arc<Mutex<DeviceMap>>> {
+    state().map(|s| s.devices.clone())
+}
+
+pub fn widget_hwnd() -> HWND {
+    state()
+        .map(|s| s.hwnd)
+        .unwrap_or(HWND(std::ptr::null_mut()))
+}
+
+/// Re-run the placement pass and repaint the widget (after edits that change
+/// position or width: side, avoid-overlap, estimated-time toggle).
+pub fn reposition_widget() {
+    let Some(st) = state() else { return };
+    let hwnd = st.hwnd;
+    place_widget(hwnd, false);
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
+}
+
+pub fn invalidate_widget() {
+    if let Some(st) = state() {
+        unsafe {
+            let _ = InvalidateRect(st.hwnd, None, true);
+        }
+    }
+}
+
+/// Switch the displayed device ("" = auto). Shared by the tray menu and the
+/// settings window: stamps `is_selected` so `pick_device_to_display` follows
+/// immediately (the watcher re-reads the config each cycle regardless).
+pub fn set_shown_device(handle: &str) {
+    {
+        let st = state_mut();
+        st.config.shown_device_handle = handle.to_string();
+        config::save(&st.config);
+        let shown = st.config.shown_device_handle.clone();
+        let mut devices = st.devices.lock().unwrap();
+        for d in devices.values_mut() {
+            d.is_selected = shown.is_empty() || d.handle == shown;
+        }
+    }
+    invalidate_widget();
 }
 
 /// True if a widget window from a previous instance already exists.
@@ -198,6 +257,7 @@ pub fn run_message_loop(devices: Arc<Mutex<DeviceMap>>, cfg: Config) {
             devices,
             config: cfg,
             tray,
+            hwnd,
             widget_w: init_w,
             widget_h: init_h,
             taskbar_created_msg: 0,
@@ -264,14 +324,20 @@ fn dpi_scale(hwnd: HWND) -> f32 {
 fn widget_size(hwnd: HWND) -> (i32, i32) {
     let s = dpi_scale(hwnd);
     // Widened while the predicted usage time shows next to the percentage.
-    let base_w = if state().map(|st| st.config.show_estimated_time).unwrap_or(false) {
+    let base_w = if state()
+        .map(|st| st.config.show_estimated_time)
+        .unwrap_or(false)
+    {
         216.0
     } else {
         144.0
     };
     // Taskbar is 48px tall at 96 DPI: fill it edge-to-edge like TrafficMonitor
     // instead of the old 32px-high floating look.
-    (((base_w * s).round() as i32).max(96), ((48.0 * s).round() as i32).max(32))
+    (
+        ((base_w * s).round() as i32).max(96),
+        ((48.0 * s).round() as i32).max(32),
+    )
 }
 
 /// Recompute and apply the placement. Runs on the 1s fallback poll, after
@@ -361,7 +427,12 @@ fn place_widget(hwnd: HWND, first: bool) {
     }
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         WM_TIMER => {
             match wparam.0 {
@@ -434,6 +505,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             hover::destroy();
             tray::destroy();
             viewer::destroy();
+            settings::destroy();
             crate::history::close();
             PostQuitMessage(0);
             LRESULT(0)
@@ -586,7 +658,10 @@ fn paint(hwnd: HWND) {
             let mut l = format!("{}%", d.battery_percentage);
             if st.config.show_estimated_time {
                 if let Some(e) = crate::history::estimate_for(&d.handle) {
-                    l.push_str(&format!(" · {}", crate::history::format_estimate_compact(e)));
+                    l.push_str(&format!(
+                        " · {}",
+                        crate::history::format_estimate_compact(e)
+                    ));
                 }
             }
             l
@@ -631,7 +706,12 @@ fn paint(hwnd: HWND) {
         // Transparent base: black color-key is cut out (LWA_COLORKEY),
         // so only drawn pixels are visible over acrylic/taskbar.
         let key_brush = CreateSolidBrush(COLORREF(0x00000000));
-        let key_rect = RECT { left: 0, top: 0, right: w, bottom: h };
+        let key_rect = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
         let _ = FillRect(hdc, &key_rect, key_brush);
         let _ = DeleteObject(key_brush);
         let _ = SetBkMode(hdc, TRANSPARENT);
@@ -666,10 +746,20 @@ fn paint(hwnd: HWND) {
         // Fallback for Win10 (no Fluent Icons font).
         let hicon_font = if hicon_font.is_invalid() {
             CreateFontW(
-                icon_h, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, w!("Segoe MDL2 Assets"),
+                icon_h,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                ANTIALIASED_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                w!("Segoe MDL2 Assets"),
             )
         } else {
             hicon_font
@@ -694,10 +784,20 @@ fn paint(hwnd: HWND) {
         // Fallback if the Variable font is missing (Win10 / older Win11).
         let hfont = if hfont.is_invalid() {
             CreateFontW(
-                font_h, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
-                DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32, ANTIALIASED_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, w!("Segoe UI"),
+                font_h,
+                0,
+                0,
+                0,
+                FW_SEMIBOLD.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                ANTIALIASED_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                w!("Segoe UI"),
             )
         } else {
             hfont
@@ -712,14 +812,34 @@ fn paint(hwnd: HWND) {
         let text_color = if connected { fg_color } else { dim };
         let mut wide: Vec<u16> = label.encode_utf16().collect();
         // Measure text first so the glyph+text group can be centered.
-        let mut measure = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        DrawTextW(hdc, &mut wide, &mut measure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
+        let mut measure = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut measure,
+            DT_SINGLELINE | DT_CALCRECT | DT_LEFT,
+        );
         let text_w = (measure.right - measure.left).max(1);
         // Measure the native icon glyph the same way.
         let icon_ch = [crate::battery::fluent_battery_glyph(level, charging) as u16];
-        let mut icon_measure = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut icon_measure = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         let _ = SelectObject(hdc, hicon_font);
-        DrawTextW(hdc, &mut icon_ch.clone(), &mut icon_measure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
+        DrawTextW(
+            hdc,
+            &mut icon_ch.clone(),
+            &mut icon_measure,
+            DT_SINGLELINE | DT_CALCRECT | DT_LEFT,
+        );
         let icon_w = (icon_measure.right - icon_measure.left).max(1);
         let _ = SelectObject(hdc, hfont);
         // Geometry: [device-type icon] [battery glyph] [percentage], the
@@ -728,33 +848,86 @@ fn paint(hwnd: HWND) {
         let gap = (6.0 * scale).round() as i32;
         let kind = device.as_ref().map(|d| d.kind);
         let kind_h = (16.0 * scale).round() as i32;
-        let kind_w = kind.map(|k| crate::icons::width_for(kind_h, k)).unwrap_or(0);
+        let kind_w = kind
+            .map(|k| crate::icons::width_for(kind_h, k))
+            .unwrap_or(0);
         let kind_gap = if kind.is_some() { gap } else { 0 };
         let group_w = kind_w + kind_gap + icon_w + gap + text_w;
         let group_x = (w - group_w) / 2;
         let icon_x = group_x + kind_w + kind_gap;
         let text_x = icon_x + icon_w + gap;
         if let Some(k) = kind {
-            let kc = if connected { (0xFF, 0xFF, 0xFF) } else { (0x80, 0x80, 0x80) };
+            let kc = if connected {
+                (0xFF, 0xFF, 0xFF)
+            } else {
+                (0x80, 0x80, 0x80)
+            };
             crate::icons::draw(hdc, group_x, (h - kind_h) / 2, kind_h, k, kc);
         }
         // Native icon glyph (level-tinted) with drop shadow.
-        let icon_rgb = if connected { (fr, fg, fb) } else { (0x80, 0x80, 0x80) };
+        let icon_rgb = if connected {
+            (fr, fg, fb)
+        } else {
+            (0x80, 0x80, 0x80)
+        };
         let _ = SelectObject(hdc, hicon_font);
-        let mut icon_shadow_rect = RECT { left: icon_x + 1, top: 1, right: w, bottom: h };
+        let mut icon_shadow_rect = RECT {
+            left: icon_x + 1,
+            top: 1,
+            right: w,
+            bottom: h,
+        };
         let _ = SetTextColor(hdc, shadow);
-        let _ = DrawTextW(hdc, &mut icon_ch.clone(), &mut icon_shadow_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        let mut icon_rect = RECT { left: icon_x, top: 0, right: w, bottom: h };
-        let _ = SetTextColor(hdc, COLORREF(icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16)));
-        DrawTextW(hdc, &mut icon_ch.clone(), &mut icon_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        let _ = DrawTextW(
+            hdc,
+            &mut icon_ch.clone(),
+            &mut icon_shadow_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+        );
+        let mut icon_rect = RECT {
+            left: icon_x,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16)),
+        );
+        DrawTextW(
+            hdc,
+            &mut icon_ch.clone(),
+            &mut icon_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+        );
         let _ = SelectObject(hdc, hfont);
         // Text with drop shadow (offset 1px, drawn first underneath).
-        let mut shadow_rect = RECT { left: text_x + 1, top: 1, right: w, bottom: h };
+        let mut shadow_rect = RECT {
+            left: text_x + 1,
+            top: 1,
+            right: w,
+            bottom: h,
+        };
         let _ = SetTextColor(hdc, shadow);
-        let _ = DrawTextW(hdc, &mut wide.clone(), &mut shadow_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        let mut text_rect = RECT { left: text_x, top: 0, right: w, bottom: h };
+        let _ = DrawTextW(
+            hdc,
+            &mut wide.clone(),
+            &mut shadow_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+        );
+        let mut text_rect = RECT {
+            left: text_x,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
         let _ = SetTextColor(hdc, text_color);
-        DrawTextW(hdc, &mut wide, &mut text_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut text_rect,
+            DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+        );
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(hfont);
         let _ = DeleteObject(hicon_font);
@@ -768,9 +941,19 @@ fn paint(hwnd: HWND) {
 /// white bolt with dark edge when charging (readable over any fill level).
 #[allow(dead_code, clippy::too_many_arguments)]
 fn draw_battery_glyph(
-    hdc: HDC, body_x: i32, body_y: i32, body_w: i32, body_h: i32, cap_w: i32,
-    scale: f32, level: u8, charging: bool, connected: bool,
-    fill_rgb: (u8, u8, u8), fg: COLORREF, shadow: COLORREF,
+    hdc: HDC,
+    body_x: i32,
+    body_y: i32,
+    body_w: i32,
+    body_h: i32,
+    cap_w: i32,
+    scale: f32,
+    level: u8,
+    charging: bool,
+    connected: bool,
+    fill_rgb: (u8, u8, u8),
+    fg: COLORREF,
+    shadow: COLORREF,
 ) {
     unsafe {
         let cap_h = ((body_h as f32 * 0.45).round() as i32).max(5);
@@ -779,10 +962,26 @@ fn draw_battery_glyph(
         let sh_pen = CreatePen(PS_SOLID, 1, shadow);
         let old_pen = SelectObject(hdc, sh_pen);
         let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(hdc, body_x + 1, body_y + 1, body_x + body_w + 1, body_y + body_h + 1, 5, 5);
+        let _ = RoundRect(
+            hdc,
+            body_x + 1,
+            body_y + 1,
+            body_x + body_w + 1,
+            body_y + body_h + 1,
+            5,
+            5,
+        );
         let sh_cap = CreateSolidBrush(shadow);
         let _ = SelectObject(hdc, sh_cap);
-        let _ = RoundRect(hdc, body_x + body_w + 2, cap_y + 1, body_x + body_w + 2 + cap_w, cap_y + 1 + cap_h, 2, 2);
+        let _ = RoundRect(
+            hdc,
+            body_x + body_w + 2,
+            cap_y + 1,
+            body_x + body_w + 2 + cap_w,
+            cap_y + 1 + cap_h,
+            2,
+            2,
+        );
         let _ = DeleteObject(sh_cap);
         let _ = SelectObject(hdc, old_pen);
         let _ = SelectObject(hdc, old_brush);
@@ -794,14 +993,28 @@ fn draw_battery_glyph(
         let _ = RoundRect(hdc, body_x, body_y, body_x + body_w, body_y + body_h, 5, 5);
         let cap_brush = CreateSolidBrush(fg);
         let _ = SelectObject(hdc, cap_brush);
-        let _ = RoundRect(hdc, body_x + body_w + 1, cap_y, body_x + body_w + 1 + cap_w, cap_y + cap_h, 2, 2);
+        let _ = RoundRect(
+            hdc,
+            body_x + body_w + 1,
+            cap_y,
+            body_x + body_w + 1 + cap_w,
+            cap_y + cap_h,
+            2,
+            2,
+        );
         let _ = DeleteObject(cap_brush);
         // Inset fill with rounded ends: inset 2px, radius follows body.
-        let (fr, fg_, fb) = if connected { fill_rgb } else { (0x80, 0x80, 0x80) };
+        let (fr, fg_, fb) = if connected {
+            fill_rgb
+        } else {
+            (0x80, 0x80, 0x80)
+        };
         let inner_w = (body_w - 4).max(0);
         let fill_w = inner_w * level.clamp(0, 100) as i32 / 100;
         if fill_w > 0 {
-            let fill = CreateSolidBrush(COLORREF(fr as u32 | ((fg_ as u32) << 8) | ((fb as u32) << 16)));
+            let fill = CreateSolidBrush(COLORREF(
+                fr as u32 | ((fg_ as u32) << 8) | ((fb as u32) << 16),
+            ));
             let old_fill = SelectObject(hdc, fill);
             let old_pen2 = SelectObject(hdc, GetStockObject(NULL_PEN));
             let fx = body_x + 2;
@@ -818,12 +1031,30 @@ fn draw_battery_glyph(
             let cy = body_y + body_h / 2;
             let s = scale.max(1.0);
             let pts = [
-                POINT { x: (cx as f32 + 1.6 * s) as i32, y: (cy as f32 - 5.5 * s) as i32 },
-                POINT { x: (cx as f32 - 2.2 * s) as i32, y: (cy as f32 + 1.2 * s) as i32 },
-                POINT { x: (cx as f32 - 0.2 * s) as i32, y: (cy as f32 + 1.2 * s) as i32 },
-                POINT { x: (cx as f32 - 1.6 * s) as i32, y: (cy as f32 + 5.5 * s) as i32 },
-                POINT { x: (cx as f32 + 2.2 * s) as i32, y: (cy as f32 - 1.2 * s) as i32 },
-                POINT { x: (cx as f32 + 0.2 * s) as i32, y: (cy as f32 - 1.2 * s) as i32 },
+                POINT {
+                    x: (cx as f32 + 1.6 * s) as i32,
+                    y: (cy as f32 - 5.5 * s) as i32,
+                },
+                POINT {
+                    x: (cx as f32 - 2.2 * s) as i32,
+                    y: (cy as f32 + 1.2 * s) as i32,
+                },
+                POINT {
+                    x: (cx as f32 - 0.2 * s) as i32,
+                    y: (cy as f32 + 1.2 * s) as i32,
+                },
+                POINT {
+                    x: (cx as f32 - 1.6 * s) as i32,
+                    y: (cy as f32 + 5.5 * s) as i32,
+                },
+                POINT {
+                    x: (cx as f32 + 2.2 * s) as i32,
+                    y: (cy as f32 - 1.2 * s) as i32,
+                },
+                POINT {
+                    x: (cx as f32 + 0.2 * s) as i32,
+                    y: (cy as f32 - 1.2 * s) as i32,
+                },
             ];
             // Dark edge: draw the polygon expanded by 1px first.
             let edge = CreateSolidBrush(COLORREF(0x001A1A1A));
@@ -834,10 +1065,13 @@ fn draw_battery_glyph(
             // White core, slightly smaller.
             let core = CreateSolidBrush(COLORREF(0x00FFFFFF));
             let _ = SelectObject(hdc, core);
-            let inset: Vec<POINT> = pts.iter().map(|p| POINT {
-                x: cx + ((p.x - cx) * 3 / 4),
-                y: cy + ((p.y - cy) * 3 / 4),
-            }).collect();
+            let inset: Vec<POINT> = pts
+                .iter()
+                .map(|p| POINT {
+                    x: cx + ((p.x - cx) * 3 / 4),
+                    y: cy + ((p.y - cy) * 3 / 4),
+                })
+                .collect();
             let _ = Polygon(hdc, &inset);
             let _ = DeleteObject(core);
             let _ = grown;
@@ -856,7 +1090,9 @@ fn show_menu(hwnd: HWND) {
             return;
         }
 
-        // Device radio items.
+        // Device radio items: the only thing worth keeping in the menu
+        // (quick switching); every other option moved into the Settings
+        // window (`settings.rs`).
         let devices = st.devices.lock().unwrap();
         let mut connected: Vec<_> = devices.values().filter(|d| d.is_connected).collect();
         connected.sort_by(|a, b| a.name.cmp(&b.name));
@@ -873,7 +1109,12 @@ fn show_menu(hwnd: HWND) {
             } else {
                 MF_UNCHECKED
             };
-            let label = format!("{} — {}%{}", d.name, d.battery_percentage, if d.is_charging { " ⚡" } else { "" });
+            let label = format!(
+                "{} — {}%{}",
+                d.name,
+                d.battery_percentage,
+                if d.is_charging { " ⚡" } else { "" }
+            );
             let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
             let _ = AppendMenuW(
                 menu,
@@ -885,84 +1126,23 @@ fn show_menu(hwnd: HWND) {
         drop(devices);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
-        // Poll interval submenu.
-        let poll_menu = CreatePopupMenu().unwrap_or_default();
-        for (i, secs) in [5u64, 10, 15, 30, 60].iter().enumerate() {
-            let checked = if st.config.polling_throttle_secs == *secs {
-                MF_CHECKED
-            } else {
-                MF_UNCHECKED
-            };
-            let label = format!("{secs}s");
-            let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(
-                poll_menu,
-                MF_STRING | checked,
-                (ID_POLL_BASE + i as u16) as usize,
-                PCWSTR(wide.as_ptr()),
-            );
-        }
-        append_item(menu, MF_STRING | MF_POPUP, poll_menu.0 as u16, "Poll interval");
-
-        // Widget side.
-        let left_checked = if st.config.widget_side == "left" { MF_CHECKED } else { MF_UNCHECKED };
-        let right_checked = if st.config.widget_side != "left" { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | left_checked, ID_SIDE_LEFT, "Widget on left");
-        append_item(menu, MF_STRING | right_checked, ID_SIDE_RIGHT, "Widget on right");
-
-        // Autostart.
-        let auto_checked = if st.config.run_at_startup { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | auto_checked, ID_AUTOSTART, "Run at startup");
-        // Tray icon toggle (fallback when the hook is occluded).
-        let tray_checked = if st.config.show_tray_icon { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | tray_checked, ID_TRAY_ICON, "Show tray icon");
-        // Third-party avoidance switch (widgets board is always avoided).
-        let avoid_checked = if st.config.avoid_overlap { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | avoid_checked, ID_AVOID_OVERLAP, "Avoid overlap (widgets board always avoided)");
-        // Hover popover listing every device.
-        let hover_checked = if st.config.hover_devices { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | hover_checked, ID_HOVER_DEVICES, "Show devices on hover");
-        // Battery history recording + predicted usage time.
-        let rec_checked = if st.config.record_battery_history { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | rec_checked, ID_RECORD_HISTORY, "Record battery history");
-        let rec_menu = CreatePopupMenu().unwrap_or_default();
-        for (i, secs) in [1u64, 2, 5, 10, 30].iter().enumerate() {
-            let checked = if st.config.history_poll_interval_secs == *secs {
-                MF_CHECKED
-            } else {
-                MF_UNCHECKED
-            };
-            let label = format!("{secs}s");
-            let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(
-                rec_menu,
-                MF_STRING | checked,
-                (ID_REC_BASE + i as u16) as usize,
-                PCWSTR(wide.as_ptr()),
-            );
-        }
-        append_item(menu, MF_STRING | MF_POPUP, rec_menu.0 as u16, "Record interval");
-        let est_checked = if st.config.show_estimated_time { MF_CHECKED } else { MF_UNCHECKED };
-        append_item(menu, MF_STRING | est_checked, ID_SHOW_EST_TIME, "Show time remaining on widget");
+        append_item(menu, MF_STRING, ID_SETTINGS, "Settings…");
         append_item(menu, MF_STRING, ID_HISTORY_VIEW, "Battery history…");
-        // UI language (auto follows the Windows UI language).
-        let lang_menu = CreatePopupMenu().unwrap_or_default();
-        for (i, key) in ["Auto", "English", "中文"].iter().enumerate() {
-            let checked = if st.config.language == ["auto", "en", "zh"][i] {
-                MF_CHECKED
-            } else {
-                MF_UNCHECKED
-            };
-            append_item(lang_menu, MF_STRING | checked, ID_LANG_BASE + i as u16, key);
-        }
-        append_item(menu, MF_STRING | MF_POPUP, lang_menu.0 as u16, "Language");
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         append_item(menu, MF_STRING, ID_EXIT, "Exit");
 
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd, None);
+        let _ = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+            cursor.x,
+            cursor.y,
+            0,
+            hwnd,
+            None,
+        );
         let _ = DestroyMenu(menu);
     }
 }
@@ -973,107 +1153,26 @@ fn handle_command(hwnd: HWND, id: u16) {
         ID_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
         },
-        ID_AUTOSTART => {
-            st.config.run_at_startup = !st.config.run_at_startup;
-            config::apply_autostart(st.config.run_at_startup);
-            config::save(&st.config);
-        }
-        ID_SIDE_LEFT => {
-            st.config.widget_side = "left".into();
-            config::save(&st.config);
-            place_widget(hwnd, false);
-        }
-        ID_SIDE_RIGHT => {
-            st.config.widget_side = "right".into();
-            config::save(&st.config);
-            place_widget(hwnd, false);
-        }
-        ID_TRAY_ICON => {
-            st.config.show_tray_icon = !st.config.show_tray_icon;
-            config::save(&st.config);
-            if st.config.show_tray_icon {
-                // Re-bind the device map too: when the icon was disabled at
-                // startup, set_devices never ran and the tooltip would stay
-                // generic forever.
-                tray::set_devices(st.devices.clone());
-                tray::ensure_created(hwnd);
-            } else {
-                tray::destroy();
-            }
-        }
-        ID_AVOID_OVERLAP => {
-            st.config.avoid_overlap = !st.config.avoid_overlap;
-            config::save(&st.config);
-            place_widget(hwnd, false);
-        }
-        ID_HOVER_DEVICES => {
-            st.config.hover_devices = !st.config.hover_devices;
-            config::save(&st.config);
-            if !st.config.hover_devices {
-                hover::hide();
-            }
-        }
-        ID_RECORD_HISTORY => {
-            st.config.record_battery_history = !st.config.record_battery_history;
-            config::save(&st.config);
-        }
-        ID_SHOW_EST_TIME => {
-            st.config.show_estimated_time = !st.config.show_estimated_time;
-            config::save(&st.config);
-            // The widget width depends on the toggle; re-place + repaint.
-            place_widget(hwnd, false);
-            unsafe {
-                let _ = InvalidateRect(hwnd, None, true);
-            }
+        ID_SETTINGS => {
+            settings::open();
         }
         ID_HISTORY_VIEW => {
             viewer::open();
         }
-        id if (ID_POLL_BASE..ID_POLL_BASE + 5).contains(&id) => {
-            let secs = [5u64, 10, 15, 30, 60][(id - ID_POLL_BASE) as usize];
-            st.config.polling_throttle_secs = secs;
-            config::save(&st.config);
-        }
-        id if (ID_REC_BASE..ID_REC_BASE + 5).contains(&id) => {
-            let secs = [1u64, 2, 5, 10, 30][(id - ID_REC_BASE) as usize];
-            st.config.history_poll_interval_secs = secs;
-            config::save(&st.config);
-        }
-        id if (ID_LANG_BASE..ID_LANG_BASE + 3).contains(&id) => {
-            let v = (id - ID_LANG_BASE) as u8; // 0 auto / 1 en / 2 zh
-            st.config.language = ["auto", "en", "zh"][v as usize].into();
-            crate::i18n::set_setting(v);
-            config::save(&st.config);
-            // Re-render localized surfaces now: tray tooltip, viewer window,
-            // and the widget (label only changes if it embeds text).
-            tray::refresh();
-            viewer::sync_language();
-            unsafe {
-                let _ = InvalidateRect(hwnd, None, true);
-            }
-        }
         id if id >= ID_DEVICE_BASE => {
-            let idx = id - ID_DEVICE_BASE;
-            if idx == 0 {
-                st.config.shown_device_handle.clear();
+            let idx = (id - ID_DEVICE_BASE) as usize;
+            let handle = if idx == 0 {
+                String::new()
             } else {
                 let devices = st.devices.lock().unwrap();
                 let mut connected: Vec<_> = devices.values().filter(|d| d.is_connected).collect();
                 connected.sort_by(|a, b| a.name.cmp(&b.name));
-                if let Some(d) = connected.get((idx - 1) as usize) {
-                    st.config.shown_device_handle = d.handle.clone();
-                }
-            }
-            // Refresh selection flags so pick_device_to_display follows the menu.
-            let mut devices = st.devices.lock().unwrap();
-            for d in devices.values_mut() {
-                d.is_selected =
-                    st.config.shown_device_handle.is_empty() || d.handle == st.config.shown_device_handle;
-            }
-            config::save(&st.config);
-            unsafe {
-                let _ = InvalidateRect(hwnd, None, true);
-            }
+                connected
+                    .get(idx - 1)
+                    .map(|d| d.handle.clone())
+                    .unwrap_or_default()
+            };
+            set_shown_device(&handle);
         }
         _ => {}
     }

@@ -20,9 +20,10 @@ Razer Synapse 日志驱动的 Windows 任务栏电池挂件（Rust，无托盘�
 | `src/hover.rs` | 悬停设备列表面板（光标轮询，非交互只读） |
 | `src/icons.rs` | GDI 矢量设备类型图标（鼠标/耳机/键盘/其他） |
 | `src/tray.rs` | 托盘兜底图标（菜单入口，explorer 重启后重挂） |
-| `src/i18n.rs` | 极简国际化：英文源串即 key，`tr()` 映射 zh；语言 auto（跟随系统）/en/zh，菜单热切换 |
+| `src/i18n.rs` | 极简国际化：英文源串即 key，`tr()` 映射 zh；语言 auto（跟随系统）/en/zh，设置页/菜单热切换 |
 | `src/history.rs` | 电量历史：SQLite 采样（`battery.db`）、充放电周期切分（换电跳变/关机排除）、加权预测（剩余可用/距充满） |
 | `src/viewer.rs` | "Battery history…" 查看窗口（深色 Win11 风格：DWM 深色标题栏/圆角、卡片布局、owner-draw pill/列表、GDI 图表） |
+| `src/settings.rs` | "Settings…" 设置窗口（同 viewer 的深色风格）：整合原托盘菜单全部设置项，改动即时生效并落盘；通过 `window.rs` 的 pub 辅助函数（`modify_config`/`set_shown_device`/`reposition_widget` 等）改 UI 线程状态 |
 | `src/config.rs` | `%APPDATA%\razer-taskbar\settings.json` 读写、自启动同步 |
 | `Cargo.toml` | 依赖（`windows 0.58`、`notify 6`、`serde_json`、`rusqlite(bundled)` 等） |
 
