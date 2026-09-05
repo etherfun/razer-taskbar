@@ -599,9 +599,12 @@ mod tests {
     #[test]
     fn estimate_text() {
         // format_estimate_verbose is localized: pin English (serialized with
-        // the i18n test via its lock — the language is global state).
-        crate::i18n::set_setting(crate::i18n::EN);
+        // the i18n test via its lock — the language is global state). Take
+        // the lock BEFORE touching the setting, or the i18n test's restore
+        // to AUTO can land between our set and our lock and flip the text
+        // under us.
         let _lock = crate::i18n::test_lock();
+        crate::i18n::set_setting(crate::i18n::EN);
         let e = Estimate { secs: 3 * 3600 + 25 * 60, charging: false };
         assert_eq!(format_estimate_compact(e), "~3h25m");
         assert_eq!(format_estimate_verbose(e), "~3h25m left");
