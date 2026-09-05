@@ -568,6 +568,29 @@ fn paint() {
             let _ = SelectObject(hdc, icon_font);
             let _ = SetTextColor(hdc, level_color);
             DrawTextW(hdc, &mut glyph, &mut grc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            // E859 (the fullest glyph) leaves the last of its 10 interior
+            // segments empty; at full charge top that segment up (same
+            // measured slot fractions as window.rs, in glyph-color gray for
+            // disconnected devices).
+            if r.level >= 100 {
+                let (ur, ug, ub) = if r.connected { color_for(r.level) } else { (0x80, 0x80, 0x80) };
+                let brush = CreateSolidBrush(COLORREF(
+                    ur as u32 | ((ug as u32) << 8) | ((ub as u32) << 16),
+                ));
+                let old_brush = SelectObject(hdc, brush);
+                let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+                let cy = (top + bottom) / 2;
+                let _ = Rectangle(
+                    hdc,
+                    glyph_x + (0.75 * icon_h as f32).round() as i32,
+                    cy - (0.18 * icon_h as f32).round() as i32,
+                    glyph_x + (0.84 * icon_h as f32).round() as i32 + 1,
+                    cy + (0.18 * icon_h as f32).round() as i32 + 1,
+                );
+                let _ = SelectObject(hdc, old_pen);
+                let _ = SelectObject(hdc, old_brush);
+                let _ = DeleteObject(brush);
+            }
             if r.charging && r.connected {
                 crate::icons::draw_bolt(
                     hdc,

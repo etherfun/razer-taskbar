@@ -902,6 +902,28 @@ fn paint(hwnd: HWND) {
             &mut icon_rect,
             DT_SINGLELINE | DT_VCENTER | DT_LEFT,
         );
+        // E859 (the fullest level glyph) leaves the last of its 10 interior
+        // segments empty; at full charge top that segment up so the battery
+        // reads completely full. Measured: the empty slot spans x ≈
+        // [0.75, 0.84] font-heights from the glyph origin, vertically
+        // centered (±0.18 font-heights).
+        if level >= 100 && connected {
+            let brush = CreateSolidBrush(COLORREF(
+                icon_rgb.0 as u32 | ((icon_rgb.1 as u32) << 8) | ((icon_rgb.2 as u32) << 16),
+            ));
+            let old_brush = SelectObject(hdc, brush);
+            let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            let _ = Rectangle(
+                hdc,
+                icon_x + (0.75 * icon_h as f32).round() as i32,
+                (h as f32 / 2.0 - 0.18 * icon_h as f32).round() as i32,
+                icon_x + (0.84 * icon_h as f32).round() as i32 + 1,
+                (h as f32 / 2.0 + 0.18 * icon_h as f32).round() as i32 + 1,
+            );
+            let _ = SelectObject(hdc, old_pen);
+            let _ = SelectObject(hdc, old_brush);
+            let _ = DeleteObject(brush);
+        }
         // Charging bolt overlay on the level glyph (Win11 style). The glyph
         // body is ~36% of the font height; the bolt spans ~70% of it.
         if charging && connected {
