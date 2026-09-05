@@ -315,7 +315,7 @@ fn measure(rows: &[Row]) -> (i32, i32) {
         // Device-type icon column: widest kind at this row height.
         let kind_w = rows
             .iter()
-            .map(|r| crate::icons::width_for(icon_h, r.kind))
+            .map(|r| crate::icons::width_for(hdc, icon_h, r.kind))
             .max()
             .unwrap_or(0);
         let pad = (10.0 * scale).round() as i32;
@@ -526,7 +526,7 @@ fn paint() {
         // Columns: [type icon] [battery glyph] [name ...] [eta?] [pct].
         let kind_w = rows
             .iter()
-            .map(|r| crate::icons::width_for(icon_h, r.kind))
+            .map(|r| crate::icons::width_for(hdc, icon_h, r.kind))
             .max()
             .unwrap_or(0);
         let pct_right = w - pad;
@@ -557,8 +557,8 @@ fn paint() {
             // (keyboard > mouse), and left-aligning made the column look
             // ragged. Also centered vertically in the row for safety.
             let kind_rgb = if r.connected { (0xE8, 0xE8, 0xE8) } else { (0x78, 0x78, 0x78) };
-            let iw = crate::icons::width_for(icon_h, r.kind);
             let ibh = row_h.min(icon_h);
+            let iw = crate::icons::width_for(hdc, ibh, r.kind);
             crate::icons::draw(
                 hdc,
                 pad + (kind_w - iw) / 2,

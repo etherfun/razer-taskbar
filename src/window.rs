@@ -864,7 +864,7 @@ fn paint(hwnd: HWND) {
         let kind = device.as_ref().map(|d| d.kind);
         let kind_h = (16.0 * scale).round() as i32;
         let kind_w = kind
-            .map(|k| crate::icons::width_for(kind_h, k))
+            .map(|k| crate::icons::width_for(hdc, kind_h, k))
             .unwrap_or(0);
         let kind_gap = if kind.is_some() { gap } else { 0 };
         let group_w = kind_w + kind_gap + icon_w + gap + text_w;

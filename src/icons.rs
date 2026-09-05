@@ -1,129 +1,96 @@
-//! GDI vector icons for device kinds (mouse / headset / keyboard / other).
-//!
-//! Drawn stroke-by-stroke like the tray bolt (no icon font, no PNG assets —
-//! same "native GDI only" rule, and no tofu-box risk from missing glyphs).
-//! All sub-shape coordinates are fractions of the icon-box height `h`;
-//! `width_for` and `draw` share the same metrics so callers can lay out and
-//! center before drawing.
+//! Device-type icons: Segoe Fluent Icons glyphs drawn as GDI text
+//! (headset E7F6, keyboard E765, mouse E962, gamepad E7FC) — tinted like
+//! the rest of the UI, with Segoe MDL2 Assets as the Win10 fallback (it
+//! carries the same codepoints).
 
-use windows::Win32::Foundation::{COLORREF, POINT};
+use windows::core::w;
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::*;
 
 use crate::battery::DeviceKind;
 
-/// Width of `kind`'s icon at box height `h` (pure math, mirrors `draw`).
-pub fn width_for(h: i32, kind: DeviceKind) -> i32 {
+/// The Segoe Fluent Icons glyph for `kind`.
+pub fn glyph_for(kind: DeviceKind) -> char {
     match kind {
-        DeviceKind::Headset => (h * 9 + 5) / 10, // 0.9h
-        DeviceKind::Keyboard => (h * 23 + 10) / 20, // 1.15h
-        DeviceKind::Mouse | DeviceKind::Other => (h * 7 + 5) / 10, // 0.7h
+        DeviceKind::Headset => '\u{E7F6}',
+        DeviceKind::Keyboard => '\u{E765}',
+        DeviceKind::Mouse => '\u{E962}',
+        DeviceKind::Other => '\u{E7FC}',
+    }
+}
+
+fn icon_font(h: i32) -> HFONT {
+    unsafe {
+        let font = CreateFontW(
+            h,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            ANTIALIASED_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            w!("Segoe Fluent Icons"),
+        );
+        if font.is_invalid() {
+            CreateFontW(
+                h,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                ANTIALIASED_QUALITY.0 as u32,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                w!("Segoe MDL2 Assets"),
+            )
+        } else {
+            font
+        }
+    }
+}
+
+/// Advance width of `kind`'s glyph at box height `h`.
+pub fn width_for(hdc: HDC, h: i32, kind: DeviceKind) -> i32 {
+    unsafe {
+        let font = icon_font(h);
+        let old = SelectObject(hdc, font);
+        let mut rect = RECT::default();
+        let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
+        DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
+        SelectObject(hdc, old);
+        let _ = DeleteObject(font);
+        (rect.right - rect.left).max(h / 3)
     }
 }
 
 /// Draw `kind` at top-left (x, y) in `rgb`, box height `h`.
-/// Returns the width used (== `width_for(h, kind)`).
+/// Returns the width used.
 pub fn draw(hdc: HDC, x: i32, y: i32, h: i32, kind: DeviceKind, rgb: (u8, u8, u8)) -> i32 {
     unsafe {
-        let color = COLORREF(rgb.0 as u32 | ((rgb.1 as u32) << 8) | ((rgb.2 as u32) << 16));
-        let pen = CreatePen(PS_SOLID, (h / 12).max(1), color);
-        let brush = CreateSolidBrush(color);
-        let old_pen = SelectObject(hdc, pen);
-        let old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let w = width_for(h, kind);
-        match kind {
-            DeviceKind::Mouse => mouse(hdc, brush, x, y, h, w),
-            DeviceKind::Headset => headset(hdc, brush, x, y, h, w),
-            DeviceKind::Keyboard => keyboard(hdc, brush, x, y, h, w),
-            DeviceKind::Other => dongle(hdc, brush, x, y, h, w),
-        }
-        let _ = SelectObject(hdc, old_pen);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = DeleteObject(pen);
-        let _ = DeleteObject(brush);
+        let font = icon_font(h);
+        let old_font = SelectObject(hdc, font);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let _ = SetTextColor(
+            hdc,
+            COLORREF(rgb.0 as u32 | ((rgb.1 as u32) << 8) | ((rgb.2 as u32) << 16)),
+        );
+        let mut rect = RECT { left: x, top: y, right: x + h * 2, bottom: y + h };
+        let mut buf: Vec<u16> = vec![glyph_for(kind) as u16];
+        DrawTextW(hdc, &mut buf, &mut rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        let w = (rect.right - rect.left).max(h / 3);
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(font);
         w
     }
 }
-
-/// Top-view mouse: rounded body, center split line, scroll wheel.
-fn mouse(hdc: HDC, brush: HBRUSH, x: i32, y: i32, h: i32, w: i32) {
-    unsafe {
-        let r = (w * 6 / 10).max(3);
-        let _ = RoundRect(hdc, x, y, x + w, y + h, r, r);
-        let cx = x + w / 2;
-        let _ = MoveToEx(hdc, cx, y + h / 12, None);
-        let _ = LineTo(hdc, cx, y + 2 * h / 5);
-        let _ = SelectObject(hdc, brush);
-        let wheel_w = (w / 6).max(1);
-        let _ = RoundRect(
-            hdc,
-            cx - wheel_w,
-            y + h * 3 / 20,
-            cx + wheel_w,
-            y + h / 4,
-            wheel_w.max(1),
-            wheel_w.max(1),
-        );
-    }
-}
-
-/// Front-view headset: "∩" headband polyline + two filled ear cups.
-fn headset(hdc: HDC, brush: HBRUSH, x: i32, y: i32, h: i32, w: i32) {
-    unsafe {
-        let pts = [
-            POINT { x: x + h / 10, y: y + h / 2 },
-            POINT { x: x + h / 10, y: y + h * 28 / 100 },
-            POINT { x: x + h * 22 / 100, y: y + h / 10 },
-            POINT { x: x + h * 68 / 100, y: y + h / 10 },
-            POINT { x: x + h * 8 / 10, y: y + h * 28 / 100 },
-            POINT { x: x + h * 8 / 10, y: y + h / 2 },
-        ];
-        let _ = Polyline(hdc, &pts);
-        let _ = SelectObject(hdc, brush);
-        let cup_w = h / 5;
-        let cup_r = (cup_w / 2).max(2);
-        let top = y + h * 42 / 100;
-        let bottom = y + h * 9 / 10;
-        let _ = RoundRect(hdc, x, top, x + cup_w, bottom, cup_r, cup_r);
-        let _ = RoundRect(hdc, x + w - cup_w, top, x + w, bottom, cup_r, cup_r);
-    }
-}
-
-/// Keyboard: thin rounded body, a row of keys, spacebar.
-fn keyboard(hdc: HDC, brush: HBRUSH, x: i32, y: i32, h: i32, w: i32) {
-    unsafe {
-        let top = y + h * 19 / 100;
-        let bottom = y + h * 81 / 100;
-        let _ = RoundRect(hdc, x, top, x + w, bottom, 3, 3);
-        let _ = SelectObject(hdc, brush);
-        let ks = (h / 10).max(2);
-        let ky = y + h * 30 / 100;
-        for i in 0..4u32 {
-            let kx = x + w * (2 + 2 * i as i32) / 10;
-            let _ = Rectangle(hdc, kx, ky, kx + ks, ky + ks);
-        }
-        let sy = ky + ks + ks / 2;
-        let _ = Rectangle(hdc, x + w * 28 / 100, sy, x + w * 72 / 100, sy + ks);
-    }
-}
-
-/// "Other": USB wireless dongle — connector stub, rounded body, LED dot.
-fn dongle(hdc: HDC, brush: HBRUSH, x: i32, y: i32, h: i32, w: i32) {
-    unsafe {
-        let _ = SelectObject(hdc, brush);
-        let _ = Rectangle(
-            hdc,
-            x + w * 25 / 100,
-            y,
-            x + w * 75 / 100,
-            y + h * 3 / 10,
-        );
-        let _ = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let _ = RoundRect(hdc, x, y + h * 3 / 10, x + w, y + h, 3, 3);
-        let _ = SelectObject(hdc, brush);
-        let cx = x + w / 2;
-        let cy = y + h * 62 / 100;
-        let r = (h / 10).max(1);
-        let _ = Ellipse(hdc, cx - r, cy - r, cx + r, cy + r);
-    }
-}
-
