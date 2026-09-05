@@ -38,6 +38,11 @@ pub struct Config {
     pub history_poll_interval_secs: u64,
     /// UI language: "auto" (follow Windows) | "en" | "zh" (`i18n.rs`).
     pub language: String,
+    /// Experimental: parent the widget into the taskbar band as a WS_CHILD
+    /// (Lyricify's taskbar-lyrics trick) instead of a topmost overlay. Rides
+    /// every shell raise for free; unsupported and update-fragile, so the
+    /// overlay stays the default and any SetParent rejection falls back.
+    pub embed_into_taskbar: bool,
 }
 
 impl Default for Config {
@@ -60,6 +65,7 @@ impl Default for Config {
             show_estimated_time: false,
             history_poll_interval_secs: 5,
             language: "auto".into(),
+            embed_into_taskbar: false,
         }
     }
 }

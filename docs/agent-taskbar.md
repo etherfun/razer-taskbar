@@ -43,6 +43,13 @@
 - 让位节奏：`try_hold_position` —— 无碰撞 hold；新碰撞进 grace（静态 1s / 移动或新来 3s，`waiting=true`，按 `Instant` 计时，事件驱动下更频繁调用不改变语义）；同 key 过期才 yield。`avoid_overlap=false` 时清空第三方 occupant（仅钉死原始锚点，天气板仍避让）。
 - 防弹射：`MAX_AVOID_JUMP_PX = 500`，非首轮、相对 live 位移超限则 stay + `capped=true`；首轮（`first=true`，窗口仍在 0,0）与 `TaskbarCreated` 后的重锚不设防。
 
+## 实验性嵌入模式（`embed_into_taskbar`，默认关）
+
+- `taskbar::set_taskbar_child`：Lyricify 任务栏歌词同款——跨进程 `SetParent` 进任务栏带（Win11 是 `Shell_TrayWnd`，Classic 是 `ReBarWindow32`），`WS_POPUP→WS_CHILD`、去 `WS_EX_TOPMOST`、保留 `WS_EX_LAYERED|NOACTIVATE`，并 `HWND_TOP` 保持兄弟第 0 位（压在 XAML 桥上）。子窗口随任务栏生灭，z 序争夺战（`arm_z_burst`/`z_covered`）整体跳过，改为每秒 `reassert_child_top`。
+- 坐标换算：定位数学输出带坐标，子窗口用父 CLIENT 坐标，差值即 `client_origin(parent)`。
+- 失败回退：`SetParent` 被拒（安全软件拦截等）置 `embed_failed` 粘性回退覆盖模式；explorer 重启后父窗被拆，`place_widget` 每轮校验 `is_child_of`，丢父即重嵌或回退。
+- 避让/occupant 枚举在嵌入下照常工作（枚举按 hwnd + 自身 pid 排除自己）；`embed_into_taskbar=false` 或删除该键即回到纯覆盖模式。
+
 ## 绘制与菜单
 
 - `paint`：黑底整窗填充（colorkey 抠除）→ 只画字形/文字/阴影，TTB acrylic 可透出。字体 `Segoe Fluent Icons`（回退 `Segoe MDL2 Assets`）+ `Segoe UI Variable Text`（回退 `Segoe UI`），灰度抗锯齿；阴影 `0x202020`（纯黑会被抠掉）。

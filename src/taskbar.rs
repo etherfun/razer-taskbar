@@ -28,7 +28,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::w;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1402,6 +1403,95 @@ pub fn move_overlay(widget: HWND, x: i32, y: i32, w: i32, h: i32) {
             w,
             h,
             SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+/// Experimental embed mode (Lyricify's taskbar lyrics): reparent `widget`
+/// into the taskbar band `parent` as a plain WS_CHILD — layered + no-activate
+/// are kept, TOPMOST is dropped (children have no TOPMOST band) — and park it
+/// at sibling index 0 so it draws above the XAML bridge. A child rides every
+/// shell raise for free, which removes the whole topmost-race machinery.
+/// Unsupported and update-fragile; the caller falls back to the overlay when
+/// this returns false (some security software blocks cross-process SetParent).
+pub fn set_taskbar_child(widget: HWND, parent: HWND, embed: bool) -> bool {
+    unsafe {
+        let _ = ShowWindow(widget, SW_HIDE);
+        if embed {
+            let ex = GetWindowLongPtrW(widget, GWL_EXSTYLE);
+            let _ = SetWindowLongPtrW(widget, GWL_EXSTYLE, ex & !(WS_EX_TOPMOST.0 as isize));
+            if SetParent(widget, parent).is_err() {
+                // Restore exactly what was there and let the caller stay
+                // in overlay mode.
+                let _ = SetWindowLongPtrW(widget, GWL_EXSTYLE, ex);
+                let _ = ShowWindow(widget, SW_SHOWNA);
+                return false;
+            }
+            let style = GetWindowLongPtrW(widget, GWL_STYLE);
+            let _ = SetWindowLongPtrW(
+                widget,
+                GWL_STYLE,
+                (style & !(WS_POPUP.0 as isize)) | (WS_CHILD.0 as isize),
+            );
+            // Sibling #0 — above DesktopWindowContentBridge. Among children
+            // this relative order is all the protection a shell raise cannot
+            // take away, so re-assert it on placement passes.
+            let _ = SetWindowPos(
+                widget,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        } else {
+            let style = GetWindowLongPtrW(widget, GWL_STYLE);
+            let _ = SetWindowLongPtrW(
+                widget,
+                GWL_STYLE,
+                (style & !(WS_CHILD.0 as isize)) | (WS_POPUP.0 as isize),
+            );
+            let ex = GetWindowLongPtrW(widget, GWL_EXSTYLE);
+            let _ = SetWindowLongPtrW(widget, GWL_EXSTYLE, ex | (WS_EX_TOPMOST.0 as isize));
+            let _ = SetParent(widget, HWND(std::ptr::null_mut()));
+        }
+        true
+    }
+}
+
+/// `true` while `widget` is parented into `parent` (embed mode's live check —
+/// explorer restarts re-create the band, detaching our window from it).
+pub fn is_child_of(widget: HWND, parent: HWND) -> bool {
+    unsafe { GetAncestor(widget, GA_PARENT) == parent }
+}
+
+/// Origin of `parent`'s client area in screen coordinates. Child windows
+/// position in parent-client coordinates; the placement math is in band
+/// coordinates, so the difference is the only conversion embed mode needs.
+pub fn client_origin(parent: HWND) -> (i32, i32) {
+    unsafe {
+        let mut pt = POINT::default();
+        if ClientToScreen(parent, &mut pt).as_bool() {
+            (pt.x, pt.y)
+        } else {
+            window_rect(parent).map(|r| (r.left, r.top)).unwrap_or((0, 0))
+        }
+    }
+}
+
+/// Re-assert sibling #0 for an embedded widget (children are ordered only
+/// among themselves; whoever the shell inserts lands below us again).
+pub fn reassert_child_top(widget: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            widget,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }

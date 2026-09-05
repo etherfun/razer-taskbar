@@ -110,6 +110,12 @@ struct AppState {
     last_covered_log: Option<Instant>,
     /// Last occupancy fingerprint (avoidance change detection).
     last_occupancy: Option<u64>,
+    /// Experimental embed mode: the widget is a WS_CHILD of the taskbar band
+    /// instead of a topmost overlay (see `taskbar::set_taskbar_child`).
+    embedded: bool,
+    /// Sticky: a SetParent rejection disables embed mode until restart (the
+    /// blocker — usually security software — will not vanish mid-session).
+    embed_failed: bool,
 }
 
 static mut STATE: Option<AppState> = None;
@@ -273,6 +279,8 @@ pub fn run_message_loop(devices: Arc<Mutex<DeviceMap>>, cfg: Config) {
             z_burst_left: 0,
             last_covered_log: None,
             last_occupancy: None,
+            embedded: false,
+            embed_failed: false,
         });
         // Color-key transparency: BLACK key is cut out (LWA_COLORKEY).
         // Black (not magenta): glyph/text antialiased edges blend toward
@@ -373,6 +381,34 @@ fn place_widget(hwnd: HWND, first: bool) {
         return;
     };
 
+    // Experimental embed mode: keep the widget as a child of the taskbar band
+    // (Lyricify-style) instead of a topmost overlay. The transition hides the
+    // window, so it must run before the placement pass repositions it.
+    let want_embed = cfg.embed_into_taskbar && !st.embed_failed;
+    if st.embedded != want_embed {
+        if taskbar::set_taskbar_child(hwnd, pl.parent, want_embed) {
+            st.embedded = want_embed;
+            st.last_layout = None;
+            eprintln!("razer-taskbar: embed={} applied", want_embed);
+        } else {
+            st.embed_failed = true;
+            st.last_layout = None;
+            eprintln!("razer-taskbar: embed rejected (SetParent), staying as overlay");
+        }
+    } else if st.embedded && !taskbar::is_child_of(hwnd, pl.parent) {
+        // Explorer restart re-created the band and detached our window:
+        // re-attach, or fall back to the overlay for this session.
+        if taskbar::set_taskbar_child(hwnd, pl.parent, true) {
+            st.last_layout = None;
+            eprintln!("razer-taskbar: re-embedded after parent change");
+        } else {
+            st.embedded = false;
+            st.embed_failed = true;
+            st.last_layout = None;
+            eprintln!("razer-taskbar: re-embed failed, falling back to overlay");
+        }
+    }
+
     // Convert to screen coords relative to the placement's own parent: the
     // Win11 branch anchors on Shell_TrayWnd, the Classic branch on the
     // ReBarWindow32 band — `pl.parent` carries which one. (Using the tray
@@ -392,8 +428,11 @@ fn place_widget(hwnd: HWND, first: bool) {
         }
     };
     let mut line = format!(
-        "overlay kind={:?} pos=({sx},{sy}) size={w}x{h} held={} capped={}",
-        pl.kind, pl.held, pl.capped
+        "overlay kind={:?} pos=({sx},{sy}) size={w}x{h} held={} capped={} embed={}",
+        pl.kind,
+        pl.held,
+        pl.capped,
+        st.embedded
     );
     if pl.capped && !pl.blockers.is_empty() {
         let names: Vec<String> = pl.blockers.iter().map(describe).collect();
@@ -422,7 +461,26 @@ fn place_widget(hwnd: HWND, first: bool) {
     // repaint — layered window content survives — so invalidate only when
     // the rect actually changed.
     let changed = st.last_layout != Some((sx, sy, w, h));
-    taskbar::move_overlay(hwnd, sx, sy, w, h);
+    if st.embedded {
+        // Children position in the band's CLIENT coordinates; the placement
+        // math is in band coordinates, so only the client-origin offset
+        // differs. HWND_TOP keeps the widget sibling #0 (above the XAML
+        // bridge) — re-asserted per pass, a no-op when already first.
+        let (cox, coy) = taskbar::client_origin(pl.parent);
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                sx - cox,
+                sy - coy,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+    } else {
+        taskbar::move_overlay(hwnd, sx, sy, w, h);
+    }
     if changed {
         st.last_layout = Some((sx, sy, w, h));
         unsafe {
@@ -441,12 +499,21 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => {
             match wparam.0 {
                 TIMER_ID => {
-                    // Detect "the taskbar raised itself above us" BEFORE the
-                    // re-asserting placement pass, and arm a fast repair
-                    // burst so we win the re-raise race (one pass per second
-                    // alone is too slow and read as the widget vanishing).
-                    if z_covered(hwnd) {
-                        arm_z_burst(hwnd);
+                    let embedded = state().map(|s| s.embedded).unwrap_or(false);
+                    if embedded {
+                        // Children have no TOPMOST band: riding above the XAML
+                        // bridge is a sibling order instead, so re-assert it
+                        // once a second in case the shell re-inserts children.
+                        taskbar::reassert_child_top(hwnd);
+                    } else {
+                        // Detect "the taskbar raised itself above us" BEFORE
+                        // the re-asserting placement pass, and arm a fast
+                        // repair burst so we win the re-raise race (one pass
+                        // per second alone is too slow and read as the widget
+                        // vanishing).
+                        if z_covered(hwnd) {
+                            arm_z_burst(hwnd);
+                        }
                     }
                     place_widget(hwnd, false);
                     tray::refresh();
@@ -468,10 +535,13 @@ unsafe extern "system" fn wnd_proc(
                     // Piggyback two cheap checks on this 120ms tick:
                     // - z-order: recover from taskbar raises within ~120ms
                     //   (plain SetWindowPos(HWND_TOPMOST) per second loses
-                    //   the race when the shell re-raises repeatedly);
+                    //   the race when the shell re-raises repeatedly) —
+                    //   meaningless for an embedded child, which cannot
+                    //   lose the band's z-order in the first place;
                     // - occupancy: occupant moves fire no UIA event, so the
                     //   fingerprint detector is what makes avoidance fast.
-                    if z_covered(hwnd) {
+                    let embedded = state().map(|s| s.embedded).unwrap_or(false);
+                    if !embedded && z_covered(hwnd) {
                         arm_z_burst(hwnd);
                     }
                     if occupancy_changed(hwnd) {
