@@ -52,9 +52,18 @@ cargo test --quiet      # 单元测试（battery / watcher 解析规则）
 - 任务栏定位改动先读 `docs/agent-taskbar.md`，不破坏 hold/grace/jump-cap 状态机与 OS 白名单。
 - 配置新增字段必须带 `serde(default)` 默认值，保持旧配置文件可加载。
 
-## 分文档索引
+## C# + WinUI3 移植（实验，`csharp/`）
+
+分支 `refactor/csharp-winui3` 上的全量 C# 移植：挂件层为 C# P/Invoke（观感与 Rust 版对齐），
+历史+设置合并为一个 WinUI3 NavigationView 窗口；框架依赖 unpackaged（不打包 Windows App SDK
+Runtime，缺失时降级为挂件-only）。与 Rust 版共享 settings.json/battery.db，**不可同时运行**。
+构建/测试/映射表/冒烟记录见 `docs/agent-csharp.md`。改动 C# 侧日志解析或选择规则时，
+同步更新 `csharp/tests/RazerTaskbar.Tests`（对应 Rust 侧单测的移植）。
+
+# 分文档索引
 
 - 构建/测试/调试：`docs/agent-build.md`
 - 编码规范与检查：`docs/agent-conventions.md`
 - 日志解析与设备选择：`docs/agent-watcher.md`
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
+- C# + WinUI3 移植（csharp/，实验分支）：`docs/agent-csharp.md`

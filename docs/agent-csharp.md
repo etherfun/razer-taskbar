@@ -1,0 +1,75 @@
+# C# + WinUI3 移植(`csharp/`,分支 `refactor/csharp-winui3`)
+
+Rust 版的全量 C# 移植实验:挂件/托盘/悬停/日志监听/UIA 用 C# P/Invoke 重写(观感像素级对齐),
+电量历史 + 设置页合并为一个 WinUI3 NavigationView 窗口。**Rust 版保持不动**,两版共存于本分支;
+共享同一份 `%APPDATA%\razer-taskbar\settings.json` 与 `battery.db`(schema 兼容),
+但**不可同时运行**(窗口类名相同,单实例互斥)。
+
+## 构建与测试
+
+```powershell
+dotnet build csharp/RazerTaskbar.sln -c Release        # 构建
+dotnet test  csharp/tests/RazerTaskbar.Tests -v q      # 27 个单测(移植自 Rust #[cfg(test)])
+dotnet publish csharp/src/RazerTaskbar/RazerTaskbar.csproj -c Release
+# 产物: csharp/src/RazerTaskbar/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/razer-taskbar.exe
+```
+
+## 运行时模型(对应要求)
+
+- **不打包 WinUI3 依赖**:csproj 用 `WindowsPackageType=None` + `WindowsAppSDKSelfContained=false`
+  + `SelfContained=false`,依赖系统安装的 Windows App SDK Runtime(框架依赖、unpackaged)。
+  csproj 直接引用 WinUI/Foundation/Base/Runtime 子包而非整合包,避开 AI/ML/Widgets 负载。
+- **Bootstrap 降级**:DISABLE_XAML_GENERATED_MAIN + 自定义 Main 自己调 `Bootstrap.TryInitialize`
+  (Options.None 静默失败)。运行时缺失 → 挂件-only 降级,托盘菜单中 Settings/History 置灰,
+  不退出进程(整合包自动初始化是 Environment.Exit,不可接受,故必须自定义 Main)。
+- **跟随系统亮/暗**:不强制 RequestedTheme;图表配色走 ActualTheme + ThemeDictionaries。
+
+## 线程模型(对应 Rust 三线程 + UIA 线程)
+
+| 线程 | 职责 |
+|---|---|
+| 主线程 (STA) | WinUI3 `Application.Start`;MainWindow(NavigationView)按需惰性创建,空闲时不加载 XAML |
+| razer-widget (STA) | 挂件覆盖层 + 悬停面板 + 托盘 + 菜单 + 4 定时器 + GetMessage 循环 |
+| razer-watcher | 日志解析 + 历史采样(设置每轮重读,即时生效契约不变) |
+| razer-uia-events (MTA) | UIA 结构变化监听,回调仅 PostMessage(WM_APP+2);TaskbarCreated 重绑 + 30s 自检 |
+
+跨线程:UI → 挂件线程用 `WidgetThread.Post`(WM_APP+3 + GCHandle 闭包);挂件 → UI 用
+`DispatcherQueue.TryEnqueue`。配置权威副本在 `AppState`(挂件线程写 + 落盘;UI 经 Post 修改)。
+
+## 模块映射
+
+| Rust | C# | 说明 |
+|---|---|---|
+| main.rs | Program.cs + App.xaml.cs | 单实例 FindWindow + EnumChildWindows 兜底;Bootstrap 降级 |
+| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4/z-burst/菜单 ID 全保留 |
+| taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
+| hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
+| tray.rs | Native/TrayIcon.cs | VERSION_4、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
+| icons.rs | Native/DeviceIcons.cs | 字形墨迹扫描 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
+| uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
+| watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖 |
+| battery.rs | Core/Models + DeviceSelector | 选择规则/字形/五段色 |
+| history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/加权/instant 兜底逐条移植 |
+| config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
+| i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |
+| viewer.rs | MainWindow + Views/HistoryPage + Controls/BatteryChart | NavigationView 合并窗口;图表 = WinUI Shapes(网格/色带/面积/分段折线/换电点/5 刻度) |
+| settings.rs | Views/SettingsPage | Win11 设置规范行布局;即时生效经 Post 回投挂件线程 |
+
+## 冒烟验证记录(2026-09-06,Win11 26340)
+
+- 单实例:Rust 版运行时启动 C# 版 → 1.1s 干净退出 ✓
+- 挂件:`overlay kind=Win11 pos=(2,1556) size=144x40 embed=False`、FindWindowW 命中 ✓
+- UIA:`UIA structure listener registered` ✓(注意:.NET `SetApartmentState(MTA)` 已初始化 COM,
+  `CoInitializeEx` 返回 S_FALSE=1 属成功,必须按 `<0` 判失败)
+- 菜单/悬停/两页面、亮暗切换:待人工验证(托盘右键 → Settings…/Battery history…)
+
+## 已知差异 / 注意
+
+- C# 版空闲内存约 100MB+ 量级(Rust 约 30MB):.NET 运行时 + WinUI 投影程序集;
+  窗口惰性创建使 XAML 在首次打开前不加载。
+- 启动竞态三处已按 Rust 语义处理:WndProc 在 `_state` 赋值前到达(WM_NCCREATE)→ DefWindowProc;
+  `App.RequestExit` 在 Application.Start 构造 App 前到达 → Environment.Exit;
+  UIA 线程 CoInitializeEx S_FALSE → 视为成功。
+- 移植保真关键点(勿"顺手改"):单次 SetLayeredWindowAttributes(COLORKEY only);黑 key 非洋红;
+  阴影 0x202020 非纯黑;顶层 WS_POPUP 永不 WS_CHILD(overlay 模式);embed 失败 sticky;
+  z-burst 运行中不重排定时器;DrawTextW 空缓冲短路;V4 末行损坏不推进时间戳。

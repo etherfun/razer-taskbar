@@ -1,0 +1,167 @@
+<Page
+    x:Class="RazerTaskbar.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="760" HorizontalAlignment="Left" Margin="16,8,16,16" Spacing="4">
+
+            <!-- ============ Widget ============ -->
+            <TextBlock x:Name="HeaderWidget" Style="{StaticResource SettingsSectionStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="2">
+                    <!-- Shown device -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblShownDevice" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescShownDevice" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboDevice" Grid.Column="1" Width="240" VerticalAlignment="Center"
+                                  SelectionChanged="ComboDevice_SelectionChanged" />
+                    </Grid>
+                    <!-- Widget side -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblSide" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescSide" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <RadioButtons x:Name="SideButtons" Grid.Column="1" MaxColumns="2"
+                                      VerticalAlignment="Center" SelectionChanged="Side_SelectionChanged">
+                            <RadioButton x:Name="SideLeft" Content="Left" />
+                            <RadioButton x:Name="SideRight" Content="Right" />
+                        </RadioButtons>
+                    </Grid>
+                    <!-- Show estimated time -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblEst" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescEst" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchEst" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchEst_Toggled" />
+                    </Grid>
+                    <!-- Show tray icon -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblTray" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescTray" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchTray" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchTray_Toggled" />
+                    </Grid>
+                    <!-- Hover devices -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblHover" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescHover" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchHover" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchHover_Toggled" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ============ History ============ -->
+            <TextBlock x:Name="HeaderHistory" Style="{StaticResource SettingsSectionStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="2">
+                    <!-- Poll interval -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblPoll" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescPoll" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboPoll" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboPoll_SelectionChanged" />
+                    </Grid>
+                    <!-- Record battery history -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblRec" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescRec" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchRec" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchRec_Toggled" />
+                    </Grid>
+                    <!-- Record interval -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblRecI" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescRecI" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboRecI" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboRecI_SelectionChanged" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- ============ General ============ -->
+            <TextBlock x:Name="HeaderGeneral" Style="{StaticResource SettingsSectionStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="2">
+                    <!-- Language -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblLang" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescLang" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboLang" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboLang_SelectionChanged" />
+                    </Grid>
+                    <!-- Run at startup -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblAutostart" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescAutostart" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchAutostart" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchAutostart_Toggled" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</Page>
