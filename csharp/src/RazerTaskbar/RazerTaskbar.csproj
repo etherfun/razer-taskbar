@@ -24,12 +24,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Explicit WindowsAppSDK sub-packages instead of the metapackage: the
-         app only needs XAML + bootstrap, not the AI/ML/Widgets payloads. -->
-    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="1.8.260803003" />
-    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="1.8.260803002" />
-    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="1.8.251216001" />
-    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="1.8.260804001" />
+    <!-- Explicit Windows App SDK sub-packages instead of the metapackage: the
+         app only needs XAML + bootstrap, not the AI/ML/Widgets payloads.
+         Versions = the exact set the 2.4.0 metapackage depends on
+         (WinAppSDK 1.8 reached end of servicing 2026-09-09). -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.6" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.6" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.3.9" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="2.0.4" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="2.4.0" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
   </ItemGroup>
 
