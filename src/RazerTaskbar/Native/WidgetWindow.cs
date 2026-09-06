@@ -3,8 +3,9 @@
 //!
 //! - Class `RazerTaskbarWidget`, top-level `WS_POPUP | WS_EX_LAYERED`,
 //!   `HWND_TOPMOST`. WM_PAINT draws the Win11-style two-row widget — battery
-//!   glyph + percentage on top, predicted time below — black color-keyed
-//!   transparent background.
+//!   glyph + percentage on top, predicted time below — into a 32bpp DIB that
+//!   UpdateLayeredWindow presents with per-pixel alpha (AA edges blend with
+//!   the real backdrop, like DirectWrite taskbar text).
 //! - Right-click menu lives on the tray icon (overlay is click-through).
 //! - Layout is event-driven: TaskbarCreated broadcast (explorer restart) and
 //!   UIA structure-change events both trigger an immediately coalesced
@@ -68,6 +69,17 @@ public static class WidgetWindow
         public IntPtr Hwnd;
         public int WidgetW;
         public int WidgetH;
+        /// <summary>Offscreen render surface: a 32bpp top-down DIB section.
+        /// Everything paints here (GDI leaves the alpha byte zero), then
+        /// AlphaPresent turns coverage into premultiplied alpha and hands the
+        /// frame to DWM via UpdateLayeredWindow — per-pixel transparency like
+        /// the native widgets, no black color key.</summary>
+        public IntPtr MemDc;
+        public IntPtr MemBmp;
+        public IntPtr MemBits;
+        public int MemW;
+        public int MemH;
+        public bool UlwFailedLogged;
         public uint TaskbarCreatedMsg;
         public (int X, int Y, int W, int H)? LastLayout;
         public string? LastLog;
@@ -134,11 +146,17 @@ public static class WidgetWindow
         _state = st;
         WidgetThread.Init(hwnd);
 
-        // Color-key transparency: BLACK key is cut out (LWA_COLORKEY). Black
-        // (not magenta): AA edges blend toward black, melting into the dark
-        // taskbar. NOTE: single call with COLORKEY only — a second LWA_ALPHA
-        // call would replace the key mode instead of combining with it.
-        SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
+        // Per-pixel-alpha layered presentation (UpdateLayeredWindow): text AA
+        // blends against the REAL taskbar like the native widgets' DirectWrite
+        // text, instead of the color key's binary transparency whose edges
+        // melt into a fixed black (dirty halos over light wallpapers). A
+        // layered window paints nothing until its first ULW/SLWA call — push
+        // one fully transparent frame now so WM_PAINTs are delivered.
+        EnsureMemSurface(st, hwnd, st.WidgetW, st.WidgetH);
+        if (st.MemDc != 0)
+        {
+            AlphaPresent(st, hwnd);
+        }
 
         // First call anchors directly: the window still sits at its 0,0
         // creation rect, which is not a position worth defending.
@@ -394,6 +412,7 @@ public static class WidgetWindow
         {
             HoverPanel.Destroy();
             TrayIcon.Destroy();
+            DestroyMemSurface(st);
             HistoryService.Close();
             PostQuitMessage(0);
             App.RequestExit();
@@ -555,7 +574,15 @@ public static class WidgetWindow
         }
         try
         {
-            PaintBody(hwnd, st, hdc, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel);
+            // Offscreen 32bpp DIB render, then premultiplied-alpha upload.
+            // Falls back to direct window drawing if the surface failed.
+            EnsureMemSurface(st, hwnd, w, h);
+            var target = st.MemDc != 0 ? st.MemDc : hdc;
+            PaintBody(hwnd, st, target, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel);
+            if (st.MemDc != 0)
+            {
+                AlphaPresent(st, hwnd);
+            }
         }
         catch (Exception e)
         {
@@ -567,14 +594,115 @@ public static class WidgetWindow
         }
     }
 
+    /// <summary>Offscreen 32bpp top-down DIB matching the widget size;
+    /// recreated only when the size changes. Widget-thread only.</summary>
+    private static void EnsureMemSurface(WidgetState st, IntPtr hwnd, int w, int h)
+    {
+        if (st.MemDc != 0 && st.MemW == w && st.MemH == h)
+        {
+            return;
+        }
+        DestroyMemSurface(st);
+        var wdc = GetDC(hwnd);
+        if (wdc == 0)
+        {
+            return;
+        }
+        st.MemDc = CreateCompatibleDC(wdc);
+        var bmi = new BITMAPINFO
+        {
+            bmiHeader = new BITMAPINFOHEADER
+            {
+                biSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>(),
+                biWidth = w,
+                biHeight = -h, // top-down
+                biPlanes = 1,
+                biBitCount = 32,
+                biCompression = 0, // BI_RGB
+            },
+        };
+        st.MemBmp = CreateDIBSection(wdc, ref bmi, DIB_RGB_COLORS, out st.MemBits, 0, 0);
+        ReleaseDC(hwnd, wdc);
+        if (st.MemDc == 0 || st.MemBmp == 0 || st.MemBits == 0)
+        {
+            DestroyMemSurface(st);
+            return;
+        }
+        SelectObject(st.MemDc, st.MemBmp);
+        st.MemW = w;
+        st.MemH = h;
+    }
+
+    private static void DestroyMemSurface(WidgetState st)
+    {
+        if (st.MemDc != 0)
+        {
+            DeleteDC(st.MemDc);
+            st.MemDc = 0;
+        }
+        if (st.MemBmp != 0)
+        {
+            DeleteObject(st.MemBmp);
+            st.MemBmp = 0;
+        }
+        st.MemBits = 0;
+        st.MemW = 0;
+        st.MemH = 0;
+    }
+
+    /// <summary>Convert the GDI render into premultiplied ARGB and hand it to
+    /// DWM. The frame is drawn with solid colors over black, so each stored
+    /// pixel is color*coverage and the coverage (== premultiplied alpha) is
+    /// max(r,g,b). White text, gray icons and the tinted battery glyph all
+    /// then blend against the REAL backdrop instead of the old black key;
+    /// untouched black pixels become fully transparent.</summary>
+    private static void AlphaPresent(WidgetState st, IntPtr hwnd)
+    {
+        int bytes = st.MemW * st.MemH * 4;
+        var buf = new byte[bytes];
+        System.Runtime.InteropServices.Marshal.Copy(st.MemBits, buf, 0, bytes);
+        for (int i = 0; i + 3 < bytes; i += 4)
+        {
+            byte b = buf[i], g = buf[i + 1], r = buf[i + 2];
+            buf[i + 3] = Math.Max(b, Math.Max(g, r));
+        }
+        System.Runtime.InteropServices.Marshal.Copy(buf, 0, st.MemBits, bytes);
+
+        var dst = new POINT();
+        if (TaskbarLocator.WindowRect(hwnd) is { } wr)
+        {
+            dst.X = wr.Left;
+            dst.Y = wr.Top;
+        }
+        var size = new SIZE(st.MemW, st.MemH);
+        var src = new POINT();
+        var blend = new BLENDFUNCTION
+        {
+            BlendOp = 0, // AC_SRC_OVER
+            BlendFlags = 0,
+            SourceConstantAlpha = 255,
+            AlphaFormat = AC_SRC_ALPHA,
+        };
+        if (!UpdateLayeredWindow(hwnd, 0, ref dst, ref size, st.MemDc, ref src, 0, ref blend, ULW_ALPHA))
+        {
+            // Log at most the first failure; a silent blank widget is worse.
+            if (!st.UlwFailedLogged)
+            {
+                st.UlwFailedLogged = true;
+                Console.Error.WriteLine($"razer-taskbar: UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            }
+        }
+    }
+
     private static void PaintBody(IntPtr hwnd, WidgetState st, IntPtr hdc, PaintSig sig, string topLabel,
         RazerDevice? device, float scale, int w, int h,
         bool connected, int level, bool charging, bool saver, string? bottomLabel)
     {
         try
         {
-            // Transparent base: black color-key is cut out, so only drawn
-            // pixels are visible over acrylic/taskbar.
+            // The color key is gone: the frame is drawn over black and its
+            // coverage becomes per-pixel alpha in AlphaPresent, so this fill
+            // only clears the previous frame.
             var keyBrush = CreateSolidBrush(0x00000000);
             var keyRect = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
             FillRect(hdc, ref keyRect, keyBrush);
@@ -589,7 +717,7 @@ public static class WidgetWindow
             // to Microsoft's magic pixel sizes for crisp rendering.
             int iconH = DeviceIcons.SnapSize((int)MathF.Round(20.0f * scale));
             var hiconFont = DeviceIcons.IconFont(iconH);
-            var hfont = GdiText.CachedTextFont((int)MathF.Round(14.0f * scale), FW_SEMIBOLD);
+            var hfont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_SEMIBOLD);
             SelectObject(hdc, hfont);
 
             var fill = BatteryColors.LevelFillColor(level, connected, saver, charging);
@@ -627,7 +755,7 @@ public static class WidgetWindow
             int estIconW = 0;
             int estW = 0;
             var estIconFont = DeviceIcons.IconFont(DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale)));
-            var estFont = GdiText.CachedTextFont((int)MathF.Round(14.0f * scale), FW_NORMAL);
+            var estFont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_NORMAL);
             if (bottomLabel is { } estText)
             {
                 estCh = new[] { charging ? '\uF607' : '\uE823' };

@@ -25,18 +25,66 @@ internal static class GdiText
             {
                 return handle;
             }
-            var f = CreateFontW(height, 0, 0, 0, weight, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE, "Segoe UI Variable Text");
-            // Fallback if the Variable font is missing (Win10 / older Win11).
-            if (f == 0)
-            {
-                f = CreateFontW(height, 0, 0, 0, weight, 0, 0, 0,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                    DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-            }
+            var f = CreateTextFont(height, weight);
             FontCache[(height, weight)] = f;
             return f;
+        }
+    }
+
+    /// <summary>Create one UI text font handle (caller owns/deletes it).
+    /// Grayscale ANTIALIASED_QUALITY: the widget composites per-pixel alpha,
+    /// where a ClearType sub-pixel fringe would turn into an opaque colored
+    /// speckle ring after the coverage→alpha transform (ClearType presupposes
+    /// an opaque background). Negative `height` requests em height — positive
+    /// heights shrink the em by internal leading and hinting gets crunchy.
+    /// Face verification: CreateFontW never fails for an unknown face — it
+    /// silently substitutes, and on zh-CN systems the substitute is SimSun,
+    /// whose slab-serif Latin digits read as pixel text at UI sizes. Only if
+    /// the variable face did not resolve, fall back to static Segoe UI
+    /// (Microsoft's recommended face for GDI desktop apps).</summary>
+    public static IntPtr CreateTextFont(int height, int weight)
+    {
+        var f = CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0,
+            DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, "Segoe UI Variable Text");
+        if (!string.Equals(ActualFace(f), "Segoe UI Variable Text", StringComparison.OrdinalIgnoreCase))
+        {
+            DeleteObject(f);
+            f = CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0,
+                DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+            if (!string.Equals(ActualFace(f), "Segoe UI", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("razer-taskbar: text font fell back to " + ActualFace(f));
+            }
+        }
+        return f;
+    }
+
+    /// <summary>Face name GDI resolved for `font` ("" when unknowable).
+    /// Requires a screen DC to select the font into; one-shot per font.</summary>
+    private static string ActualFace(IntPtr font)
+    {
+        if (font == 0)
+        {
+            return "";
+        }
+        var hdc = GetDC(0);
+        if (hdc == 0)
+        {
+            return "";
+        }
+        try
+        {
+            var old = SelectObject(hdc, font);
+            var sb = new System.Text.StringBuilder(64);
+            bool ok = GetTextFaceW(hdc, sb.Capacity, sb);
+            SelectObject(hdc, old);
+            return ok ? sb.ToString() : "";
+        }
+        finally
+        {
+            ReleaseDC(0, hdc);
         }
     }
 

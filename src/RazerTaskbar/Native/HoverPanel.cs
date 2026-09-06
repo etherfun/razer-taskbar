@@ -44,6 +44,16 @@ public static class HoverPanel
     private static (int W, int H) _panelSize;
     private static IntPtr _hoverWnd;
 
+    // Offscreen 32bpp DIB the panel paints into before the per-pixel-alpha
+    // upload (see EnsureSurface / Present).
+    private static IntPtr _memDc;
+    private static IntPtr _memBmp;
+    private static IntPtr _memBits;
+    private static int _memW;
+    private static int _memH;
+    private static byte[] _buf = Array.Empty<byte>();
+    private static bool _ulwFailLogged;
+
     /// <summary>Fast timer tick: show/hide/update the panel from cursor proximity.</summary>
     public static void Track(IntPtr widget, bool enabled)
     {
@@ -76,7 +86,7 @@ public static class HoverPanel
         {
             return;
         }
-        UpdateAndShow(widget, wr);
+        UpdateAndShow(widget, wr, pt);
     }
 
     /// <summary>Hide the panel (cursor left, or the feature was switched off).</summary>
@@ -98,6 +108,7 @@ public static class HoverPanel
         _hoverSince = null;
         _shown = false;
         _rows.Clear();
+        DestroySurface();
         if (_hoverWnd != 0)
         {
             DestroyWindow(_hoverWnd);
@@ -226,18 +237,19 @@ public static class HoverPanel
         return (w, h);
     }
 
-    /// <summary>Place the panel against the widget: open upward from a
+    /// <summary>Place the panel against the widget: horizontally centered on
+    /// the cursor (clamped to the work area), opening upward from a
     /// bottom-docked taskbar, downward from a top-docked one.</summary>
-    private static (int X, int Y) Place(IntPtr widget, RECT wrect, int w, int h)
+    private static (int X, int Y) Place(IntPtr widget, RECT wrect, int w, int h, POINT cursor)
     {
         var mi = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
         var hmon = MonitorFromWindow(widget, MONITOR_DEFAULTTONEAREST);
         if (hmon == 0 || !GetMonitorInfoW(hmon, ref mi))
         {
-            return (wrect.Left, wrect.Top - h - 4);
+            return (cursor.X - w / 2, wrect.Top - h - 4);
         }
         var work = mi.rcWork;
-        int x = Math.Clamp(wrect.Left, work.Left + 4, Math.Max(work.Right - w - 4, work.Left + 4));
+        int x = Math.Clamp(cursor.X - w / 2, work.Left + 4, Math.Max(work.Right - w - 4, work.Left + 4));
         int y = wrect.Top >= (work.Top + work.Bottom) / 2 ? wrect.Top - h - 4 : wrect.Bottom + 4;
         return (x, Math.Max(y, work.Top + 4));
     }
@@ -267,12 +279,13 @@ public static class HoverPanel
             Console.Error.WriteLine("razer-taskbar: hover panel CreateWindowExW failed");
             return;
         }
-        // Same single-call colorkey rule as the widget.
-        SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
+        // Per-pixel-alpha layered presentation: SetLayeredWindowAttributes is
+        // NOT used here — the panel is presented with UpdateLayeredWindow
+        // (see Present), and the two modes are mutually exclusive.
         _hoverWnd = hwnd;
     }
 
-    private static void UpdateAndShow(IntPtr widget, RECT wrect)
+    private static void UpdateAndShow(IntPtr widget, RECT wrect, POINT cursor)
     {
         EnsureWindow();
         if (_hoverWnd == 0)
@@ -281,7 +294,7 @@ public static class HoverPanel
         }
         var rows = SnapshotRows();
         var (w, h) = Measure(rows);
-        var pos = Place(widget, wrect, w, h);
+        var pos = Place(widget, wrect, w, h, cursor);
         bool rowsChanged = !_rows.SequenceEqual(rows);
         bool geometryChanged = _panelPos != pos || _panelSize != (w, h) || !_shown;
         _rows = rows;
@@ -318,7 +331,10 @@ public static class HoverPanel
     }
 
     /// <summary>Columns: [type icon] [battery glyph] [name …] [eta] [pct].
-    /// Opaque dark panel; the black colorkey only cuts the outer margin.</summary>
+    /// Painted into a 32bpp DIB and presented with per-pixel alpha
+    /// (UpdateLayeredWindow, same technique as the widget): content pixels
+    /// carry full alpha and always render, the card body is 50% translucent,
+    /// and corners are anti-aliased by the presenter.</summary>
     private static void Paint()
     {
         var hwnd = _hoverWnd;
@@ -335,18 +351,42 @@ public static class HoverPanel
         {
             var rows = _rows;
             var (w, h) = _panelSize;
-            // Rounded dark panel: one RoundRect fills the body and strokes the
-            // border; the square corners stay color-key black → transparent.
+            EnsureSurface(w, h);
+            if (_memDc == 0)
+            {
+                // No offscreen surface this tick — skip rather than draw
+                // straight onto the ULW window, whose pixels would be
+                // replaced by the next upload anyway.
+                return;
+            }
+            PaintBody(_memDc, rows, w, h);
+            Present(hwnd);
+        }
+        finally
+        {
+            EndPaint(hwnd, ref ps);
+        }
+    }
+
+    private static void PaintBody(IntPtr hdc, List<Row> rows, int w, int h)
+    {
+        try
+        {
+            // Card base: opaque dark fill. The presenter turns bare-card
+            // pixels 50%-translucent (dimmed backdrop shows through) and
+            // content pixels fully opaque, with anti-aliased corners.
             float scale = ScaleOf();
             int radius = (int)MathF.Round(8.0f * scale);
             var bg = CreateSolidBrush(0x00202020);
+            var keyRect = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
+            FillRect(hdc, ref keyRect, bg);
+            DeleteObject(bg);
             var border = CreatePen(PS_SOLID, 1, 0x005A5A5A);
             var oldPen = SelectObject(hdc, border);
-            var oldBrush = SelectObject(hdc, bg);
+            var oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
             RoundRect(hdc, 0, 0, w, h, radius * 2, radius * 2);
             SelectObject(hdc, oldPen);
             SelectObject(hdc, oldBrush);
-            DeleteObject(bg);
             DeleteObject(border);
             SetBkMode(hdc, TRANSPARENT);
 
@@ -472,9 +512,154 @@ public static class HoverPanel
             DeleteObject(iconFont);
             DeleteObject(textFont);
         }
-        finally
+        catch (Exception e)
         {
-            EndPaint(hwnd, ref ps);
+            Log.Error("hover panel paint body failed", e);
+        }
+    }
+
+    /// <summary>Offscreen 32bpp top-down DIB matching the panel size;
+    /// recreated only when the size changes. Widget-thread only.</summary>
+    private static void EnsureSurface(int w, int h)
+    {
+        if (_memDc != 0 && _memW == w && _memH == h)
+        {
+            return;
+        }
+        DestroySurface();
+        var wdc = GetDC(_hoverWnd);
+        if (wdc == 0)
+        {
+            return;
+        }
+        _memDc = CreateCompatibleDC(wdc);
+        var bmi = new BITMAPINFO
+        {
+            bmiHeader = new BITMAPINFOHEADER
+            {
+                biSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<BITMAPINFOHEADER>(),
+                biWidth = w,
+                biHeight = -h, // top-down
+                biPlanes = 1,
+                biBitCount = 32,
+                biCompression = 0, // BI_RGB
+            },
+        };
+        _memBmp = CreateDIBSection(wdc, ref bmi, DIB_RGB_COLORS, out _memBits, 0, 0);
+        ReleaseDC(_hoverWnd, wdc);
+        if (_memDc == 0 || _memBmp == 0 || _memBits == 0)
+        {
+            DestroySurface();
+            return;
+        }
+        SelectObject(_memDc, _memBmp);
+        _memW = w;
+        _memH = h;
+    }
+
+    private static void DestroySurface()
+    {
+        if (_memDc != 0)
+        {
+            DeleteDC(_memDc);
+            _memDc = 0;
+        }
+        if (_memBmp != 0)
+        {
+            DeleteObject(_memBmp);
+            _memBmp = 0;
+        }
+        _memBits = 0;
+        _memW = 0;
+        _memH = 0;
+    }
+
+    /// <summary>Turn the GDI render into premultiplied ARGB and upload.
+    /// Analytic rounded-rect coverage zeroes the outside and anti-aliases the
+    /// corners; bare-card pixels (exact body fill) become 50%-translucent so
+    /// the DWM blur-behind shows through, while drawn content — text, glyphs,
+    /// border — keeps full alpha and always renders.</summary>
+    private static void Present(IntPtr hwnd)
+    {
+        int bytes = _memW * _memH * 4;
+        if (_buf.Length != bytes)
+        {
+            _buf = new byte[bytes];
+        }
+        System.Runtime.InteropServices.Marshal.Copy(_memBits, _buf, 0, bytes);
+        float scale = ScaleOf();
+        int radius = (int)MathF.Round(8.0f * scale);
+        float cx = (_memW - 1) / 2f, cy = (_memH - 1) / 2f;
+        float innerX = _memW / 2f - radius, innerY = _memH / 2f - radius;
+        for (int y = 0; y < _memH; y++)
+        {
+            float dy = MathF.Abs(y - cy) - innerY;
+            if (dy < 0)
+            {
+                dy = 0;
+            }
+            for (int x = 0; x < _memW; x++)
+            {
+                int i = (y * _memW + x) * 4;
+                float dx = MathF.Abs(x - cx) - innerX;
+                if (dx < 0)
+                {
+                    dx = 0;
+                }
+                float d = MathF.Sqrt(dx * dx + dy * dy);
+                float cov = Math.Clamp(radius - d + 0.5f, 0f, 1f);
+                if (cov <= 0)
+                {
+                    _buf[i] = 0;
+                    _buf[i + 1] = 0;
+                    _buf[i + 2] = 0;
+                    _buf[i + 3] = 0;
+                    continue;
+                }
+                if (_buf[i] == 0x20 && _buf[i + 1] == 0x20 && _buf[i + 2] == 0x20)
+                {
+                    // Bare card: 50% translucent dark over the blur.
+                    _buf[i] = 0x10;
+                    _buf[i + 1] = 0x10;
+                    _buf[i + 2] = 0x10;
+                    _buf[i + 3] = (byte)MathF.Round(0x80 * cov);
+                }
+                else
+                {
+                    // Content: opaque, premultiplied by the corner coverage.
+                    float k = cov;
+                    _buf[i] = (byte)MathF.Round(_buf[i] * k);
+                    _buf[i + 1] = (byte)MathF.Round(_buf[i + 1] * k);
+                    _buf[i + 2] = (byte)MathF.Round(_buf[i + 2] * k);
+                    _buf[i + 3] = (byte)MathF.Round(255f * k);
+                }
+            }
+        }
+        System.Runtime.InteropServices.Marshal.Copy(_buf, 0, _memBits, bytes);
+
+        var dst = new POINT();
+        if (TaskbarLocator.WindowRect(hwnd) is { } wr)
+        {
+            dst.X = wr.Left;
+            dst.Y = wr.Top;
+        }
+        var size = new SIZE(_memW, _memH);
+        var src = new POINT();
+        var blend = new BLENDFUNCTION
+        {
+            BlendOp = 0, // AC_SRC_OVER
+            BlendFlags = 0,
+            SourceConstantAlpha = 255,
+            AlphaFormat = AC_SRC_ALPHA,
+        };
+        if (!UpdateLayeredWindow(hwnd, 0, ref dst, ref size, _memDc, ref src, 0, ref blend, ULW_ALPHA))
+        {
+            // Log at most the first failure; a silent blank popup is worse.
+            if (!_ulwFailLogged)
+            {
+                _ulwFailLogged = true;
+                Console.Error.WriteLine($"razer-taskbar: hover UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            }
         }
     }
 }

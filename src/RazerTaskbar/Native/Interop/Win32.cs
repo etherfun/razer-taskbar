@@ -54,6 +54,9 @@ public static class Win32Consts
 
     // Layered windows
     public const uint LWA_COLORKEY = 1;
+    public const uint LWA_ALPHA = 2;
+    public const uint ULW_ALPHA = 2;
+    public const byte AC_SRC_ALPHA = 1;
 
     // Menus
     public const uint MF_GRAYED = 1;
@@ -100,6 +103,7 @@ public static class Win32Consts
     public const int FW_SEMIBOLD = 600;
     public const uint DEFAULT_CHARSET = 1;
     public const uint OUT_DEFAULT_PRECIS = 0;
+    public const uint OUT_TT_ONLY_PRECIS = 7;
     public const uint CLIP_DEFAULT_PRECIS = 0;
     public const uint ANTIALIASED_QUALITY = 4;
     public const uint DEFAULT_PITCH = 0;
@@ -221,6 +225,28 @@ public struct BITMAPINFO
 {
     public BITMAPINFOHEADER bmiHeader;
     public uint bmiColors;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct SIZE
+{
+    public int cx;
+    public int cy;
+
+    public SIZE(int cx, int cy)
+    {
+        this.cx = cx;
+        this.cy = cy;
+    }
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct BLENDFUNCTION
+{
+    public byte BlendOp;
+    public byte BlendFlags;
+    public byte SourceConstantAlpha;
+    public byte AlphaFormat;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -352,6 +378,11 @@ public static class User32
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool SetLayeredWindowAttributes(IntPtr hWnd, uint crKey, byte bAlpha, uint dwFlags);
+
+    /// <summary>Per-pixel-alpha presentation for the widget. hdcSrc must be a
+    /// 32bpp TOP-DOWN DIB section whose pixels are PREMULTIPLIED alpha.</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UpdateLayeredWindow(IntPtr hWnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, uint crKey, ref BLENDFUNCTION pblend, uint dwFlags);
 
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hwnd);
@@ -496,6 +527,13 @@ public static class Gdi32
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern bool GetCharABCWidthsW(IntPtr hdc, uint wFirst, uint wLast, out ABC lpABC);
+
+    /// <summary>Actual face name of the font selected on `hdc` (LF_FACESIZE
+    /// buffer). CreateFontW never fails for an unknown face — it silently
+    /// substitutes (on zh-CN systems: SimSun, whose slab-serif Latin renders
+    /// as pixel text at UI sizes) — so created fonts verify with this.</summary>
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    public static extern bool GetTextFaceW(IntPtr hdc, int c, System.Text.StringBuilder lpFaceName);
 }
 
 public static class Shell32
