@@ -114,13 +114,16 @@ public interface IUIAutomationElement
     // … remaining getters unused; truncated.
 }
 
+/// <summary>IUIAutomationElement.GetCurrentBoundingRectangle returns a
+/// Windows RECT (4x int32: left/top/right/bottom) — NOT a UiaRect of doubles
+/// (the doubles variant only exists for UiaRect-based property values).</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct UiaRect
 {
-    public double left;
-    public double top;
-    public double width;
-    public double height;
+    public int left;
+    public int top;
+    public int right;
+    public int bottom;
 }
 
 [ComImport]

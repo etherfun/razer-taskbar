@@ -251,17 +251,82 @@ public static class TaskbarLocator
                 out var condition);
             root.FindFirst(Win32Consts.TREE_SCOPE_DESCENDANTS, condition, out var el);
             el.GetCurrentBoundingRectangle(out var r);
-            return new RECT
+            var rect = new RECT
             {
-                Left = (int)r.left,
-                Top = (int)r.top,
-                Right = (int)(r.left + r.width),
-                Bottom = (int)(r.top + r.height),
+                Left = r.left,
+                Top = r.top,
+                Right = r.right,
+                Bottom = r.bottom,
             };
+            el.GetCurrentName(out var name);
+            Log.Info($"WidgetsButton found: name=\"{name}\" rect=({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom})");
+            if (rect.Right - rect.Left <= 0 || rect.Bottom - rect.Top <= 0)
+            {
+                DumpTaskbarTree(uia, root);
+            }
+            return rect;
         }
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    private static bool _treeDumped;
+
+    /// <summary>One-shot: log every taskbar descendant with a non-empty
+    /// bounding rect that intersects the tray band, so the real widgets entry
+    /// can be identified when the AutomationId lookup returns a degenerate
+    /// rect (new builds may rename it).</summary>
+    private static void DumpTaskbarTree(Interop.IUIAutomation uia, Interop.IUIAutomationElement root)
+    {
+        if (_treeDumped)
+        {
+            return;
+        }
+        _treeDumped = true;
+        try
+        {
+            root.GetCurrentBoundingRectangle(out var rr);
+            Log.Info($"tray root rect=({rr.left},{rr.top})-({rr.right},{rr.bottom})");
+            uia.GetControlViewWalker(out var walker);
+            var stack = new List<Interop.IUIAutomationElement> { root };
+            int guard = 0, logged = 0;
+            while (stack.Count > 0 && guard < 300 && logged < 40)
+            {
+                var el = stack[^1];
+                stack.RemoveAt(stack.Count - 1);
+                guard++;
+                el.GetCurrentBoundingRectangle(out var r);
+                if (r.right - r.left > 0 && r.bottom - r.top > 0)
+                {
+                    el.GetCurrentAutomationId(out var aid);
+                    el.GetCurrentName(out var n);
+                    el.GetCurrentClassName(out var cn);
+                    Log.Info($"  el aid=\"{aid}\" name=\"{n}\" class=\"{cn}\" rect=({r.left},{r.top})-({r.right},{r.bottom})");
+                    logged++;
+                }
+                try
+                {
+                    walker.GetFirstChildElement(el, out var child);
+                    int n2 = 0;
+                    while (n2 < 30)
+                    {
+                        stack.Add(child);
+                        walker.GetNextSiblingElement(child, out child);
+                        n2 += 1;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Leaf/no children — fine.
+                }
+            }
+            Log.Info($"tree dump done: guard={guard} logged={logged}");
+        }
+        catch (Exception e)
+        {
+            Log.Error("tree dump failed", e);
         }
     }
 

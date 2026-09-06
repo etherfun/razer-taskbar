@@ -65,7 +65,13 @@ dotnet publish csharp/src/RazerTaskbar/RazerTaskbar.csproj -c Release
 
 ## 已知差异 / 注意
 
-- **与 Rust 版的有意偏差(任务栏右侧锚定)**:Win11 的 widgets 板按钮在新系统(26340 实测)
+- **UIA 矩形互操作修复(避让失效根因)**:`IUIAutomationElement.GetCurrentBoundingRectangle`
+  返回的是 Windows RECT(4×int32 left/top/right/bottom),最初误声明为 4×double 的 UiaRect ——
+  调用方写 16 字节、按 32 字节解读,boardLeft 永远是假 0,右侧避让(天气按钮实测
+  (2039,1552)-(2191,1600),紧邻托盘)整体失效。修正后避让恢复:right 侧锚在 x=1895,
+  天气按钮左侧。保留"board 仅在右半区才截断右锚"的防护(防未来按钮移到左缘)。
+- **与 Rust 版的有意偏差(任务栏右侧锚定)**
+:Win11 的 widgets 板按钮在新系统(26340 实测)
   位于任务栏**左缘**(UIA 返回 boardLeft=0)。Rust 的"右侧锚点必须停在 board 左侧"规则无条件生效,
   会把 right 侧挂件钳到 x=2。C# 版改为:**仅当 board 位于任务栏右半区(与托盘相邻)时**才用它截断
   右侧锚点;左缘的板由左侧 min_x 的 160px 禁区覆盖。实测 right→x=2068(紧贴托盘)、left→x=162。
