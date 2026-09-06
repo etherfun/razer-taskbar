@@ -1,0 +1,286 @@
+<Page
+    x:Class="RazerTaskbar.Views.HistoryPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:RazerTaskbar.Views"
+    xmlns:controls="using:RazerTaskbar.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="ChartLineBrush" Color="#E8E8E8" />
+                    <SolidColorBrush x:Key="ChartGreenBrush" Color="#6CCB5F" />
+                    <SolidColorBrush x:Key="ChartOffBrush" Color="#7A7A7A" />
+                    <SolidColorBrush x:Key="ChartAccentBrush" Color="#60CDFF" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="ChartLineBrush" Color="#1B1B1B" />
+                    <SolidColorBrush x:Key="ChartGreenBrush" Color="#3A8A32" />
+                    <SolidColorBrush x:Key="ChartOffBrush" Color="#9A9A9A" />
+                    <SolidColorBrush x:Key="ChartAccentBrush" Color="#0078D4" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+            <DataTemplate x:Key="CycleItemTemplate" x:DataType="local:CycleItem">
+                <Grid Height="36" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="86" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="90" />
+                    </Grid.ColumnDefinitions>
+                    <Border
+                        Grid.Column="0"
+                        CornerRadius="9"
+                        Padding="8,2,8,2"
+                        HorizontalAlignment="Left"
+                        VerticalAlignment="Center"
+                        Background="{x:Bind PillBackground()}"
+                        BorderBrush="{x:Bind PillBorderBrush()}"
+                        BorderThickness="1">
+                        <TextBlock Text="{x:Bind PillText()}" FontSize="10" FontWeight="SemiBold"
+                                   Foreground="{x:Bind PillForeground()}" />
+                    </Border>
+                    <TextBlock Grid.Column="1" Text="{x:Bind Start}" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Column="2" Text="{x:Bind Dur}" VerticalAlignment="Center"
+                               Foreground="{x:Bind DurBrush()}" />
+                    <TextBlock Grid.Column="3" Text="{x:Bind Levels}" VerticalAlignment="Center"
+                               TextAlignment="Right"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </Grid>
+            </DataTemplate>
+        </ResourceDictionary>
+    </Page.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <Grid Margin="16,8,16,16" RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Export feedback -->
+            <InfoBar x:Name="ExportInfoBar" Grid.Row="0" IsOpen="False" Severity="Informational" />
+
+            <!-- Toolbar: device picker + range selector + export. Star/auto
+                 columns — the combo yields width to the right group instead
+                 of colliding with it on narrow windows. -->
+            <Grid Grid.Row="1" ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <ComboBox
+                    x:Name="DeviceCombo"
+                    Grid.Column="0"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Center"
+                    DisplayMemberPath="Name"
+                    SelectionChanged="Device_SelectionChanged" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="12">
+                    <ComboBox
+                        x:Name="RangeCombo"
+                        Width="130"
+                        VerticalAlignment="Center"
+                        SelectionChanged="Range_SelectionChanged" />
+                    <Button x:Name="ExportButton" Click="Export_Click" VerticalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE74E;" FontSize="14" />
+                            <TextBlock x:Name="ExportButtonText" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <!-- Stat cards -->
+            <Grid Grid.Row="2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Style="{StaticResource StatCardStyle}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock x:Name="StatCyclesValue" Style="{StaticResource StatValueStyle}" />
+                            <TextBlock x:Name="StatCyclesCaption" Style="{StaticResource StatCaptionStyle}" />
+                        </StackPanel>
+                        <FontIcon Grid.Column="1" Glyph="&#xE946;" FontSize="12" VerticalAlignment="Top"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                            <ToolTipService.ToolTip>
+                                <TextBlock x:Name="TipCycles" TextWrapping="Wrap" MaxWidth="260" />
+                            </ToolTipService.ToolTip>
+                        </FontIcon>
+                    </Grid>
+                </Border>
+                <Border Grid.Column="2" Style="{StaticResource StatCardStyle}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock x:Name="StatUseValue" Style="{StaticResource StatValueStyle}" />
+                            <TextBlock x:Name="StatUseCaption" Style="{StaticResource StatCaptionStyle}" />
+                        </StackPanel>
+                        <FontIcon Grid.Column="1" Glyph="&#xE946;" FontSize="12" VerticalAlignment="Top"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                            <ToolTipService.ToolTip>
+                                <TextBlock x:Name="TipUse" TextWrapping="Wrap" MaxWidth="260" />
+                            </ToolTipService.ToolTip>
+                        </FontIcon>
+                    </Grid>
+                </Border>
+                <Border Grid.Column="4" Style="{StaticResource StatCardStyle}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock x:Name="StatChargeValue" Style="{StaticResource StatValueStyle}" />
+                            <TextBlock x:Name="StatChargeCaption" Style="{StaticResource StatCaptionStyle}" />
+                        </StackPanel>
+                        <FontIcon Grid.Column="1" Glyph="&#xE946;" FontSize="12" VerticalAlignment="Top"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                            <ToolTipService.ToolTip>
+                                <TextBlock x:Name="TipCharge" TextWrapping="Wrap" MaxWidth="260" />
+                            </ToolTipService.ToolTip>
+                        </FontIcon>
+                    </Grid>
+                </Border>
+                <Border Grid.Column="6" Style="{StaticResource StatCardStyle}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock x:Name="StatNowValue" Style="{StaticResource StatValueStyle}" />
+                            <TextBlock x:Name="StatNowCaption" Style="{StaticResource StatCaptionStyle}" />
+                        </StackPanel>
+                        <FontIcon Grid.Column="1" Glyph="&#xE946;" FontSize="12" VerticalAlignment="Top"
+                                  Foreground="{ThemeResource TextFillColorSecondaryBrush}">
+                            <ToolTipService.ToolTip>
+                                <TextBlock x:Name="TipNow" TextWrapping="Wrap" MaxWidth="260" />
+                            </ToolTipService.ToolTip>
+                        </FontIcon>
+                    </Grid>
+                </Border>
+            </Grid>
+
+            <!-- Chart card -->
+            <Border Grid.Row="3" Style="{StaticResource CardStyle}">
+                <Grid RowSpacing="8">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="280" />
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" RowSpacing="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <!-- Row 0: title + shading toggle + mode legends.
+                             Star/auto columns — the right group can never
+                             overlap the title, whatever the width. -->
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="ChartHeader" Grid.Column="0"
+                                       Style="{StaticResource CardCaptionStyle}"
+                                       VerticalAlignment="Center" />
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right"
+                                        VerticalAlignment="Center" Spacing="16">
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Ellipse Width="8" Height="8" Fill="{ThemeResource ChartGreenBrush}"
+                                             VerticalAlignment="Center" />
+                                    <TextBlock x:Name="LegendCharging" Style="{StaticResource CardCaptionStyle}" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Rectangle Width="8" Height="3" RadiusX="1" RadiusY="1"
+                                               Fill="{ThemeResource ChartLineBrush}" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="LegendDischarging" Style="{StaticResource CardCaptionStyle}" />
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <Ellipse Width="8" Height="8" Fill="{ThemeResource ChartOffBrush}"
+                                             VerticalAlignment="Center" />
+                                    <TextBlock x:Name="LegendOff" Style="{StaticResource CardCaptionStyle}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                        <!-- Row 1: actionable controls. Wide enough → one line
+                             with a "|" divider; narrow → the checkbox wraps
+                             under the compare picker (switched in code). -->
+                        <Grid x:Name="BottomBar" Grid.Row="1" RowSpacing="8">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel x:Name="CompareGroup" Grid.Row="0" Grid.Column="0"
+                                        Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <TextBlock x:Name="CompareLabel" Style="{StaticResource CardCaptionStyle}"
+                                           VerticalAlignment="Center" />
+                                <ComboBox x:Name="CompareCombo" Width="150" VerticalAlignment="Center"
+                                          SelectionChanged="Compare_SelectionChanged" />
+                                <StackPanel x:Name="CompareLegend" Orientation="Horizontal" Spacing="6"
+                                            VerticalAlignment="Center" Margin="12,0,0,0" Visibility="Collapsed">
+                                    <Rectangle Width="10" Height="3" RadiusX="1" RadiusY="1"
+                                               Fill="{ThemeResource ChartAccentBrush}" VerticalAlignment="Center" />
+                                    <TextBlock x:Name="LegendCompare" Style="{StaticResource CardCaptionStyle}"
+                                               VerticalAlignment="Center" />
+                                </StackPanel>
+                            </StackPanel>
+                            <TextBlock x:Name="BottomDivider" Grid.Row="0" Grid.Column="1" Text="|"
+                                       Margin="14,0,14,0" VerticalAlignment="Center"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            <CheckBox x:Name="ShowOffCheck" Grid.Row="0" Grid.Column="2"
+                                      VerticalAlignment="Center"
+                                      Checked="ShowOff_Changed" Unchecked="ShowOff_Changed" />
+                        </Grid>
+                    </Grid>
+                    <controls:BatteryChart x:Name="Chart" Grid.Row="1" />
+                </Grid>
+            </Border>
+
+            <!-- Cycles list card -->
+            <Border Grid.Row="4" Style="{StaticResource CardStyle}">
+                <Grid RowSpacing="4">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock x:Name="ListCaption" Grid.Row="0" Style="{StaticResource CardCaptionStyle}" />
+                    <ListView
+                        x:Name="CycleList"
+                        Grid.Row="1"
+                        ItemTemplate="{StaticResource CycleItemTemplate}"
+                        SelectionMode="Single" />
+                </Grid>
+            </Border>
+        </Grid>
+    </ScrollViewer>
+</Page>

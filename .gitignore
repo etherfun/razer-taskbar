@@ -115,8 +115,8 @@ Cargo.lock.bak
 # ZCode local workspace state
 .zcode/
 
-# C# / .NET (csharp/)
-csharp/**/bin/
-csharp/**/obj/
-csharp/.vs/
+# C# / .NET
+bin/
+obj/
+.vs/
 *.user
