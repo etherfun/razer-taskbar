@@ -51,7 +51,25 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
   `device_type` switch，daemon 只读 sysfs）。名称来源：优先从 Synapse V4 日志收割
   `serialNumber → name.en`（`RazerWatcher.HarvestSerialNames`，Synapse 曾运行过即可，
   10 分钟重试一次），兜底 "Razer Keyboard"；Kind=Keyboard 由槽位角色保证。
-  键盘自有 dongle（产品名即键盘名）保留产品名；Joro 有线（PID 0x02CD）走自有 USB 设备
+  键盘自有 dongle（产品名即键盘名）保留产品名；Joro 有线见下节。
+
+## 有线（线缆）模式（2026-09-07 真机实测，Razer Joro）
+
+Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x02CD**（产品字符串
+"Razer Joro"，无线链路断开，dongle 键盘槽 NoResponse）：
+
+- **厂商 feature 通道在 MI_03**（usagePage 0x0001/consumer control，feature=91）——
+  不总是鼠标 TLC；MI_00/MI_01 全部 `SetFeature err=1`，按既有黑名单机制跳过。
+- **tx=0x1F**（键盘用鼠标代际的 tx）：串号查询返回 `SI2522F18701637`，**与 dongle 键盘槽
+  完全一致** → 有线/无线共用一个 `HandleFor` 身份，切换模式历史无缝衔接（devices 表
+  不产生 `HID:02CD` 伪行）。电量 raw 255 = 100%（Scaled255），**充电 0x07/0x84 = 1**
+  ——充电状态只有有线（或充电座）能观察到，是线缆模式的核心收益。
+- 表项：`RazerPidTable.ExplicitSlots[0x02CD]` 单 Keyboard 槽（tx 0x1F、Scaled255）；
+  Known 表同 PID 条目保证探针/缩放查询直接命中。
+- 仅插线不切模式 = 只充电：2.4GHz 链路保持，Synapse 显示充电；此时 dongle 键盘槽的
+  0x07/0x84 是否报充电 **未实测**（HID 源理论上同链路可见，待复测）。
+- Joro 蓝牙模式同样以 PID 0x02CD 出现（BT 路径形如 `vid&0001532_pid&02cd`，枚举正则
+  已覆盖）；BT 上厂商 feature 是否可用未实测。
 
 ## get 半区全段扫描（2026-09-07 真机，`--hid-scan`，结果 hid-scan.log）
 
@@ -80,7 +98,8 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
 - **0x3F**：DeathAdder V2 Pro(0x007C/0x007D)、Mamba Wireless(0x0072/0x0073)
 - **0xFF**：Viper Ultimate(0x007A/0x007B)
 - **键盘**：0x9F 是无线键盘标准 tx（combo dongle 的键盘槽同款）；BlackWidow V3 Pro 有线
-  0x3F / 无线 0x9F；BW V3 Mini HS 有线 0x1F / 无线 0x9F。OpenRazer 尚不支持 Joro（#2540）
+  0x3F / 无线 0x9F；BW V3 Mini HS 有线 0x1F / 无线 0x9F；Joro 有线 0x1F（实测）。
+  OpenRazer 尚不支持 Joro（#2540）
 - 未知 PID：探测序列 0x1F → 0x9F → 0x3F → 0xFF（echo+CRC 校验通过即用）
 - Razer VID 固定 0x1532。耳机是另一套协议，暂不支持。
 
@@ -114,8 +133,8 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
 - 身份：优先厂商序列号查询，其次 HID 序列号字符串，最后 `HID:{pid:X4}`（见第 6 点）。
 - 连接判定：本轮查到 → connected；连续 2 轮查不到（接收器在、设备关机/离开）→ disconnected。
 - **auto 模式的粒度是整体而非按设备**：HID 查到 ≥1 台后日志解析不再运行。HID 不支持
-  `0x07` 电量命令的设备（实测 Razer Joro 无应答；耳机是另一套协议）会停留在最后一次
-  日志值并保持冻结——此类设备为主时建议 `battery_source=log`，或等待按设备合并的后续改进。
+  `0x07` 电量命令的设备（耳机是另一套协议）会停留在最后一次日志值并保持冻结——此类设备
+  为主时建议 `battery_source=log`，或等待按设备合并的后续改进。
 - 探针：`razer-taskbar.exe --hid-probe`（绕过单实例），枚举全部 Razer collection、
   dump 收发 hex 与错误码，输出到控制台与 `%APPDATA%\razer-taskbar\hid-probe.log`。
   新增未知设备时先跑探针确认 tx/缩放。

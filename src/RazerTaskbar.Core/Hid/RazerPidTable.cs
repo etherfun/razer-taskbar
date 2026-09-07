@@ -63,6 +63,7 @@ public static class RazerPidTable
         [0x025C] = new DeviceTx(0x9F, BatteryScale.Auto), // BlackWidow V3 Pro wireless
         [0x0258] = new DeviceTx(0x1F, BatteryScale.Auto), // BlackWidow V3 Mini HS wired
         [0x0271] = new DeviceTx(0x9F, BatteryScale.Auto), // BlackWidow V3 Mini HS wireless
+        [0x02CD] = new DeviceTx(0x1F, BatteryScale.Scaled255), // Razer Joro wired (confirmed: raw 255 = 100%, charging 0x84 works)
     };
 
     /// <summary>Probe order for PIDs missing from the table: new-gen mice,
@@ -86,18 +87,33 @@ public static class RazerPidTable
         new DeviceSlot(0xFF, SlotRole.Mouse, BatteryScale.Auto),
     };
 
+    /// <summary>PIDs whose slot list is fully known (combo dongles, or
+    /// devices whose transaction id does not follow the mouse/keyboard
+    /// convention). Checked before the Known table.</summary>
+    private static readonly Dictionary<int, DeviceSlot[]> ExplicitSlots = new()
+    {
+        // Viper V3 HyperSpeed combo dongle: the paired keyboard answers on
+        // the mouse's vendor channel, routed by transaction id.
+        [0x00B8] = new DeviceSlot[]
+        {
+            new(0x1F, SlotRole.Mouse, BatteryScale.Scaled255),
+            new(0x9F, SlotRole.Keyboard, BatteryScale.Scaled255),
+        },
+        // Razer Joro in cable mode: an independent USB device (the wireless
+        // link is down), tx 0x1F despite being a keyboard — the vendor
+        // channel answers with the same serial as the dongle slot
+        // (SI…, raw 255 = 100%), so both modes share one identity.
+        [0x02CD] = new DeviceSlot[] { new(0x1F, SlotRole.Keyboard, BatteryScale.Scaled255) },
+    };
+
     /// <summary>All wireless slots to sweep for a PID. Multi-device dongles
     /// yield one slot per paired sub-device; serial-keyed dedup collapses
     /// slots that answer for the same physical device.</summary>
     public static IReadOnlyList<DeviceSlot> DeviceSlots(int pid)
     {
-        if (pid == 0x00B8)
+        if (ExplicitSlots.TryGetValue(pid, out var slots))
         {
-            return new DeviceSlot[]
-            {
-                new(0x1F, SlotRole.Mouse, BatteryScale.Scaled255),
-                new(0x9F, SlotRole.Keyboard, BatteryScale.Scaled255),
-            };
+            return slots;
         }
         if (Known.TryGetValue(pid, out var tx))
         {

@@ -217,6 +217,31 @@ public class HidTests
     }
 
     [Fact]
+    public void DeviceSlots_WiredJoroIsSingleKeyboardSlot()
+    {
+        // Cable mode: independent USB device, tx 0x1F despite being a
+        // keyboard (confirmed by probe: serial + battery + charging answer).
+        var slots = RazerPidTable.DeviceSlots(0x02CD);
+        Assert.Single(slots);
+        Assert.Equal((byte)0x1F, slots[0].TransactionId);
+        Assert.Equal(RazerPidTable.SlotRole.Keyboard, slots[0].Role);
+        Assert.Equal(BatteryScale.Scaled255, slots[0].Scale); // raw 255 = 100%
+        Assert.Equal(new byte[] { 0x1F }, RazerPidTable.TransactionIdCandidates(0x02CD));
+    }
+
+    [Fact]
+    public void HandleFor_JoroWiredMatchesWirelessSerial()
+    {
+        // Cable mode answers on its own USB device (pid 0x02CD) with the
+        // same vendor serial as the dongle keyboard slot: switching modes
+        // keeps one identity, so history and selection carry over.
+        var wired = new HidDeviceReading(0x02CD, "Razer Joro", "SI2522F18701637", 255, 100, true);
+        var wireless = new HidDeviceReading(0x00B8, "Razer Viper V3 HyperSpeed", "SI2522F18701637",
+            255, 100, null, NameOverride: "Razer Joro", KindOverride: DeviceKind.Keyboard);
+        Assert.Equal(HidWatcher.HandleFor(wireless), HidWatcher.HandleFor(wired));
+    }
+
+    [Fact]
     public void DeviceSlots_UnknownPidProbesAllSlots()
     {
         var slots = RazerPidTable.DeviceSlots(0x1234);
