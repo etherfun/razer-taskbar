@@ -22,4 +22,23 @@ public sealed class I18nTests
         // Restore the default so other tests are unaffected.
         I18n.SetSetting(LanguageSetting.Auto);
     }
+
+    [Fact]
+    public void KeysMatchCallSites()
+    {
+        // Call sites must use the dictionary keys exactly (I18n.cs is
+        // authoritative) — a stray period/qualifier silently falls back
+        // to English in Zh mode.
+        I18n.SetSetting(LanguageSetting.Zh);
+        try
+        {
+            Assert.Equal("关机", I18n.Tr("off"));
+            Assert.Equal("未找到设备", I18n.Tr("No devices found"));
+            Assert.Equal("暂无可导出的数据", I18n.Tr("No data to export"));
+        }
+        finally
+        {
+            I18n.SetSetting(LanguageSetting.Auto);
+        }
+    }
 }

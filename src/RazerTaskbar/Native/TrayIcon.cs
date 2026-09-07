@@ -71,7 +71,7 @@ public static class TrayIcon
         }
         else
         {
-            tip = I18n.Tr("No devices found.");
+            tip = I18n.Tr("No devices found");
             state = null;
         }
         if (_last == (tip, state))
