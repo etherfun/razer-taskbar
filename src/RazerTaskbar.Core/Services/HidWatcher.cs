@@ -1103,6 +1103,10 @@ public static class HidProbe
                     var bKind = QueryRaw(handle, breq, out var bRecv);
                     var arg = bKind == RazerResponseKind.Success ? $" raw={bRecv[10]}" : "";
                     out_($"  tx=0x{tx:X2} battery: {bKind}{arg}");
+                    var creq = RazerReport.BuildChargingQuery(tx);
+                    var cKind = QueryRaw(handle, creq, out var cRecv);
+                    var carg = cKind == RazerResponseKind.Success ? $" flag={cRecv[10]}" : "";
+                    out_($"  tx=0x{tx:X2} charging: {cKind}{carg}");
                 }
                 // Device-index addressing: arguments[0] = 0/1 with both ids.
                 foreach (var tx in new byte[] { 0x1F, 0x9F })
