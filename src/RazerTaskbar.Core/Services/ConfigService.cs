@@ -19,6 +19,23 @@ public sealed class Config
     [JsonPropertyName("shown_device_handle")]
     public string ShownDeviceHandle { get; set; } = "";
 
+    /// <summary>Multi-device display strategy: "fixed" (the shown device,
+    /// or lowest-battery auto pick when the handle is empty) | "drop_swap"
+    /// (shown device, but temporarily swap to any other device the moment
+    /// its battery drops) | "rotate" (cycle through all connected devices).</summary>
+    [JsonPropertyName("display_mode")]
+    public string DisplayMode { get; set; } = "fixed";
+
+    /// <summary>How long a battery-drop swap stays on the widget before
+    /// returning to the shown device (drop_swap mode).</summary>
+    [JsonPropertyName("swap_display_secs")]
+    public ulong SwapDisplaySecs { get; set; } = 30;
+
+    /// <summary>How long each device stays on the widget before rotating to
+    /// the next (rotate mode).</summary>
+    [JsonPropertyName("rotate_interval_secs")]
+    public ulong RotateIntervalSecs { get; set; } = 30;
+
     /// <summary>"auto" | "v3" | "v4"</summary>
     [JsonPropertyName("synapse_version")]
     public string SynapseVersion { get; set; } = "auto";
@@ -142,6 +159,14 @@ public static class ConfigService
         if (cfg.HistoryPollIntervalSecs == 0)
         {
             cfg.HistoryPollIntervalSecs = 5;
+        }
+        if (cfg.SwapDisplaySecs == 0)
+        {
+            cfg.SwapDisplaySecs = 30;
+        }
+        if (cfg.RotateIntervalSecs == 0)
+        {
+            cfg.RotateIntervalSecs = 30;
         }
         // The widgets-space anchor started life as a `widget_side` value;
         // normalize it into the dedicated toggle (written back on next save).

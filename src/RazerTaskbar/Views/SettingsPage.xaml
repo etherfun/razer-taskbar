@@ -16,6 +16,19 @@
             <TextBlock x:Name="HeaderWidget" Style="{StaticResource SettingsSectionStyle}" />
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="2">
+                    <!-- Display mode -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblDisplayMode" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescDisplayMode" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboDisplayMode" Grid.Column="1" Width="240" VerticalAlignment="Center"
+                                  SelectionChanged="ComboDisplayMode_SelectionChanged" />
+                    </Grid>
                     <!-- Shown device -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>
@@ -28,6 +41,32 @@
                         </StackPanel>
                         <ComboBox x:Name="ComboDevice" Grid.Column="1" Width="240" VerticalAlignment="Center"
                                   SelectionChanged="ComboDevice_SelectionChanged" />
+                    </Grid>
+                    <!-- Swap duration (drop_swap mode only) -->
+                    <Grid x:Name="RowSwapDur" Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblSwapDur" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescSwapDur" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboSwapDur" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboSwapDur_SelectionChanged" />
+                    </Grid>
+                    <!-- Rotate interval (rotate mode only) -->
+                    <Grid x:Name="RowRotI" Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblRotI" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescRotI" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboRotI" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboRotI_SelectionChanged" />
                     </Grid>
                     <!-- Widget side -->
                     <Grid Style="{StaticResource SettingRowStyle}">

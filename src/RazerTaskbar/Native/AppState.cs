@@ -58,6 +58,10 @@ public sealed class AppState
 
     public DeviceStore Devices { get; } = new();
 
+    /// <summary>Display-mode runtime state (drop-swap override / rotate
+    /// cursor). Widget-thread only; timestamp-idempotent per tick.</summary>
+    public DisplayModeState ModeState { get; } = new();
+
     private AppState() { }
 
     /// <summary>Thread-safe config snapshot (UI thread init/refresh use).</summary>
@@ -141,6 +145,11 @@ public sealed class AppState
 
     public static void PostSetShownDevice(string handle) => WidgetThread.Post(() => Instance.SetShownDevice(handle));
 
+    /// <summary>Mode or mode-tuning changed: start the new strategy from a
+    /// clean slate (no stale override, rotation restarts at slot 0, battery
+    /// baselines re-prime without spurious drop triggers).</summary>
+    public static void PostResetModeState() => WidgetThread.Post(() => Instance.ModeState.Reset());
+
     public static void PostReposition() => WidgetThread.Post(RepositionWidget);
 
     public static void PostTraySetEnabled(bool enabled) => WidgetThread.Post(() => TrayIcon.SetEnabled(enabled));
@@ -167,6 +176,9 @@ public static class ConfigExt
         RunAtStartup = c.RunAtStartup,
         PollingThrottleSecs = c.PollingThrottleSecs,
         ShownDeviceHandle = c.ShownDeviceHandle,
+        DisplayMode = c.DisplayMode,
+        SwapDisplaySecs = c.SwapDisplaySecs,
+        RotateIntervalSecs = c.RotateIntervalSecs,
         SynapseVersion = c.SynapseVersion,
         BatterySource = c.BatterySource,
         WidgetSide = c.WidgetSide,

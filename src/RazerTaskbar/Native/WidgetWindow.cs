@@ -536,7 +536,10 @@ public static class WidgetWindow
     private static void Paint(IntPtr hwnd)
     {
         var st = _state;
-        var device = DeviceSelector.PickDeviceToDisplay(AppState.Instance.Devices.Snapshot());
+        var cfg = AppState.Instance.ConfigSnapshot();
+        var device = DisplayModeResolver.Pick(
+            AppState.Instance.Devices.Snapshot(), cfg, AppState.Instance.ModeState,
+            Environment.TickCount64);
         float scale = DpiScale(hwnd);
         int w = st.WidgetW;
         int h = st.WidgetH;
@@ -548,7 +551,7 @@ public static class WidgetWindow
         // duration (the row's status icon conveys charging).
         string topLabel = connected ? $"{device!.BatteryPercentage}%" : "--";
         string? bottomLabel = null;
-        if (AppState.Instance.ConfigSnapshot().ShowEstimatedTime && connected)
+        if (cfg.ShowEstimatedTime && connected)
         {
             if (HistoryService.EstimateFor(device!.Handle) is { } est)
             {
@@ -880,7 +883,7 @@ public static class WidgetWindow
         var connected = devices.Values.Where(d => d.IsConnected).OrderBy(d => d.Name, StringComparer.Ordinal).ToList();
         var connectedNames = connected.Select(d => d.Name).ToList();
         uint allChecked = AppState.Instance.ConfigSnapshot().ShownDeviceHandle.Length == 0 ? MF_CHECKED : 0;
-        AppendItem(menu, MF_STRING | allChecked, IdDeviceBase, "All devices");
+        AppendItem(menu, MF_STRING | allChecked, IdDeviceBase, "Lowest battery device");
         for (int i = 0; i < connected.Count; i++)
         {
             var d = connected[i];

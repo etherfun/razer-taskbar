@@ -21,8 +21,13 @@
 
 ## 显示选择（`battery::pick_device_to_display`）
 
-- 候选：`is_connected && is_selected`（`shown_device_handle` 为空 = 全选；菜单/双击切换后回写 `is_selected`）。
+- 候选：`is_connected && is_selected`（`shown_device_handle` 为空 = 全选，即 UI 中的"当前电量最低设备"自动项；菜单/切换后回写 `is_selected`）。
 - 排序：`battery * (charging ? 100 : 1)` 升序取首个 → 非充电优先，电量低优先（与 TS `tray_manager.ts` 一致）。
+- 显示模式（C# 版，`Core/Models/DisplayMode.cs` 的 `DisplayModeResolver`，`display_mode` 配置）：
+  - `fixed`（默认）：上述规则原样。
+  - `drop_swap`：基础 = 上述规则结果；任何在线设备电量严格下降（如 100→99）时临时替换显示该设备 `swap_display_secs` 秒（默认 30），窗口内再降重新计时，到期/断连切回；最新下降优先（同 tick 多台取最低电量），显示设备自身下降视为最新事件直接切回。设备电量基线存运行态，首见只建基线不触发，模式/参数变更时重置。
+  - `rotate`：全部在线设备按名称（Ordinal）排序轮播，每台 `rotate_interval_secs` 秒（默认 30），推进按时间戳幂等（挂件绘制与托盘刷新共享一次推进）。
+  - 托盘图标与悬停面板高亮跟随同一结果（`DisplayModeState.LastShownHandle`）；选择规则改动须同步 `tests/RazerTaskbar.Tests`（`BatteryTests` + `DisplayModeTests`）。
 - 颜色（`color_for`）：0–19 红、20–39 橙、40–59 黄、60–79 浅绿、80+ 绿；离线灰。
 - 字形（`fluent_battery_glyph`）：E850–E85A 按 10% 分档；充电且 ≥50% 用 EA93。
 

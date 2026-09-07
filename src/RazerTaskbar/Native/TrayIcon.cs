@@ -58,7 +58,9 @@ public static class TrayIcon
         }
         string tip;
         (int Level, bool Charging)? state;
-        var device = DeviceSelector.PickDeviceToDisplay(AppState.Instance.Devices.Snapshot());
+        var device = DisplayModeResolver.Pick(
+            AppState.Instance.Devices.Snapshot(), AppState.Instance.ConfigSnapshot(),
+            AppState.Instance.ModeState, Environment.TickCount64);
         if (device is { } d)
         {
             var charging = d.IsCharging ? $" {I18n.Tr("(charging)")}" : "";

@@ -136,7 +136,10 @@ public static class HoverPanel
         {
             return [NoDevicesRow()];
         }
-        var shown = DeviceSelector.PickDeviceToDisplay(devices)?.Handle ?? "";
+        // Follow the display mode's pick (drop-swap override / rotate cursor)
+        // without advancing it — the resolver records LastShownHandle on the
+        // widget thread for exactly this read-only consumer.
+        var shown = AppState.Instance.ModeState.LastShownHandle;
         var deviceNames = devices.Values.Select(d => d.Name).ToList();
         var rows = devices.Values.Select(d => new Row(
             DeviceLabels.Label(d.Name, d.Handle, deviceNames),

@@ -57,7 +57,7 @@ public static class I18n
     private static string Translate(string s) => s switch
     {
         // Menu (WidgetWindow)
-        "All devices" => "所有设备",
+        "Lowest battery device" => "当前电量最低设备",
         "Poll interval" => "刷新间隔",
         "Widget on left" => "挂件靠左",
         "Widget on right" => "挂件靠右",
@@ -146,6 +146,16 @@ public static class I18n
         "History" => "电量记录",
         "General" => "通用",
         "Shown device" => "显示设备",
+        // Display modes (settings page)
+        "Display mode" => "显示模式",
+        "How the widget picks which device to show." => "挂件选择显示设备的方式。",
+        "Fixed device" => "固定设备",
+        "Swap on battery drop" => "电量下降时临时替换",
+        "Rotate all devices" => "定时轮播全部设备",
+        "Swap duration" => "替换显示时长",
+        "How long a dropped device stays shown before switching back." => "设备电量下降后临时显示的时长，到期切回显示设备。",
+        "Rotate interval" => "轮播间隔",
+        "How long each device stays shown before rotating to the next." => "每台设备的显示时长，到期轮换到下一台。",
         "Widget side" => "挂件位置",
         "Left" => "左侧",
         "Right" => "右侧",

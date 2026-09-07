@@ -16,6 +16,12 @@ public sealed partial class SettingsPage : Page
 {
     private static readonly int[] PollChoices = [5, 10, 15, 30, 60];
     private static readonly int[] RecordChoices = [1, 2, 5, 10, 30];
+    private static readonly int[] SwapChoices = [15, 30, 60, 120];
+    private static readonly int[] RotateChoices = [10, 30, 60, 120];
+
+    /// <summary>"30 s" / "2 min" — durations stay locale-neutral like the
+    /// poll-interval combo.</summary>
+    private static string FormatSecs(int p) => p >= 60 && p % 60 == 0 ? $"{p / 60} min" : $"{p} s";
 
     /// <summary>Programmatic ComboBox SelectionChanged needs an echo guard
     /// during init/refresh (Win32 had none because BM_SETCHECK doesn't fire).</summary>
@@ -41,6 +47,12 @@ public sealed partial class SettingsPage : Page
             HeaderGeneral.Text = I18n.Tr("General");
             LblShownDevice.Text = I18n.Tr("Shown device");
             DescShownDevice.Text = I18n.Tr("Which device's battery the widget displays.");
+            LblDisplayMode.Text = I18n.Tr("Display mode");
+            DescDisplayMode.Text = I18n.Tr("How the widget picks which device to show.");
+            LblSwapDur.Text = I18n.Tr("Swap duration");
+            DescSwapDur.Text = I18n.Tr("How long a dropped device stays shown before switching back.");
+            LblRotI.Text = I18n.Tr("Rotate interval");
+            DescRotI.Text = I18n.Tr("How long each device stays shown before rotating to the next.");
             LblSide.Text = I18n.Tr("Widget side");
             DescSide.Text = I18n.Tr("Anchor the widget on the left or right side of the taskbar.");
             LblEmbedWidgets.Text = I18n.Tr("Embed in widgets free space");
@@ -69,6 +81,9 @@ public sealed partial class SettingsPage : Page
             ComboSide.SelectedIndex = sideIdx >= 0 ? sideIdx : 1;
             // Accessibility: screen readers announce the row label per control.
             AutomationProperties.SetName(ComboDevice, LblShownDevice.Text);
+            AutomationProperties.SetName(ComboDisplayMode, LblDisplayMode.Text);
+            AutomationProperties.SetName(ComboSwapDur, LblSwapDur.Text);
+            AutomationProperties.SetName(ComboRotI, LblRotI.Text);
             AutomationProperties.SetName(ComboSide, LblSide.Text);
             AutomationProperties.SetName(SwitchEst, LblEst.Text);
             AutomationProperties.SetName(SwitchEmbedWidgets, LblEmbedWidgets.Text);
@@ -81,14 +96,15 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(ComboLang, LblLang.Text);
             AutomationProperties.SetName(SwitchAutostart, LblAutostart.Text);
 
-            // Shown device (0 = All devices, then connected sorted by name).
+            // Shown device (0 = auto "Lowest battery device", then connected
+            // sorted by name).
             var devices = AppState.Instance.Devices.Snapshot();
             var connected = devices.Values
                 .Where(d => d.IsConnected)
                 .OrderBy(d => d.Name, StringComparer.Ordinal)
                 .ToList();
             var connectedNames = connected.Select(d => d.Name).ToList();
-            var entries = new List<(string Handle, string Label)> { ("", I18n.Tr("All devices")) };
+            var entries = new List<(string Handle, string Label)> { ("", I18n.Tr("Lowest battery device")) };
             entries.AddRange(connected.Select(d =>
                 (d.Handle, $"{DeviceLabels.Label(d.Name, d.Handle, connectedNames)} — {d.BatteryPercentage}%")));
             ComboDevice.ItemsSource = entries.Select(e => e.Label).ToList();
@@ -99,6 +115,29 @@ public sealed partial class SettingsPage : Page
             {
                 ComboDevice.SelectedIndex = idx;
             }
+
+            // Display mode + mode-specific rows.
+            ComboDisplayMode.ItemsSource = new List<string>
+            {
+                I18n.Tr("Fixed device"),
+                I18n.Tr("Swap on battery drop"),
+                I18n.Tr("Rotate all devices"),
+            };
+            ComboDisplayMode.SelectedIndex = cfg.DisplayMode switch
+            {
+                "drop_swap" => 1,
+                "rotate" => 2,
+                _ => 0,
+            };
+            ComboSwapDur.ItemsSource = SwapChoices.Select(FormatSecs).ToList();
+            ComboSwapDur.SelectedIndex = SwapChoices.Contains((int)cfg.SwapDisplaySecs)
+                ? Array.IndexOf(SwapChoices, (int)cfg.SwapDisplaySecs)
+                : 1;
+            ComboRotI.ItemsSource = RotateChoices.Select(FormatSecs).ToList();
+            ComboRotI.SelectedIndex = RotateChoices.Contains((int)cfg.RotateIntervalSecs)
+                ? Array.IndexOf(RotateChoices, (int)cfg.RotateIntervalSecs)
+                : 1;
+            UpdateModeRows(cfg.DisplayMode);
 
             // Widget side.
             ComboSide.SelectedIndex = cfg.WidgetSide == "left" ? 0 : 1;
@@ -143,8 +182,8 @@ public sealed partial class SettingsPage : Page
         {
             return;
         }
-        // Entry 0 = All devices (""); otherwise the connected roster order
-        // matches the label list built in Localize.
+        // Entry 0 = auto "" (lowest battery device); otherwise the connected
+        // roster order matches the label list built in Localize.
         int index = ComboDevice.SelectedIndex;
         if (index < 0)
         {
@@ -160,6 +199,58 @@ public sealed partial class SettingsPage : Page
             handle = index - 1 < connected.Count ? connected[index - 1].Handle : "";
         }
         AppState.PostSetShownDevice(handle);
+    }
+
+    /// <summary>Show/hide the mode-specific rows and disable the shown-device
+    /// picker while rotating (the carousel ignores it). Called from Localize
+    /// and immediately on mode switches — with the new mode, not the config
+    /// snapshot that the posted edit has not landed in yet.</summary>
+    private void UpdateModeRows(string mode)
+    {
+        RowSwapDur.Visibility = mode == "drop_swap" ? Visibility.Visible : Visibility.Collapsed;
+        RowRotI.Visibility = mode == "rotate" ? Visibility.Visible : Visibility.Collapsed;
+        ComboDevice.IsEnabled = mode != "rotate";
+    }
+
+    private void ComboDisplayMode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress || ComboDisplayMode.SelectedIndex < 0)
+        {
+            return;
+        }
+        string mode = ComboDisplayMode.SelectedIndex switch
+        {
+            1 => "drop_swap",
+            2 => "rotate",
+            _ => "fixed",
+        };
+        AppState.PostModifyConfig(c => c.DisplayMode = mode);
+        // The runtime strategy state (override window, rotate cursor, battery
+        // baselines) belongs to the old mode — restart clean. Reposition since
+        // the newly picked device may have a different label width.
+        AppState.PostResetModeState();
+        AppState.PostReposition();
+        UpdateModeRows(mode);
+    }
+
+    private void ComboSwapDur_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress || ComboSwapDur.SelectedIndex < 0)
+        {
+            return;
+        }
+        int secs = SwapChoices[ComboSwapDur.SelectedIndex];
+        AppState.PostModifyConfig(c => c.SwapDisplaySecs = (ulong)secs);
+    }
+
+    private void ComboRotI_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress || ComboRotI.SelectedIndex < 0)
+        {
+            return;
+        }
+        int secs = RotateChoices[ComboRotI.SelectedIndex];
+        AppState.PostModifyConfig(c => c.RotateIntervalSecs = (ulong)secs);
     }
 
     private void Side_SelectionChanged(object sender, SelectionChangedEventArgs e)
