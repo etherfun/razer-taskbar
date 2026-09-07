@@ -105,13 +105,22 @@ public sealed class HidWatcher
                 {
                     if (BleBattery.TryRead(mac) is { } ble)
                     {
-                        var serial = ble.Serial ?? $"BLE:{mac:X12}";
-                        var name = (ble.Serial is { } s ? HarvestedName(s) : null)
+                        // Identity bridge: Synapse's heartbeat device arrays
+                        // log every paired device with its canonical serial
+                        // regardless of transport (useBle marks the BLE
+                        // ones). A match upgrades the MAC identity to the
+                        // real serial — one identity across dongle/cable/BT
+                        // — and supplies the charging flag GATT lacks.
+                        var identity = BleIdentityFor(mac,
+                            DeviceClassifier.FromCategoryAndName("", ble.Name));
+                        var serial = identity?.Serial ?? ble.Serial ?? $"BLE:{mac:X12}";
+                        var name = identity is { Name.Length: > 0 } ? identity.Name
+                            : (ble.Serial is { } s ? HarvestedName(s) : null)
                             ?? (ble.Name.Length > 0 ? ble.Name : null)
                             ?? "Razer Keyboard";
                         readings.Add(new HidDeviceReading(group.Key, "", serial,
-                            ble.Percent, ble.Percent, null, name,
-                            DeviceClassifier.FromCategoryAndName("", name)));
+                            ble.Percent, ble.Percent, identity?.Charging, name,
+                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name)));
                     }
                     continue;
                 }
@@ -506,6 +515,35 @@ public sealed class HidWatcher
             }
         }
         return null;
+    }
+
+    private List<RazerWatcher.BleIdentity> _bleIdentities = new();
+    private long _bleIdentityAtMs = -1;
+    private const int BleIdentityRefreshMs = 60 * 1000;
+
+    /// <summary>Cached BLE identity bridge lookup (Synapse heartbeat log,
+    /// refreshed at most once a minute — the heartbeat itself is written at
+    /// about that rate). Matches by the Bluetooth-name kind; returns null
+    /// when nothing matches unambiguously — the caller then falls back to
+    /// the BLE MAC identity.</summary>
+    private RazerWatcher.BleIdentity? BleIdentityFor(ulong mac, DeviceKind kind)
+    {
+        long now = Environment.TickCount64;
+        if (_bleIdentityAtMs < 0 || now - _bleIdentityAtMs > BleIdentityRefreshMs)
+        {
+            _bleIdentityAtMs = now;
+            try
+            {
+                _bleIdentities = RazerWatcher.HarvestBleIdentities();
+            }
+            catch (Exception e)
+            {
+                Log.Error("hid: BLE identity harvest failed", e);
+            }
+        }
+        return _bleIdentities.Count == 0
+            ? null
+            : RazerWatcher.MatchBleIdentity(_bleIdentities, kind);
     }
 
     /// <summary>Vendor serial per transaction id, resolved once and cached.

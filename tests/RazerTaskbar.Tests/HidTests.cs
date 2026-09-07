@@ -282,6 +282,47 @@ public class HidTests
     }
 
     [Fact]
+    public void BleHeartbeat_ParsesIdentitiesFromSynapseLog()
+    {
+        // Real heartbeat shape (2026-09-07, Joro on BT + mouse on the dongle):
+        // timestamp bracket, then a device array with useBle / powerStatus.
+        var line = "[2026/09/07 14:17:44.410] info: Device  ["
+            + @"{""serialNumber"":""632516H31000044"",""productId"":184,""hasBattery"":true,""useBle"":false,"
+            + @"""category"":""MOUSE"",""name"":{""en"":""Razer Viper V3 HyperSpeed""},"
+            + @"""powerStatus"":{""chargingStatus"":""NoCharge_BatteryFull"",""level"":61}},"
+            + @"{""serialNumber"":""SI2522F18701637"",""productId"":717,""hasBattery"":true,""useBle"":true,"
+            + @"""category"":""KEYBOARD"",""name"":{""en"":""Razer Joro"",""zh-cn"":""Razer 乔罗金蛛""},"
+            + @"""powerStatus"":{""chargingStatus"":""Charging"",""level"":100},"
+            + @"""note"":""bracket } inside \""a string\"""""
+            + "}]";
+
+        var now = new DateTime(2026, 9, 7, 14, 18, 0);
+        var identities = RazerWatcher.ParseBleHeartbeat(line, now);
+        var joro = Assert.Single(identities);
+        Assert.Equal("SI2522F18701637", joro.Serial);
+        Assert.Equal("Razer Joro", joro.Name);
+        Assert.Equal("KEYBOARD", joro.Category);
+        Assert.True(joro.Charging); // fresh heartbeat, chargingStatus=Charging
+
+        // A stale heartbeat must not claim charging…
+        var stale = RazerWatcher.ParseBleHeartbeat(line, now.AddHours(1));
+        Assert.Null(Assert.Single(stale).Charging);
+
+        // …and kind matching resolves the entry; two same-kind candidates stay ambiguous.
+        Assert.Equal("SI2522F18701637", RazerWatcher.MatchBleIdentity(identities, DeviceKind.Keyboard)?.Serial);
+        Assert.Null(RazerWatcher.MatchBleIdentity(
+            new List<RazerWatcher.BleIdentity> { joro, joro with { Serial = "OTHER" } }, DeviceKind.Keyboard));
+    }
+
+    [Fact]
+    public void ExtractJsonArray_SkipsTimestampAndHandlesEscapes()
+    {
+        Assert.Null(RazerWatcher.ExtractJsonArray("[2026/09/07 14:17:44.410] info: no array here"));
+        Assert.Equal("""["a\"b"]""",
+            RazerWatcher.ExtractJsonArray("""[ts] info: Device  ["a\"b"] tail"""));
+    }
+
+    [Fact]
     public void DeviceSlots_UnknownPidProbesAllSlots()
     {
         var slots = RazerPidTable.DeviceSlots(0x1234);

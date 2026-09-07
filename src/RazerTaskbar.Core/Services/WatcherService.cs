@@ -258,6 +258,184 @@ public sealed class RazerWatcher
         return names;
     }
 
+    /// <summary>One BLE battery device as Synapse's heartbeat device array
+    /// describes it. Charging is null when the heartbeat is too stale to
+    /// trust the flag (the identity itself is stable and always adopted).</summary>
+    public sealed record BleIdentity(string Serial, string Name, string Category, bool? Charging);
+
+    /// <summary>BLE ↔ profile bridge from the V4 heartbeat device arrays
+    /// (`info: Device  [{…}, …]` lines). Synapse logs every paired device
+    /// with its canonical serial regardless of transport — useBle marks the
+    /// Bluetooth-LE ones (verified on a Joro: BLE session still logs
+    /// serialNumber SI… with the USB productId). This upgrades the BLE MAC
+    /// fallback identity to the real serial — one identity across dongle,
+    /// cable and BT — and supplies the charging flag GATT lacks. Battery
+    /// level stays with the live GATT read; only the last heartbeat is read.</summary>
+    public static List<BleIdentity> HarvestBleIdentities()
+    {
+        var path = V4LogDir() is { } dir ? LatestV4Log(dir) : null;
+        if (path is null)
+        {
+            return new List<BleIdentity>();
+        }
+        var tail = ReadTail(path, 256 * 1024);
+        if (tail is null)
+        {
+            return new List<BleIdentity>();
+        }
+        string? heartbeat = null;
+        foreach (var line in tail.Split('\n'))
+        {
+            if (line.Contains("\"useBle\""))
+            {
+                heartbeat = line;
+            }
+        }
+        return heartbeat is null ? new List<BleIdentity>() : ParseBleHeartbeat(heartbeat, DateTime.Now);
+    }
+
+    internal static List<BleIdentity> ParseBleHeartbeat(string line, DateTime now)
+    {
+        var result = new List<BleIdentity>();
+        var json = ExtractJsonArray(line);
+        if (json is null)
+        {
+            return result;
+        }
+        // The heartbeat is only trusted for the charging flag while fresh;
+        // Synapse writes one every ~a minute while it runs.
+        bool chargingKnown = false;
+        if (Regex.Match(line, @"^\[(?<ts>[^\]]+)\]") is { Success: true } ts
+            && DateTime.TryParseExact(ts.Groups["ts"].Value, "yyyy/MM/dd HH:mm:ss.fff",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeLocal, out var at))
+        {
+            chargingKnown = now - at < TimeSpan.FromMinutes(10);
+        }
+        List<JsonElement> vals;
+        try
+        {
+            vals = JsonSerializer.Deserialize<List<JsonElement>>(json, JsonOpts) ?? new();
+        }
+        catch (JsonException)
+        {
+            return result;
+        }
+        foreach (var v in vals)
+        {
+            if (v.TryGetProperty("useBle", out var ble) && ble.ValueKind != JsonValueKind.True)
+            {
+                continue;
+            }
+            if (v.TryGetProperty("hasBattery", out var bat) && bat.ValueKind != JsonValueKind.True)
+            {
+                continue;
+            }
+            if (!v.TryGetProperty("serialNumber", out var s) || s.ValueKind != JsonValueKind.String
+                || s.GetString() is not { Length: > 0 } serial)
+            {
+                continue;
+            }
+            var name = v.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.Object
+                && n.TryGetProperty("en", out var en) && en.ValueKind == JsonValueKind.String
+                ? en.GetString() ?? ""
+                : "";
+            var category = v.TryGetProperty("category", out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString() ?? ""
+                : "";
+            bool? charging = null;
+            if (chargingKnown && v.TryGetProperty("powerStatus", out var p)
+                && p.TryGetProperty("chargingStatus", out var cs) && cs.ValueKind == JsonValueKind.String)
+            {
+                charging = cs.GetString() == "Charging";
+            }
+            result.Add(new BleIdentity(serial, name, category, charging));
+        }
+        return result;
+    }
+
+    /// <summary>Pick the BLE identity for a GATT-only device. Matching by
+    /// device kind; a single overall candidate is accepted even when the
+    /// kinds disagree (the Bluetooth name may be terse, e.g. "Joro"). Two
+    /// same-kind candidates stay ambiguous → null (MAC fallback identity).</summary>
+    public static BleIdentity? MatchBleIdentity(List<BleIdentity> candidates, DeviceKind kind)
+    {
+        var byKind = candidates.Where(c => DeviceClassifier.FromCategoryAndName(c.Category, c.Name) == kind).ToList();
+        if (byKind.Count == 1)
+        {
+            return byKind[0];
+        }
+        return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    /// <summary>First top-level JSON array of the line, extracted by
+    /// string-aware bracket matching. The leading "[timestamp]" bracket is
+    /// skipped because it contains no '{' or '"'.</summary>
+    internal static string? ExtractJsonArray(string line)
+    {
+        for (int i = line.IndexOf('['); i >= 0; i = line.IndexOf('[', i + 1))
+        {
+            int depth = 0;
+            bool inString = false;
+            for (int k = i; k < line.Length; k++)
+            {
+                char c = line[k];
+                if (inString)
+                {
+                    if (c == '\\')
+                    {
+                        k++;
+                    }
+                    else if (c == '"')
+                    {
+                        inString = false;
+                    }
+                }
+                else if (c == '"')
+                {
+                    inString = true;
+                }
+                else if (c == '[')
+                {
+                    depth++;
+                }
+                else if (c == ']')
+                {
+                    if (--depth == 0)
+                    {
+                        var span = line[i..(k + 1)];
+                        if (span.Contains('{') || span.Contains('"'))
+                        {
+                            return span;
+                        }
+                        break; // e.g. the "[2026/09/07 …]" timestamp bracket
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Last `bytes` of a file, share-read (see ReadShared).</summary>
+    private static string? ReadTail(string path, int bytes)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (fs.Length > bytes)
+            {
+                fs.Seek(-bytes, SeekOrigin.End);
+            }
+            using var reader = new StreamReader(fs);
+            return reader.ReadToEnd();
+        }
+        catch (Exception e)
+        {
+            Log.Info($"tail read failed ({Path.GetFileName(path)}): {e.Message}");
+            return null;
+        }
+    }
+
     /// <summary>Harvest from the latest V4 log on disk (Synapse must have run
     /// once — the log persists after it exits). Best effort.</summary>
     public static Dictionary<string, string> HarvestSerialNames()

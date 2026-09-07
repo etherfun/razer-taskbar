@@ -87,10 +87,19 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - **电量走 GATT Battery Service（0x180F/0x2A19，0-100% 直读）**——Windows 设置同源。
   `BleBattery`（`src/RazerTaskbar.Core/Hid/BleBattery.cs`）每轮 uncached 读一次，
   设备不可达时按缺席计数判离线。
-- **身份分裂（固有限制）**：0x180A 只有 Manufacturer="Razer" 和 PnP ID（无 0x2A25
-  串号特征），蓝牙上拿不到厂商串号 → 身份退化为 **`BLE:<MAC>`**（如 `BLE:CF4FCB85ADF3`），
-  与 dongle/有线的 `SI2522F18701637` 是两个历史身份。显示名用蓝牙设备名（"Joro"）。
-  这符合"不按名合并"原则；切回 2.4G/线缆即回到原身份。
+- **身份分裂已由日志桥解决（2026-09-07 二期）**：0x180A 没有 0x2A25 串号特征，蓝牙上拿不到
+  厂商串号。但 **Synapse 心跳设备数组**（V4 日志 `info: Device  [{…}, …]` 行，约 1 分钟一条）
+  给所有配对设备记录**规范串号**而不分传输——`useBle:true` 标记 BLE 设备（真机验证：蓝牙 Joro
+  仍记 `serialNumber SI2522F18701637` + USB productId 717）。`RazerWatcher.HarvestBleIdentities`
+  读日志尾部最后一条心跳（256KB tail），解析 BLE 电量设备（串号/名称/类别/充电状态，
+  心跳 >10 分钟旧则充电位不采信），`MatchBleIdentity` 按设备类别匹配（唯一候选即使类别
+  不符也接受——蓝牙名可能很简短；两个同类别候选保持歧义→回退 MAC）。命中后蓝牙身份
+  升级为 `SI2522F18701637`，**三种模式一个身份，历史无缝**，并补上 GATT 给不了的充电位
+  （日志 `chargingStatus == "Charging"`，分钟级新鲜度）。Synapse 未运行/无心跳 → 退回
+  `BLE:<MAC>` 身份（`BleBattery` 缓存 DIS 串号，Joro 无 → 恒走 MAC）。
+- **对照 OpenRazer**（PR #2683，2026-02，进行中）：Joro 1532:02CD 用 tx 0x1F + report_index
+  0x03（与我们探针一致）；**该 PR 无电量方法**（仅灯光/宏），OpenRazer 也**不支持蓝牙设备**
+  （BT 不识别为 USB 设备）——GATT 路线无先例可抄。
 - **无充电标志**：GATT BAS 只有电量。BT+线同时（边充边用）时 `IsCharging` 未知，
   `Commit` 会保留有线读数的充电状态不被 BLE 读数覆盖。
 - 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——2 轮后判离线。

@@ -1,18 +1,21 @@
-# C# + WinUI3 移植(`csharp/`,分支 `refactor/csharp-winui3`)
+# C# + WinUI3 移植(分支 `refactor/csharp-winui3`,仓库根目录)
 
 Rust 版的全量 C# 移植实验:挂件/托盘/悬停/日志监听/UIA 用 C# P/Invoke 重写(观感像素级对齐),
-电量历史 + 设置页合并为一个 WinUI3 NavigationView 窗口。**Rust 版保持不动**,两版共存于本分支;
-共享同一份 `%APPDATA%\razer-taskbar\settings.json` 与 `battery.db`(schema 兼容),
-但**不可同时运行**(窗口类名相同,单实例互斥)。
+电量历史 + 设置页合并为一个 WinUI3 NavigationView 窗口。**Rust 版已从本分支移除**;
+共享同一份 `%APPDATA%\razer-taskbar\settings.json` 与 `battery.db`(schema 兼容)。
 
 ## 构建与测试
 
 ```powershell
-dotnet build csharp/RazerTaskbar.sln -c Release        # 构建
-dotnet test  csharp/tests/RazerTaskbar.Tests -v q      # 27 个单测(移植自 Rust #[cfg(test)])
-dotnet publish csharp/src/RazerTaskbar/RazerTaskbar.csproj -c Release
-# 产物: csharp/src/RazerTaskbar/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/razer-taskbar.exe
+# 部署/探针一律用 Release x64(产物在 bin/x64/Release/.../win-x64/):
+dotnet build src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64
+dotnet test  tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
+# 常驻运行: src/RazerTaskbar/bin/x64/Release/net8.0-windows10.0.22621.0/win-x64/razer-taskbar.exe
 ```
+
+- **先停常驻进程再构建**:`razer-taskbar.exe` 运行时锁住 `razer-taskbar.dll`,
+  MSBuild 的复制步骤会静默失败——Core.dll 刷新了而 app 产物仍是旧版,改完"没生效"多半是它。
+- exe 是 apphost 壳,判断是否部署成功要看 **razer-taskbar.dll** 的时间戳。
 
 ## 运行时模型(对应要求)
 
