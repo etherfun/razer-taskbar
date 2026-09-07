@@ -157,7 +157,28 @@ Config lives in `%APPDATA%\razer-taskbar\settings.json`.
 ## Supported hardware
 
 * Potentially any wireless Razer device compatible with Razer Synapse 3 or 4.
-* Tested with Razer Blackshark V2 Pro (2023).
+* Tested with Razer Blackshark V2 Pro (2023), Razer Joro (keyboard, all three
+  connection modes) and Razer Viper V3 HyperSpeed (mouse, dongle + cable).
+
+### What each connection mode provides
+
+Battery data comes from direct device queries (`battery_source=auto`, no
+Synapse needed) with Synapse logs as fallback. Verified on the Joro keyboard
+and Viper V3 HyperSpeed mouse; the raw protocol notes live in
+`docs/agent-hid.md`.
+
+| | 2.4G dongle | Wired (cable mode) | Bluetooth (BLE) |
+|---|---|---|---|
+| Battery level | ✅ direct HID | ✅ direct HID | ✅ Razer vendor GATT channel (Scaled255) → GATT Battery Service |
+| Charging state | ⚠️ mouse slot verified, keyboard slot untested | ✅ direct HID | ✅ Razer vendor GATT channel → Synapse heartbeat |
+| Serial identity | ✅ direct HID | ✅ direct HID (same serial as dongle) | ✅ Razer vendor GATT channel (full serial) → Synapse heartbeat → `BLE:<MAC>` |
+| Device name & type | ✅ product string (combo-dongle keyboard slot named via Synapse log) | ✅ product string | ✅ GAP name + Synapse log category |
+| Works without Synapse running | ✅ | ✅ | ✅ — when Razer's services actively hold the vendor channel, level falls back to the Battery Service and identity/charging degrade as above |
+| Predicted usable / time-to-full (history) | ✅ | ✅ | ✅ |
+
+The three modes share one device identity (the same serial across dongle,
+cable and Bluetooth), so the battery history follows the physical device, not
+the transport.
 
 ## Attributions
 
