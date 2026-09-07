@@ -94,8 +94,10 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
   读日志尾部最后一条心跳（256KB tail），解析 BLE 电量设备（串号/名称/类别/充电状态，
   心跳 >10 分钟旧则充电位不采信），`MatchBleIdentity` 按设备类别匹配（唯一候选即使类别
   不符也接受——蓝牙名可能很简短；两个同类别候选保持歧义→回退 MAC）。命中后蓝牙身份
-  升级为 `SI2522F18701637`，**三种模式一个身份，历史无缝**，并补上 GATT 给不了的充电位
-  （日志 `chargingStatus == "Charging"`，分钟级新鲜度）。Synapse 未运行/无心跳 → 退回
+  升级为 `SI2522F18701637`，**三种模式一个身份，历史无缝**。充电位注意：心跳
+  `chargingStatus` 枚举为 `Charging`/`NoCharge_BatteryFull`/`off`（中间是默认非充电态，
+  61% 未插线也报），且 **BLE 条目无 powerStatus 字段**——蓝牙充电位实际来自厂商通道
+  (05,85)，厂商通道被 razerwdl 占用时蓝牙充电状态为未知。Synapse 未运行/无心跳 → 退回
   `BLE:<MAC>` 身份（`BleBattery` 缓存 DIS 串号，Joro 无 → 恒走 MAC）。
 - **对照 OpenRazer**（PR #2683，2026-02，进行中）：Joro 1532:02CD 用 tx 0x1F + report_index
   0x03（与我们探针一致）；**该 PR 无电量方法**（仅灯光/宏），OpenRazer 也**不支持蓝牙设备**
@@ -141,12 +143,19 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
    | 10/05/0100 + payload 00 | Synapse 设置写入（亮度类） | seq 1b/1c/1d 三连发，对应操作亮度 |
    | 06/02/0008、07/0B/0000 | Synapse 设置写入 | 同上（节能相关），payload 1 字节 |
 
-   **通道占用语义**（真机实测，重要）：通道**不是** Synapse UI 一跑就独占——
-   RazerAppEngine 空闲（未开设备页）时共享可读；**驱动/服务层活跃时才占**
-   （占用者疑似 `razerwdl.exe` / Synapse 打开设备页后的 GATT 会话）——表现为服务可见但
-   特征枚举失败（"characteristics missing"），不是 AccessDenied。挂件策略：
+   **通道占用语义**（真机实测，重要）：占用者 = **驱动层的无线设备加载器
+   `razerwdl.exe`**（用户手动启动驱动栈时出现，随即特征枚举失败"characteristics
+   missing"——服务可见但特征打不开，不是 AccessDenied；razerwdl 退出后立即恢复）。
+   **RazerAppEngine（Synapse UI）本身不占用**——它空闲时通道共享可读。挂件策略：
    `BleVendor.TryReadPower` 先试厂商通道（电量+充电一次拿全），特征枚举失败/订阅失败
    自动回退 BAS + 心跳充电位（`HidWatcher` BLE 分支）。
+
+   **心跳枚举语义**（V4 日志实测）：`powerStatus.chargingStatus` 只有三个观测值——
+   `"Charging"`（真在充，真机 13:11-13:41 充电段）、`"NoCharge_BatteryFull"`
+   （**默认非充电态**，命名有误导：鼠标 61% 未插线也报它）、`"off"`（关机/离线）。
+   且 **BLE 心跳条目（useBle:true）根本没有 powerStatus 字段**——蓝牙模式的充电位
+   只能靠厂商通道（05,85），心跳补充电位只对 dongle/有线条目成立。
+   另：FN+ESC 切换节能纯固件行为，BLE 寄存器零变化（主机不可见）。
 
    **抓包方法**（复现用）：`logman start trace -ets BthCap -p {8A1F9517-3A8C-4A9E-A018-4F17A200F277}`
    `0xC000000000000000 0x04 -o cap.etl -nb 128 256`（Microsoft-Windows-BTH-BTHPORT，HCI 关键字

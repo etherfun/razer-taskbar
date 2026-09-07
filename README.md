@@ -191,14 +191,23 @@ Synapse needed) with Synapse logs as fallback. Verified on the Joro keyboard
 and Viper V3 HyperSpeed mouse; the raw protocol notes live in
 `docs/agent-hid.md`.
 
-| | 2.4G dongle | Wired (cable mode) | Bluetooth (BLE) |
+| Data | 2.4G dongle | Wired (cable mode) | Bluetooth (BLE) |
 |---|---|---|---|
-| Battery level | ✅ direct HID | ✅ direct HID | ✅ Razer vendor GATT channel (Scaled255) → GATT Battery Service |
-| Charging state | ⚠️ mouse slot verified, keyboard slot untested | ✅ direct HID | ✅ Razer vendor GATT channel → Synapse heartbeat |
-| Serial identity | ✅ direct HID | ✅ direct HID (same serial as dongle) | ✅ Razer vendor GATT channel (full serial) → Synapse heartbeat → `BLE:<MAC>` |
-| Device name & type | ✅ product string (combo-dongle keyboard slot named via Synapse log) | ✅ product string | ✅ GAP name + Synapse log category |
-| Works without Synapse running | ✅ | ✅ | ✅ — when Razer's services actively hold the vendor channel, level falls back to the Battery Service and identity/charging degrade as above |
-| Predicted usable / time-to-full (history) | ✅ | ✅ | ✅ |
+| **Battery level** | ✅ HID `0x07/0x80` → raw byte in `args[1]`, Scaled255 ×100/255 or direct 0..100 per firmware generation (Viper: `156` = 61%) | ✅ same | ✅ vendor GATT `05/81` Scaled255 (Joro: `0xF7` = 97%) → GATT Battery Service `0x180F/0x2A19` (0..100) |
+| **Status: normal (discharging)** | ✅ HID `0x07/0x84` → `0` | ✅ HID `0x07/0x84` → `0` | ✅ vendor GATT `05/85` → `0` |
+| **Status: charging** | ⚠️ mouse slot verified; keyboard slot untested | ✅ HID `0x07/0x84` → `1` | ✅ vendor GATT `05/85` → `1` (cable in/out flipped it twice; level rose `F7`→`F9` while plugged) |
+| **Status: power saving** | ❌ not reportable | ❌ not reportable | ⚠️ live state is firmware-local (FN+ESC is host-invisible — toggling changes nothing on the wire); only the *configuration* is readable: vendor GATT `05/8A` → `[enabled][idle s][sleep min]` = `[01][300][20]` |
+| **Status: off / asleep** | ⚠️ query NoResponse → retry, then absence counter | n/a (cable keeps it alive) | ⚠️ GATT unreachable → absence counter; Synapse heartbeat enum `"off"` |
+| **Serial identity** | ✅ HID `0x00/0x82` → 22-byte ASCII | ✅ same serial as dongle | ✅ vendor GATT `01/83` (22-byte ASCII) → Synapse heartbeat → `BLE:<MAC>` |
+| **Device name & type** | ✅ product string (combo-dongle keyboard slot named via Synapse log) | ✅ product string | ✅ GAP name + heartbeat `category` |
+| **Works without Synapse running** | ✅ | ✅ | ✅ — only when Razer's device loader (`razerwdl.exe`) actively holds the vendor channel do level/serial fall back as above |
+| **Predicted usable / time-to-full (history)** | ✅ | ✅ | ✅ |
+
+Synapse's own heartbeat reports a `powerStatus.chargingStatus` enum —
+`"Charging"` / `"NoCharge_BatteryFull"` / `"off"`. Note the middle value is
+the *generic* not-charging state (it appears even at 61% unplugged), and BLE
+heartbeat entries carry no `powerStatus` at all — so over Bluetooth the
+charging flag really only comes from the vendor channel above.
 
 The three modes share one device identity (the same serial across dongle,
 cable and Bluetooth), so the battery history follows the physical device, not
