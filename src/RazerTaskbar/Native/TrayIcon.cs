@@ -1,6 +1,7 @@
 //! Port of src/tray.rs: notification-area fallback icon. The taskbar hook is
 //! primary; the tray icon keeps the app usable when the hook is occluded.
-//! Right-clicking opens the same menu as the widget, via the WM_TRAY callback.
+//! Right-clicking opens the same menu as the widget, double-clicking opens
+//! the battery history window — both via the WM_TRAY callback.
 
 using System.Runtime.InteropServices;
 using RazerTaskbar.Core;

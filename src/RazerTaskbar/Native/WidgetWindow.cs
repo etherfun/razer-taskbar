@@ -426,11 +426,17 @@ public static class WidgetWindow
         if (msg == TrayIcon.WmTray)
         {
             // Tray callbacks arrive as (msg=WM_TRAY, wparam=uid, lparam=event).
-            // Right-click (up or down, some shells only send down) opens the menu.
+            // Right-click (up or down, some shells only send down) opens the
+            // menu; double-click opens the battery history window (the shell
+            // synthesizes the dblclk event itself — no CS_DBLCLKS needed).
             var evt = (uint)(lParam.ToInt64() & 0xFFFF);
             if (evt == WM_RBUTTONUP || evt == WM_RBUTTONDOWN)
             {
                 ShowMenu(hwnd);
+            }
+            else if (evt == WM_LBUTTONDBLCLK)
+            {
+                App.ShowMainWindow(selectSettings: false);
             }
             return 0;
         }

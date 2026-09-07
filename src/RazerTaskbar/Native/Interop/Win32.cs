@@ -50,6 +50,7 @@ public static class Win32Consts
     public const uint WM_APP = 0x8000;
     public const uint WM_RBUTTONUP = 0x205;
     public const uint WM_RBUTTONDOWN = 0x204;
+    public const uint WM_LBUTTONDBLCLK = 0x203;
     public const int HTTRANSPARENT = -1;
 
     // Layered windows
