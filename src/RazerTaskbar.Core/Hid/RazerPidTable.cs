@@ -71,6 +71,29 @@ public static class RazerPidTable
     /// then wireless keyboards, then the legacy groups.</summary>
     public static readonly byte[] FallbackTransactionIds = { 0x1F, 0x9F, 0x3F, 0xFF };
 
+    /// <summary>PIDs that enumerate the <em>device itself</em> over USB (its
+    /// cable mode) — as opposed to a receiver/dongle or the Bluetooth stack.
+    /// On such a link the device is physically powered by the cable, so a
+    /// full battery with no charge flag still means "on USB power"
+    /// (Joro 0x02CD verified: flag drops to 0 at 100% while cabled).
+    /// Receiver slots and BLE must never take this shortcut: there the
+    /// device sits on its battery at 100%.</summary>
+    private static readonly HashSet<int> WiredDevicePids = new()
+    {
+        0x02CD, // Razer Joro cable mode (verified)
+        0x025A, // BlackWidow V3 Pro wired
+        0x0258, // BlackWidow V3 Mini HS wired
+        0x007C, // DeathAdder V2 Pro wired
+        0x0073, // Mamba Wireless wired
+        0x007A, // Viper Ultimate wired
+        0x00C2, // DeathAdder V3 Pro ALT wired
+        0x00BE, // DeathAdder V4 Pro wired
+    };
+
+    /// <summary>True when the PID enumerates the device itself (cable mode)
+    /// rather than a receiver or Bluetooth link.</summary>
+    public static bool IsWiredDevice(int pid) => WiredDevicePids.Contains(pid);
+
     /// <summary>Which wireless sub-device a transaction id addresses. On
     /// multi-device combo dongles the mouse and the paired keyboard share one
     /// vendor feature channel: the dongle routes by transaction id

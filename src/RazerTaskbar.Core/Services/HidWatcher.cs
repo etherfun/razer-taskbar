@@ -183,11 +183,17 @@ public sealed class HidWatcher
     {
         var name = reading.NameOverride
             ?? (reading.ProductName.Length > 0 ? reading.ProductName : $"Razer device 0x{reading.ProductId:X4}");
+        // A wired device at 100% runs off USB power even when its charge flag
+        // has dropped (the firmware pauses top-off at full) — present that
+        // state as charging. Receiver slots and BLE never take this
+        // shortcut: there the device sits on its battery at 100%.
+        var charging = reading.IsCharging == true
+            || (RazerPidTable.IsWiredDevice(reading.ProductId) && reading.LevelPercent >= 100);
         return new RazerDevice(
             name,
             handle,
             reading.LevelPercent,
-            reading.IsCharging ?? false,
+            charging,
             BatterySaver: false, // not exposed by the vendor battery commands
             IsConnected: true,
             shownHandle.Length == 0 || shownHandle == handle,

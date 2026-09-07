@@ -360,4 +360,44 @@ public class HidTests
         Assert.Equal("Razer BlackWidow V3 Mini", device.Name);
         Assert.Equal(DeviceKind.Keyboard, device.Kind);
     }
+
+    [Fact]
+    public void ToRazerDevice_WiredFullBatteryReadsAsCharging()
+    {
+        // Cable mode at 100%: the firmware pauses top-off and drops the
+        // charge flag, but the device runs off USB power — show the bolt.
+        var reading = new HidDeviceReading(0x02CD, "Razer Joro", "SI2522F18701637",
+            255, 100, false);
+        var device = HidWatcher.ToRazerDevice(reading, "SI2522F18701637", shownHandle: "");
+        Assert.True(device.IsCharging);
+    }
+
+    [Fact]
+    public void ToRazerDevice_WiredPartialBatteryKeepsFlag()
+    {
+        var reading = new HidDeviceReading(0x02CD, "Razer Joro", "SI2522F18701637",
+            156, 61, false);
+        var device = HidWatcher.ToRazerDevice(reading, "SI2522F18701637", shownHandle: "");
+        Assert.False(device.IsCharging);
+    }
+
+    [Fact]
+    public void ToRazerDevice_WiredChargingFlagStillWins()
+    {
+        var reading = new HidDeviceReading(0x02CD, "Razer Joro", "SI2522F18701637",
+            156, 61, true);
+        var device = HidWatcher.ToRazerDevice(reading, "SI2522F18701637", shownHandle: "");
+        Assert.True(device.IsCharging);
+    }
+
+    [Fact]
+    public void ToRazerDevice_DongleFullBatteryStaysDischarging()
+    {
+        // A receiver slot at 100% sits on its battery — never the USB-power
+        // shortcut (that is wired-PID only).
+        var reading = new HidDeviceReading(0x00B8, "Razer Viper V3 HyperSpeed", "632516H31000044",
+            255, 100, false);
+        var device = HidWatcher.ToRazerDevice(reading, "632516H31000044", shownHandle: "");
+        Assert.False(device.IsCharging);
+    }
 }

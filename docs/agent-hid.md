@@ -68,6 +68,9 @@ Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x0
   不产生 `HID:02CD` 伪行）。电量 raw 255 = 100%（Scaled255），**充电中 0x07/0x84 = 1**
   ——充电状态只有有线（或充电座）能观察到，是线缆模式的核心收益；充满 100% 后 flag
   自动回落 0（真机 18:09 充电中=1 → 18:14 满电=0），非充电=0、充电中=1 语义干净。
+  满电停充时设备实际由 USB 供电，故挂件显示规则：**有线 PID + 100% → 视为充电**
+  （`RazerPidTable.IsWiredDevice`，仅设备本体枚举的 PID；dongle 槽位/BLE 满电时在电池上，
+  绝不套用）。
 - 表项：`RazerPidTable.ExplicitSlots[0x02CD]` 单 Keyboard 槽（tx 0x1F、Scaled255）；
   Known 表同 PID 条目保证探针/缩放查询直接命中。
 - 仅插线不切模式 = 只充电（**已实测**）：0x02CD 不出现、2.4GHz 链路保持、电量经 dongle
