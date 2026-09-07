@@ -895,10 +895,17 @@ public static class HidProbe
         out_($"  battery: {reading.Percent}%");
         out_($"  serial:  {(reading.Serial is { } s ? s : "<no Device Information serial → identity falls back to BLE MAC>")}");
         out_($"  name:    \"{reading.Name}\"");
-        foreach (var (service, characteristic, value) in BleBattery.DumpCharacteristics(mac))
+        foreach (var (service, characteristic, props, value) in BleBattery.DumpCharacteristics(mac))
         {
-            var text = BleBattery.Printable(value);
-            out_($"  svc {service} char {characteristic}: {Convert.ToHexString(value)}{(text.Length > 0 ? $" \"{text}\"" : "")}");
+            if (value is { Length: > 0 } bytes)
+            {
+                var text = BleBattery.Printable(bytes);
+                out_($"  svc {service} char {characteristic} [{props}]: {Convert.ToHexString(bytes)}{(text.Length > 0 ? $" \"{text}\"" : "")}");
+            }
+            else
+            {
+                out_($"  svc {service} char {characteristic} [{props}]: <unreadable>");
+            }
         }
     }
 

@@ -77,12 +77,13 @@ public static class BleBattery
     private static byte? ReadLevel(BluetoothLEDevice device)
         => ReadByte(device, GattServiceUuids.Battery, GattCharacteristicUuids.BatteryLevel);
 
-    /// <summary>Diagnostic: read every readable characteristic of every
-    /// service (probe support; read-only, arguments-free characteristics
-    /// only). Returns (service uuid, characteristic uuid, value bytes).</summary>
-    public static List<(string Service, string Characteristic, byte[] Value)> DumpCharacteristics(ulong address)
+    /// <summary>Diagnostic: enumerate every service and characteristic
+    /// (probe support; read-only). Readable values are read; the rest only
+    /// report their properties. Returns (service uuid, characteristic uuid,
+    /// properties, value bytes or null).</summary>
+    public static List<(string Service, string Characteristic, string Props, byte[]? Value)> DumpCharacteristics(ulong address)
     {
-        var dump = new List<(string, string, byte[])>();
+        var dump = new List<(string, string, string, byte[]?)>();
         try
         {
             var device = BluetoothLEDevice.FromBluetoothAddressAsync(address)
@@ -97,7 +98,16 @@ public static class BleBattery
                     .AsTask().GetAwaiter().GetResult();
                 if (services.Status != GattCommunicationStatus.Success)
                 {
-                    return dump;
+                    // The peripheral (or another stack component, e.g. the HID
+                    // host) may refuse attribute discovery — fall back to the
+                    // Windows GATT cache, which records services and values
+                    // from earlier sessions.
+                    services = device.GetGattServicesAsync(BluetoothCacheMode.Cached)
+                        .AsTask().GetAwaiter().GetResult();
+                    if (services.Status != GattCommunicationStatus.Success)
+                    {
+                        return dump;
+                    }
                 }
                 foreach (var service in services.Services)
                 {
@@ -107,24 +117,48 @@ public static class BleBattery
                             .AsTask().GetAwaiter().GetResult();
                         if (characteristics.Status != GattCommunicationStatus.Success)
                         {
+                            // AccessDenied usually means another component (the
+                            // HID host, or Synapse) holds the service with an
+                            // exclusive session — a shared-open re-try lets
+                            // multiple readers coexist.
+                            var open = service.OpenAsync(GattSharingMode.SharedReadAndWrite)
+                                .AsTask().GetAwaiter().GetResult();
+                            if (open == GattOpenStatus.Success)
+                            {
+                                characteristics = service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached)
+                                    .AsTask().GetAwaiter().GetResult();
+                            }
+                        }
+                        if (characteristics.Status != GattCommunicationStatus.Success)
+                        {
+                            characteristics = service.GetCharacteristicsAsync(BluetoothCacheMode.Cached)
+                                .AsTask().GetAwaiter().GetResult();
+                        }
+                        if (characteristics.Status != GattCommunicationStatus.Success)
+                        {
+                            dump.Add((service.Uuid.ToString(), $"<chars {characteristics.Status}>", "", null));
                             continue;
                         }
                         foreach (var characteristic in characteristics.Characteristics)
                         {
-                            if ((characteristic.CharacteristicProperties
-                                 & GattCharacteristicProperties.Read) == 0)
+                            var props = characteristic.CharacteristicProperties.ToString();
+                            byte[]? bytes = null;
+                            if ((characteristic.CharacteristicProperties & GattCharacteristicProperties.Read) != 0)
                             {
-                                continue;
+                                var result = characteristic.ReadValueAsync(BluetoothCacheMode.Uncached)
+                                    .AsTask().GetAwaiter().GetResult();
+                                if (result.Status != GattCommunicationStatus.Success)
+                                {
+                                    result = characteristic.ReadValueAsync(BluetoothCacheMode.Cached)
+                                        .AsTask().GetAwaiter().GetResult();
+                                }
+                                if (result.Status == GattCommunicationStatus.Success && result.Value.Length > 0)
+                                {
+                                    bytes = new byte[result.Value.Length];
+                                    DataReader.FromBuffer(result.Value).ReadBytes(bytes);
+                                }
                             }
-                            var result = characteristic.ReadValueAsync(BluetoothCacheMode.Uncached)
-                                .AsTask().GetAwaiter().GetResult();
-                            if (result.Status != GattCommunicationStatus.Success || result.Value.Length == 0)
-                            {
-                                continue;
-                            }
-                            var bytes = new byte[result.Value.Length];
-                            DataReader.FromBuffer(result.Value).ReadBytes(bytes);
-                            dump.Add((service.Uuid.ToString(), characteristic.Uuid.ToString(), bytes));
+                            dump.Add((service.Uuid.ToString(), characteristic.Uuid.ToString(), props, bytes));
                         }
                     }
                 }

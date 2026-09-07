@@ -100,6 +100,33 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - **对照 OpenRazer**（PR #2683，2026-02，进行中）：Joro 1532:02CD 用 tx 0x1F + report_index
   0x03（与我们探针一致）；**该 PR 无电量方法**（仅灯光/宏），OpenRazer 也**不支持蓝牙设备**
   （BT 不识别为 USB 设备）——GATT 路线无先例可抄。
+
+### 厂商定制通道（BLE 规范留口处，2026-09-07 真机）
+
+规范留给厂商的定制点只有两处，Joro 上各有一份：
+
+1. **128-bit 厂商 GATT 服务 `52401523-f97c-7f90-0e7f-6c6f4e36db1c`**（Razer 私有，无公开逆向）：
+
+   | 特征 | 属性 | 观测值 |
+   |---|---|---|
+   | `52401524-…` | Write | Razer 自己的 BT 控制协议命令通道（未逆向，**禁盲写**） |
+   | `52401525-…` | Read+Notify | 设备身份：`00…00 02 + ASCII "8701637"` = 厂商串号尾 7 位（SI2522F1**8701637**） |
+   | `52401526-…` | Read+Notify | 8 字节 `6EA77DCFC5DD2D85`（疑似配对 token / 设备 id） |
+
+   **Synapse（RazerAppEngine）运行时该服务特征枚举 AccessDenied**——被其独占持有；
+   `OpenAsync(SharedReadAndWrite)` 也解不开，**只有停掉 RazerAppEngine 才能访问**。
+   Synapse 蓝牙模式的电量/充电状态大概率走这条通道（0x2A19 那种 BAS 它也可见），
+   深挖价值：原生 BT 电量+充电+完整串号。后续如需逆向：先 HCI/btsnoop 抓 Synapse 对
+   `52401524` 的写序列，严禁在无地图时盲写。
+2. **HID Report Map 的厂商 usage page（0xFF00+）**：无。preparsed caps 显示 BLE collections
+   只有标准页（键盘 0x06/鼠标 0x02/consumer 0x0C + 页 0x80、0x00 两段杂项，feature 最长
+   3 字节）——**没有 90 字节厂商 feature，也没有标准化 Battery Strength（0x06 页 usage 0x20）**。
+   0x1812 HID 服务的特征（含 Report Map 0x2A4B）被 Windows HID 栈独占，GATT 直读恒
+   AccessDenied，这是 HOGP 的设计行为（描述符只能走 HidD_GetPreparsedData）。
+
+探针 BLE 段（`--hid-probe`）现 dump 全部 GATT 服务/特征（含属性位与值；Uncached 失败
+回退 Cached）。标准服务一览：0x1800（名"Joro"/外观 0x03C1/连接参数）、0x1801（GATT）、
+0x180A（Manufacturer="Razer"+PnP ID `028E06CE02…`）、0x180F（BAS，Read+Notify）。
 - **无充电标志**：GATT BAS 只有电量。BT+线同时（边充边用）时 `IsCharging` 未知，
   `Commit` 会保留有线读数的充电状态不被 BLE 读数覆盖。
 - 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——2 轮后判离线。
