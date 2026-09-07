@@ -40,7 +40,7 @@ cargo test --quiet      # 单元测试（battery / watcher 解析规则）
 ## 配置速览
 
 - 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `serde(default)` 回填。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`widget_side`（left/right）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，开启后电池图标按电量/充放电状态着色，C# 双层字形渲染）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：优先 USB HID 直读电量、无 HID 设备回退日志解析，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，开启后电池图标按电量/充放电状态着色，C# 双层字形渲染）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
 - 自启动：`HKCU\...\Run\RazerTaskbar`，由菜单切换同步。
 
@@ -66,4 +66,5 @@ Runtime，缺失时降级为挂件-only）。与 Rust 版共享 settings.json/ba
 - 编码规范与检查：`docs/agent-conventions.md`
 - 日志解析与设备选择：`docs/agent-watcher.md`
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
+- HID 直读电量（协议/Windows 坑/探针）：`docs/agent-hid.md`
 - C# + WinUI3 移植（csharp/，实验分支）：`docs/agent-csharp.md`

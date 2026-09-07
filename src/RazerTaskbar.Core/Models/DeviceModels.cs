@@ -71,6 +71,36 @@ public static class DeviceClassifier
     }
 }
 
+/// <summary>Listing labels that disambiguate same-name devices — two units
+/// of one model (original + replacement), or one device split across
+/// identities (HID fallback `HID:{pid}` vs Synapse serial). Rendered as
+/// "Razer Mouse(31000044)"; the tag only appears when the name actually
+/// collides within the listing, so single-device listings stay clean.</summary>
+public static class DeviceLabels
+{
+    private const int TagLength = 8;
+
+    public static string Label(string name, string handle, IReadOnlyCollection<string> listingNames)
+    {
+        int count = 0;
+        foreach (var n in listingNames)
+        {
+            if (n == name)
+            {
+                count++;
+            }
+        }
+        if (count < 2 || handle.Length == 0)
+        {
+            return name;
+        }
+        // Serial handles shorten to their tail; the synthesized HID:{pid}
+        // form is short enough to show whole.
+        var tag = handle.Contains(':') ? handle : handle[^Math.Min(TagLength, handle.Length)..];
+        return $"{name}({tag})";
+    }
+}
+
 public static class DeviceSelector
 {
     /// <summary>Pick the user-selected device, else the lowest battery preferring

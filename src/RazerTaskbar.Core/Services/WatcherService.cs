@@ -4,6 +4,9 @@
 // - V3: `%LOCALAPPDATA%/Razer/Synapse3/Log/Razer Synapse 3.log`
 // - V4: `%LOCALAPPDATA%/Razer/RazerAppEngine/User Data/Logs/systray_systrayv2*.log`
 //   the whole history is replayed; the last snapshot decides connection state.
+// - battery_source="hid"/"auto": ParseOnce polls devices over raw HID
+//   (HidWatcher) instead; auto falls back to the log parsing below when no
+//   HID device answers.
 // - FileSystemWatcher watches the files; a parse runs within 1s of any write
 //   event and the poll loop re-parses every `polling_throttle_secs` as a
 //   fallback (settings are re-read from disk each pass, so edits apply
@@ -140,6 +143,7 @@ public sealed class RazerWatcher
     private static readonly JsonSerializerOptions JsonOpts = new();
 
     private readonly DeviceStore _devices;
+    private readonly HidWatcher _hid = new();
     private readonly object _lastV4TimestampLock = new();
     private string _lastV4Timestamp = "";
 
@@ -212,6 +216,59 @@ public sealed class RazerWatcher
             }
         }
         return best?.Path;
+    }
+
+    /// <summary>Serial → device-name harvest from V4 snapshot text. The HID
+    /// source uses this to give combo-dongle sub-devices their real model
+    /// name (the USB product string names the dongle's primary device, and
+    /// the vendor protocol exposes no name query). Last snapshot wins.</summary>
+    public static Dictionary<string, string> ParseSerialNames(string logText)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Match m in V4LineRegex.Matches(logText))
+        {
+            List<JsonElement> vals;
+            try
+            {
+                vals = JsonSerializer.Deserialize<List<JsonElement>>(m.Groups["json"].Value, JsonOpts) ?? new();
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+            foreach (var v in vals)
+            {
+                string? serial = null;
+                string? name = null;
+                if (v.TryGetProperty("serialNumber", out var s) && s.ValueKind == JsonValueKind.String)
+                {
+                    serial = s.GetString();
+                }
+                if (v.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.Object
+                    && n.TryGetProperty("en", out var en) && en.ValueKind == JsonValueKind.String)
+                {
+                    name = en.GetString();
+                }
+                if (!string.IsNullOrEmpty(serial) && !string.IsNullOrEmpty(name))
+                {
+                    names[serial!] = name!;
+                }
+            }
+        }
+        return names;
+    }
+
+    /// <summary>Harvest from the latest V4 log on disk (Synapse must have run
+    /// once — the log persists after it exits). Best effort.</summary>
+    public static Dictionary<string, string> HarvestSerialNames()
+    {
+        var path = V4LogDir() is { } dir ? LatestV4Log(dir) : null;
+        if (path is null)
+        {
+            return new Dictionary<string, string>();
+        }
+        var text = ReadShared(path);
+        return text is null ? new Dictionary<string, string>() : ParseSerialNames(text);
     }
 
     public void Run(int initialPollSeconds)
@@ -346,7 +403,33 @@ public sealed class RazerWatcher
     {
         // Re-read settings every pass: a startup copy would clobber edits to
         // the shown device.
-        switch (ConfigService.Load().SynapseVersion)
+        var cfg = ConfigService.Load();
+        switch (cfg.BatterySource)
+        {
+            case "hid":
+                _hid.Poll(_devices, cfg);
+                return;
+            case "log":
+                ParseLog(cfg);
+                return;
+            default:
+                // auto: direct HID wins whenever at least one battery device
+                // answers (no Synapse needed); an empty poll falls back to
+                // Synapse log parsing.
+                if (_hid.Poll(_devices, cfg) > 0)
+                {
+                    return;
+                }
+                ParseLog(cfg);
+                return;
+        }
+    }
+
+    /// <summary>Synapse log parsing, selected by `synapse_version` (v3/v4/
+    /// auto) — the original data source, unchanged.</summary>
+    private void ParseLog(Config cfg)
+    {
+        switch (cfg.SynapseVersion)
         {
             case "v3": ParseV3(); break;
             case "v4": ParseV4(); break;

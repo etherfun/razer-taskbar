@@ -358,6 +358,12 @@ public static class HistoryService
         Exec(conn, "PRAGMA journal_mode=WAL");
         Exec(conn, "PRAGMA synchronous=NORMAL");
         Exec(conn, "PRAGMA busy_timeout=5000");
+        EnsureTables(conn);
+        return conn;
+    }
+
+    internal static void EnsureTables(SqliteConnection conn)
+    {
         Exec(conn,
             "CREATE TABLE IF NOT EXISTS devices(" +
             "handle TEXT PRIMARY KEY, name TEXT NOT NULL, " +
@@ -366,7 +372,6 @@ public static class HistoryService
             "handle TEXT NOT NULL, ts INTEGER NOT NULL, level INTEGER NOT NULL, " +
             "charging INTEGER NOT NULL, connected INTEGER NOT NULL, " +
             "PRIMARY KEY(handle, ts)) WITHOUT ROWID;");
-        return conn;
     }
 
     private static void Exec(SqliteConnection conn, string sql)

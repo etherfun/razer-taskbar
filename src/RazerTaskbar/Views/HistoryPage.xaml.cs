@@ -70,7 +70,7 @@ public sealed partial class HistoryPage : Page
         ChartHeader.Text = I18n.Tr("Battery level");
         LegendCharging.Text = I18n.Tr("charging");
         LegendDischarging.Text = I18n.Tr("discharging");
-        LegendOff.Text = I18n.Tr("off (excluded)");
+        LegendOff.Text = I18n.Tr("off");
         CompareLabel.Text = I18n.Tr("compare device");
         ShowOffCheck.Content = I18n.Tr("Show off periods");
         // Stat card captions (values render in Reload).
@@ -173,7 +173,7 @@ public sealed partial class HistoryPage : Page
         ExportInfoBar.IsOpen = false;
         if (_currentSamples.Count == 0)
         {
-            ShowExportInfo(InfoBarSeverity.Warning, I18n.Tr("No data to export."));
+            ShowExportInfo(InfoBarSeverity.Warning, I18n.Tr("No data to export"));
             return;
         }
         try
@@ -246,7 +246,11 @@ public sealed partial class HistoryPage : Page
     {
         // Device roster from the recorded history (viewer.rs device picker).
         var roster = HistoryService.ListDevices();
-        _devices = roster.Select(r => new DeviceEntry(r.Handle, r.Name)).ToList();
+        // Same-name devices (two units, or a split HID/log identity) get a
+        // serial tag: "Razer Mouse(31000044)".
+        var rosterNames = roster.Select(r => r.Name).ToList();
+        _devices = roster.Select(r => new DeviceEntry(
+            r.Handle, DeviceLabels.Label(r.Name, r.Handle, rosterNames))).ToList();
         var selected = SelectedHandle();
         _suppressSelection = true;
         try

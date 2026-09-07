@@ -870,13 +870,14 @@ public static class WidgetWindow
         // (quick switching); every other option lives in the Settings page.
         var devices = AppState.Instance.Devices.Snapshot();
         var connected = devices.Values.Where(d => d.IsConnected).OrderBy(d => d.Name, StringComparer.Ordinal).ToList();
+        var connectedNames = connected.Select(d => d.Name).ToList();
         uint allChecked = AppState.Instance.ConfigSnapshot().ShownDeviceHandle.Length == 0 ? MF_CHECKED : 0;
         AppendItem(menu, MF_STRING | allChecked, IdDeviceBase, "All devices");
         for (int i = 0; i < connected.Count; i++)
         {
             var d = connected[i];
             uint checkedFlag = AppState.Instance.ConfigSnapshot().ShownDeviceHandle == d.Handle ? MF_CHECKED : 0;
-            string label = $"{d.Name} — {d.BatteryPercentage}%{(d.IsCharging ? " ⚡" : "")}";
+            string label = $"{DeviceLabels.Label(d.Name, d.Handle, connectedNames)} — {d.BatteryPercentage}%{(d.IsCharging ? " ⚡" : "")}";
             AppendMenuW(menu, MF_STRING | checkedFlag, (IntPtr)(IdDeviceBase + 1 + i), label);
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, null);

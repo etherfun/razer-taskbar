@@ -84,9 +84,10 @@ public sealed partial class SettingsPage : Page
                 .Where(d => d.IsConnected)
                 .OrderBy(d => d.Name, StringComparer.Ordinal)
                 .ToList();
+            var connectedNames = connected.Select(d => d.Name).ToList();
             var entries = new List<(string Handle, string Label)> { ("", I18n.Tr("All devices")) };
             entries.AddRange(connected.Select(d =>
-                (d.Handle, $"{d.Name} — {d.BatteryPercentage}%")));
+                (d.Handle, $"{DeviceLabels.Label(d.Name, d.Handle, connectedNames)} — {d.BatteryPercentage}%")));
             ComboDevice.ItemsSource = entries.Select(e => e.Label).ToList();
             ComboDevice.SelectedIndex = 0;
             var shown = cfg.ShownDeviceHandle;

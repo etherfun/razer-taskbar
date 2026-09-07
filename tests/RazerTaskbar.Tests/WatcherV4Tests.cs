@@ -123,4 +123,17 @@ public sealed class WatcherV4Tests
         }
         Assert.False(V4Rules.IsConnected(ids, off, "S"));
     }
+
+
+    [Fact]
+    public void ParseSerialNames_ExtractsNamePerSerial_LastSnapshotWins()
+    {
+        const string sample = """
+            [2026/09/07 00:14:32.928] INFO  Service - connectingDeviceData: [{"serialNumber":"SI2522F18701637","name":{"en":"Razer Joro","zh-cn":"RAZER 乔罗金蛛"},"hasBattery":true}]
+            [2026/09/07 06:53:32.708] INFO  Service - connectingDeviceData: [{"serialNumber":"632516H31000044","name":{"en":"Razer Viper V3 HyperSpeed"},"hasBattery":true},{"serialNumber":"SI2522F18701637","name":{"en":"Razer Joro Pro"},"hasBattery":true}]
+            """;
+        var names = RazerWatcher.ParseSerialNames(sample);
+        Assert.Equal("Razer Joro Pro", names["SI2522F18701637"]); // last snapshot wins
+        Assert.Equal("Razer Viper V3 HyperSpeed", names["632516H31000044"]);
+    }
 }

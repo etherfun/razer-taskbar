@@ -137,8 +137,9 @@ public static class HoverPanel
             return [NoDevicesRow()];
         }
         var shown = DeviceSelector.PickDeviceToDisplay(devices)?.Handle ?? "";
+        var deviceNames = devices.Values.Select(d => d.Name).ToList();
         var rows = devices.Values.Select(d => new Row(
-            d.Name,
+            DeviceLabels.Label(d.Name, d.Handle, deviceNames),
             $"{d.BatteryPercentage}%",
             HistoryService.EstimateFor(d.Handle) is { } e ? HistoryService.FormatEstimateCompact(e) : "",
             d.BatteryPercentage,

@@ -23,6 +23,12 @@ public sealed class Config
     [JsonPropertyName("synapse_version")]
     public string SynapseVersion { get; set; } = "auto";
 
+    /// <summary>Battery data source: "auto" (query devices over HID directly
+    /// — no Synapse needed — and fall back to Synapse log parsing when no
+    /// HID device answers) | "hid" | "log".</summary>
+    [JsonPropertyName("battery_source")]
+    public string BatterySource { get; set; } = "auto";
+
     /// <summary>"left" | "right" — widget side relative to TrayNotifyWnd.</summary>
     [JsonPropertyName("widget_side")]
     public string WidgetSide { get; set; } = "right";

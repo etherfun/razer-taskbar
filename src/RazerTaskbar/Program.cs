@@ -16,6 +16,15 @@ internal static class Program
     {
         Log.Install();
 
+        // Standalone diagnostic (--hid-probe): enumerate Razer HID devices
+        // and exercise the direct battery/charging queries. Runs before the
+        // single-instance guard (the app may be running concurrently) and
+        // before any UI bootstrap.
+        if (args.Contains("--hid-probe") || args.Contains("--hid-scan"))
+        {
+            return HidProbe.Run(args);
+        }
+
         // Single instance (port of find_existing_instance): the overlay is a
         // findable top-level window; embedded children need the enum fallback.
         if (SingleInstance.AnotherInstanceRunning())

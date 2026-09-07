@@ -168,6 +168,7 @@ public static class ConfigExt
         PollingThrottleSecs = c.PollingThrottleSecs,
         ShownDeviceHandle = c.ShownDeviceHandle,
         SynapseVersion = c.SynapseVersion,
+        BatterySource = c.BatterySource,
         WidgetSide = c.WidgetSide,
         AvoidOverlapWithWidgets = c.AvoidOverlapWithWidgets,
         TaskbarLeftSpaceWin11 = c.TaskbarLeftSpaceWin11,
