@@ -7,16 +7,24 @@ Rust 版的全量 C# 移植实验:挂件/托盘/悬停/日志监听/UIA 用 C# P
 ## 构建与测试
 
 ```powershell
-# 部署/探针一律用 Release x64(产物在 bin/x64/Release/.../win-x64/):
-dotnet build src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64
-dotnet test  tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
-# 常驻运行: src/RazerTaskbar/bin/x64/Release/net8.0-windows10.0.22621.0/win-x64/razer-taskbar.exe
+# 部署/探针一律用 Release x64(publish 直出仓库根 dist/,运行只认它):
+dotnet build   src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64
+dotnet publish src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64 -o dist
+dotnet test    tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
+# 常驻运行: dist/razer-taskbar.exe(publish 前先清掉旧 dist,防陈旧文件混留)
+# 或直接用根目录脚本(封装:停进程→清 dist→publish→验证 dll→可选测试→重启):
+powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 ```
 
 - **先停常驻进程再构建**:`razer-taskbar.exe` 运行时锁住 `razer-taskbar.dll`,
   MSBuild 的复制步骤会静默失败——Core.dll 刷新了而 app 产物仍是旧版,改完"没生效"多半是它。
 - 普通构建不刷新 win-x64 RID 输出时加 `--no-incremental`。
 - exe 是 apphost 壳,判断是否部署成功要看 **razer-taskbar.dll** 的时间戳。
+- **不带 `-p:Platform=x64` 的构建会落到另一棵输出树 `bin/Release/.../win-x64/`**:
+  那里的陈旧副本与规范路径互不覆盖,从旧路径手动启动就会跑旧版
+  (2026-09-07 踩过:color-key 时代的 `bin/Release` 副本被启动,误判为渲染回退)。
+  bin 树只用于构建,运行/自启动一律指向仓库根 `dist/razer-taskbar.exe`(publish 直出,
+  `.gitignore` 已忽略 dist/)。
 - **dotnet test 不要加 `--quiet`**(MSBuild 参数解析冲突);注意 `dotnet test` 只重建测试依赖链,
   不含 app csproj——探针参数(app 侧)改动后必须单独 build app 再跑探针。
 
