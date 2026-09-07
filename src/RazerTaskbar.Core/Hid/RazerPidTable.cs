@@ -64,6 +64,7 @@ public static class RazerPidTable
         [0x0258] = new DeviceTx(0x1F, BatteryScale.Auto), // BlackWidow V3 Mini HS wired
         [0x0271] = new DeviceTx(0x9F, BatteryScale.Auto), // BlackWidow V3 Mini HS wireless
         [0x02CD] = new DeviceTx(0x1F, BatteryScale.Scaled255), // Razer Joro wired (confirmed: raw 255 = 100%, charging 0x84 works)
+        [0x02CE] = new DeviceTx(0x1F, BatteryScale.Scaled255), // Razer Joro BLE (no vendor channel on BT; battery via GATT)
     };
 
     /// <summary>Probe order for PIDs missing from the table: new-gen mice,
@@ -104,6 +105,11 @@ public static class RazerPidTable
         // channel answers with the same serial as the dongle slot
         // (SI…, raw 255 = 100%), so both modes share one identity.
         [0x02CD] = new DeviceSlot[] { new(0x1F, SlotRole.Keyboard, BatteryScale.Scaled255) },
+        // Razer Joro over Bluetooth LE (VID 0x068E): the report map has no
+        // vendor feature channel, so the battery comes from the GATT Battery
+        // Service (BleBattery); the slot entry documents the tx for the day
+        // a firmware exposes vendor features over BT.
+        [0x02CE] = new DeviceSlot[] { new(0x1F, SlotRole.Keyboard, BatteryScale.Scaled255) },
     };
 
     /// <summary>All wireless slots to sweep for a PID. Multi-device dongles

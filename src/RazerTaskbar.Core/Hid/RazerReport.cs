@@ -33,6 +33,10 @@ public static class RazerReport
 {
     public const ushort VendorId = 0x1532;
 
+    /// <summary>BLE vendor id: Razer keyboards paired over Bluetooth LE
+    /// enumerate as VID&02068E (id-source prefix 02 + VID 0x068E).</summary>
+    public const ushort BleVendorId = 0x068E;
+
     /// <summary>The razer_report struct is exactly 90 bytes (OpenRazer
     /// `static_assert(sizeof(struct razer_report) == 90)`).</summary>
     public const int ReportSize = 90;

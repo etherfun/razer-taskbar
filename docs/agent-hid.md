@@ -68,8 +68,32 @@ Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x0
   Known 表同 PID 条目保证探针/缩放查询直接命中。
 - 仅插线不切模式 = 只充电：2.4GHz 链路保持，Synapse 显示充电；此时 dongle 键盘槽的
   0x07/0x84 是否报充电 **未实测**（HID 源理论上同链路可见，待复测）。
-- Joro 蓝牙模式同样以 PID 0x02CD 出现（BT 路径形如 `vid&0001532_pid&02cd`，枚举正则
-  已覆盖）；BT 上厂商 feature 是否可用未实测。
+- Joro 蓝牙模式见下节。
+
+## 蓝牙（BLE）模式（2026-09-07 真机实测，Razer Joro）
+
+Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812-…}`），
+形态与 USB 完全不同：
+
+- **VID/PID 都变**：接口路径形如 `…_dev_vid&02068e_pid&02ce_rev&0001_<BLE MAC>&colNN`——
+  `02` 是蓝牙 SIG 的 id-source 前缀，真实 **VID 0x068E**（Razer 的 BLE VID，Synapse 的
+  `RZCONTROL\VID_068E&PID_02CE` 印证），**PID 0x02CE**（≠ 有线 0x02CD）。经典蓝牙路径
+  （BTHENUM，7 位 VID `vid&0001532`）未在本机出现——Joro 是纯 BLE。解析规则统一取
+  VID 段**后 4 位**（`0001532`→0x1532，`02068e`→0x068E）。
+- **厂商 feature 通道不存在**：BLE report map 只有标准 HID collection，91 字节厂商
+  缓冲被拒（键盘 TLC 报 `err=87` ERROR_INVALID_PARAMETER，其余 `err=1`）——`err=87`
+  与 `err=1` 同为确定性失败，进黑名单。GATT 全表只有标准服务（0x1800/0x180A/0x180F），
+  **无 Razer 厂商服务**。
+- **电量走 GATT Battery Service（0x180F/0x2A19，0-100% 直读）**——Windows 设置同源。
+  `BleBattery`（`src/RazerTaskbar.Core/Hid/BleBattery.cs`）每轮 uncached 读一次，
+  设备不可达时按缺席计数判离线。
+- **身份分裂（固有限制）**：0x180A 只有 Manufacturer="Razer" 和 PnP ID（无 0x2A25
+  串号特征），蓝牙上拿不到厂商串号 → 身份退化为 **`BLE:<MAC>`**（如 `BLE:CF4FCB85ADF3`），
+  与 dongle/有线的 `SI2522F18701637` 是两个历史身份。显示名用蓝牙设备名（"Joro"）。
+  这符合"不按名合并"原则；切回 2.4G/线缆即回到原身份。
+- **无充电标志**：GATT BAS 只有电量。BT+线同时（边充边用）时 `IsCharging` 未知，
+  `Commit` 会保留有线读数的充电状态不被 BLE 读数覆盖。
+- 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——2 轮后判离线。
 
 ## get 半区全段扫描（2026-09-07 真机，`--hid-scan`，结果 hid-scan.log）
 
@@ -98,8 +122,8 @@ Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x0
 - **0x3F**：DeathAdder V2 Pro(0x007C/0x007D)、Mamba Wireless(0x0072/0x0073)
 - **0xFF**：Viper Ultimate(0x007A/0x007B)
 - **键盘**：0x9F 是无线键盘标准 tx（combo dongle 的键盘槽同款）；BlackWidow V3 Pro 有线
-  0x3F / 无线 0x9F；BW V3 Mini HS 有线 0x1F / 无线 0x9F；Joro 有线 0x1F（实测）。
-  OpenRazer 尚不支持 Joro（#2540）
+  0x3F / 无线 0x9F；BW V3 Mini HS 有线 0x1F / 无线 0x9F；Joro 有线 0x1F（实测），
+  BLE 无厂商通道（电量走 GATT）。OpenRazer 尚不支持 Joro（#2540）
 - 未知 PID：探测序列 0x1F → 0x9F → 0x3F → 0xFF（echo+CRC 校验通过即用）
 - Razer VID 固定 0x1532。耳机是另一套协议，暂不支持。
 
@@ -114,8 +138,9 @@ Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x0
 3. **句柄跨轮复用**（HidSession）：每轮重开句柄在空闲后首次打开会间歇失败（表现为空轮抖动）；
    句柄保持打开，仅当设备路径消失（拔出）或连续 6 轮无应答时重开。
 4. 声明的 `FeatureReportByteLength` 可能是 0，不能作为过滤条件，只当缓冲下限。
-5. 蓝牙路径的 VID/PID 形如 `_vid&0001532_pid&02cd`，与 USB 的 `vid_1532&pid_00b8` 不同，
-   枚举正则两种都要匹配。
+5. 蓝牙路径的 VID/PID 形如 `_vid&02068e_pid&02ce`（BLE）或 `_vid&0001532_pid&02cd`
+   （经典 BT），与 USB 的 `vid_1532&pid_00b8` 不同；VID 段按**后 4 位**解析（BLE 前缀
+   `02` 是蓝牙 SIG 的 id-source），枚举正则两种都要匹配，VID 白名单含 0x1532 + 0x068E。
 6. 接收器 HID 序列号字符串是全 0（如 `000000000000`），不是设备身份。真实序列号通过厂商命令
    `class 0x00 / id 0x82`（22 字节 ASCII，OpenRazer `razer_chroma_standard_get_serial`）查询，
    在鼠标 TLC 上可用——Viper V3 HS 真机返回 `632516H31000044`，与 Synapse 日志的 `serialNumber`

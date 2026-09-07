@@ -60,9 +60,18 @@ public sealed class HidWatcher
 
     private const int HidpStatusSuccess = 0x0011_0000;
     private const int ErrorInvalidFunction = 1;
+    private const int ErrorInvalidParameter = 87; // BLE report maps reject the 91-byte vendor buffer
 
-    // USB interface paths: `hid#vid_1532&pid_00b8&mi_01&col05#…`; Bluetooth
-    // paths use the alternate `_vid&0001532_pid&02cd` form.
+    /// <summary>VIDs Razer HID devices enumerate with: 0x1532 on USB and
+    /// classic BT; 0x068E on BLE (Razer Joro BT — Synapse's own
+    /// RZCONTROL\VID_068E node confirms it is a Razer vendor id).</summary>
+    private static readonly HashSet<int> RazerVendorIds = new() { RazerReport.VendorId, RazerReport.BleVendorId };
+
+    // USB interface paths: `hid#vid_1532&pid_00b8&mi_01&col05#…`. Bluetooth
+    // paths use the `vid&…_pid&…` form with a variable-width VID: classic BT
+    // writes 7 hex digits (`vid&0001532_pid&02cd`), BLE prefixes the vendor
+    // id with its 2-digit id source (02 = Bluetooth SIG):
+    // `vid&02068e_pid&02ce`. In both the VID lives in the last 4 hex digits.
     private static readonly Regex VidPidRegex = new(
         @"vid_(?<vid>[0-9a-f]{4})&pid_(?<pid>[0-9a-f]{4})|vid&(?<vidb>[0-9a-f]{6,8})_pid&(?<pidb>[0-9a-f]{4,8})",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -87,6 +96,25 @@ public sealed class HidWatcher
             readings = new List<HidDeviceReading>();
             foreach (var group in paths.GroupBy(p => p.Pid))
             {
+                // BLE HID carries no vendor feature channel (its report map
+                // rejects the 91-byte vendor buffer) — those devices read the
+                // battery from the GATT Battery Service instead. The MAC is
+                // the same for every collection of the device.
+                var bleMac = group.All(p => IsBlePath(p.Path)) ? BleMac(group.First().Path) : null;
+                if (bleMac is { } mac)
+                {
+                    if (BleBattery.TryRead(mac) is { } ble)
+                    {
+                        var serial = ble.Serial ?? $"BLE:{mac:X12}";
+                        var name = (ble.Serial is { } s ? HarvestedName(s) : null)
+                            ?? (ble.Name.Length > 0 ? ble.Name : null)
+                            ?? "Razer Keyboard";
+                        readings.Add(new HidDeviceReading(group.Key, "", serial,
+                            ble.Percent, ble.Percent, null, name,
+                            DeviceClassifier.FromCategoryAndName("", name)));
+                    }
+                    continue;
+                }
                 try
                 {
                     readings.AddRange(QueryPid(group.Key, group.Select(p => p.Path).ToList()));
@@ -161,7 +189,16 @@ public sealed class HidWatcher
             foreach (var reading in readings)
             {
                 var handle = HandleFor(reading);
-                map[handle] = ToRazerDevice(reading, handle, shown);
+                var merged = ToRazerDevice(reading, handle, shown);
+                // Same handle from two transports (cable + BT charging at
+                // once): keep the entry that knows charging — GATT has no
+                // charging flag, so a BLE reading must not erase it.
+                if (map.TryGetValue(handle, out var previous)
+                    && previous.IsCharging && !merged.IsCharging && reading.IsCharging != true)
+                {
+                    continue;
+                }
+                map[handle] = merged;
             }
             // This source only manages connectivity of the entries it wrote:
             // a device missing from this round starts a miss counter (dongle
@@ -237,9 +274,11 @@ public sealed class HidWatcher
                 {
                     continue;
                 }
-                var vidHex = m.Groups["vid"].Success ? m.Groups["vid"].Value : m.Groups["vidb"].Value;
+                var vidHex = m.Groups["vid"].Success
+                    ? m.Groups["vid"].Value
+                    : m.Groups["vidb"].Value[^4..]; // BT forms: VID = last 4 hex digits
                 var pidHex = m.Groups["pid"].Success ? m.Groups["pid"].Value : m.Groups["pidb"].Value;
-                if (Convert.ToInt32(vidHex, 16) != RazerReport.VendorId)
+                if (!RazerVendorIds.Contains(Convert.ToInt32(vidHex, 16)))
                 {
                     continue;
                 }
@@ -286,6 +325,21 @@ public sealed class HidWatcher
             return null;
         }
     }
+
+    // BLE HID interfaces (HID-over-GATT) carry `{00001812-…}` — the HID
+    // service UUID — instead of `vid_xxxx&pid_xxxx&mi_xx`; the BLE MAC
+    // precedes `&colNN`.
+    internal static bool IsBlePath(string path)
+        => path.Contains("{00001812-", StringComparison.OrdinalIgnoreCase);
+
+    internal static readonly Regex BleMacRegex = new(
+        @"_(?<mac>[0-9a-f]{12})&col\d",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    internal static ulong? BleMac(string path)
+        => BleMacRegex.Match(path) is { Success: true } m
+            ? Convert.ToUInt64(m.Groups["mac"].Value, 16)
+            : null;
 
     internal static HidInterface? DescribeHandle(IntPtr handle, string path, int pid)
     {
@@ -526,10 +580,11 @@ public sealed class HidWatcher
             if (!HidApi.HidD_SetFeature(handle, send, (uint)send.Length))
             {
                 int err = Marshal.GetLastWin32Error();
-                if (err == ErrorInvalidFunction)
+                if (err == ErrorInvalidFunction || err == ErrorInvalidParameter)
                 {
-                    // This collection's descriptor has no feature reports at
-                    // all — deterministic; the caller blacklists the path.
+                    // Deterministic: the collection's report map has no 90-byte
+                    // vendor report (no feature reports at all, or — BLE — a
+                    // fixed-size standard one). The caller blacklists the path.
                     _collectionUnusable = true;
                     return null;
                 }
@@ -584,7 +639,8 @@ public sealed class HidWatcher
             var send = PadTo(query, bufferLength);
             if (!HidApi.HidD_SetFeature(handle, send, (uint)send.Length))
             {
-                if (Marshal.GetLastWin32Error() == ErrorInvalidFunction)
+                var err = Marshal.GetLastWin32Error();
+                if (err is ErrorInvalidFunction or ErrorInvalidParameter)
                 {
                     return null; // collection can't carry feature reports
                 }
@@ -678,11 +734,19 @@ public static class HidProbe
         {
             foreach (var group in paths.GroupBy(p => p.Pid))
             {
+                var bleMac = group.All(p => HidWatcher.IsBlePath(p.Path))
+                    ? HidWatcher.BleMac(group.First().Path)
+                    : null;
+                if (bleMac is { } mac)
+                {
+                    BleSweep(group.Key, mac, Out);
+                    continue;
+                }
                 QueryPidVerbose(group.Key, group.Select(p => p.Path).ToList(), Out);
             }
             if (paths.Count == 0)
             {
-                Out("no Razer (VID 0x1532) HID interfaces found");
+                Out("no Razer (VID 0x1532/0x068E) HID interfaces found");
             }
             // Multi-device dongles (mouse + keyboard sharing one receiver) expose
             // one USB device; the paired keyboard may be addressable on the same
@@ -775,6 +839,29 @@ public static class HidProbe
             return;
         }
         out_("— get-half scan: no talking collection —");
+    }
+
+    /// <summary>BLE HID exposes no vendor feature channel; the useful data
+    /// lives in the GATT services. Dump battery + device-info serial, then
+    /// every service/characteristic with a printable value — a Razer vendor
+    /// GATT service carrying the serial would let BT mode share the dongle/
+    /// cable identity instead of falling back to the BLE MAC.</summary>
+    private static void BleSweep(int pid, ulong mac, Action<string> out_)
+    {
+        out_($"— pid 0x{pid:X4} (BLE {mac:X12}) —");
+        if (BleBattery.TryRead(mac) is not { } reading)
+        {
+            out_("  GATT battery read failed");
+            return;
+        }
+        out_($"  battery: {reading.Percent}%");
+        out_($"  serial:  {(reading.Serial is { } s ? s : "<no Device Information serial → identity falls back to BLE MAC>")}");
+        out_($"  name:    \"{reading.Name}\"");
+        foreach (var (service, characteristic, value) in BleBattery.DumpCharacteristics(mac))
+        {
+            var text = BleBattery.Printable(value);
+            out_($"  svc {service} char {characteristic}: {Convert.ToHexString(value)}{(text.Length > 0 ? $" \"{text}\"" : "")}");
+        }
     }
 
     private static void QueryPidVerbose(int pid, List<string> paths, Action<string> out_)

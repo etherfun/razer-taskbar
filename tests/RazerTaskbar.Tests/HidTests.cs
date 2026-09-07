@@ -242,6 +242,46 @@ public class HidTests
     }
 
     [Fact]
+    public void DeviceSlots_BleJoroIsKeyboardSlot()
+    {
+        // Bluetooth LE (VID 0x068E, PID 0x02CE): no vendor feature channel
+        // exists on the report map — battery comes from the GATT Battery
+        // Service; the slot entry documents the tx for a future firmware.
+        var slots = RazerPidTable.DeviceSlots(0x02CE);
+        Assert.Single(slots);
+        Assert.Equal(RazerPidTable.SlotRole.Keyboard, slots[0].Role);
+        Assert.Equal(BatteryScale.Scaled255, slots[0].Scale);
+        Assert.Equal(new byte[] { 0x1F }, RazerPidTable.TransactionIdCandidates(0x02CE));
+    }
+
+    [Fact]
+    public void BleMac_ExtractsAddressFromRealInterfacePath()
+    {
+        var blePath = @"\\?\hid#{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&02068e_pid&02ce_rev&0001_cf4fcb85adf3&col01#c&186b2284&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        Assert.True(HidWatcher.IsBlePath(blePath));
+        Assert.Equal(0xCF4FCB85ADF3ul, HidWatcher.BleMac(blePath));
+
+        var usbPath = @"\\?\hid#vid_1532&pid_00b8&mi_01&col05#9&2c261f7&0&0004#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        Assert.False(HidWatcher.IsBlePath(usbPath));
+        Assert.Null(HidWatcher.BleMac(usbPath));
+    }
+
+    [Fact]
+    public void BleReading_MapsAndUsesMacIdentity()
+    {
+        // GATT battery is 0-100 percent; no DIS serial → the BLE MAC is the
+        // identity, the Bluetooth device name is the display name.
+        var reading = new HidDeviceReading(0x02CE, "", "BLE:CF4FCB85ADF3",
+            100, 100, null, NameOverride: "Joro", KindOverride: DeviceKind.Keyboard);
+        Assert.Equal("BLE:CF4FCB85ADF3", HidWatcher.HandleFor(reading));
+        var device = HidWatcher.ToRazerDevice(reading, "BLE:CF4FCB85ADF3", shownHandle: "");
+        Assert.Equal("Joro", device.Name);
+        Assert.Equal(DeviceKind.Keyboard, device.Kind);
+        Assert.Equal(100, device.BatteryPercentage);
+        Assert.False(device.IsCharging); // GATT has no charging flag
+    }
+
+    [Fact]
     public void DeviceSlots_UnknownPidProbesAllSlots()
     {
         var slots = RazerPidTable.DeviceSlots(0x1234);
