@@ -64,6 +64,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- Export feedback -->
@@ -184,8 +185,43 @@
                 </Border>
             </Grid>
 
-            <!-- Chart card -->
+            <!-- Battery health card: capacity/fade/lifespan from charge
+                 speed (charge current is usage-independent, so it isolates
+                 capacity fade; computed over ALL recorded data — fade is a
+                 years-scale trend, not range-limited). -->
             <Border Grid.Row="3" Style="{StaticResource CardStyle}">
+                <ToolTipService.ToolTip>
+                    <TextBlock x:Name="HealthTip" TextWrapping="Wrap" MaxWidth="320" />
+                </ToolTipService.ToolTip>
+                <Grid ColumnSpacing="24">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        x:Name="HealthHeader"
+                        Grid.Column="0"
+                        Style="{StaticResource CardCaptionStyle}"
+                        VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="1">
+                        <TextBlock x:Name="HealthSohValue" Style="{StaticResource StatValueStyle}" />
+                        <TextBlock x:Name="HealthSohCaption" Style="{StaticResource StatCaptionStyle}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock x:Name="HealthFadeValue" Style="{StaticResource StatValueStyle}" />
+                        <TextBlock x:Name="HealthFadeCaption" Style="{StaticResource StatCaptionStyle}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="3">
+                        <TextBlock x:Name="HealthEolValue" Style="{StaticResource StatValueStyle}" />
+                        <TextBlock x:Name="HealthEolCaption" Style="{StaticResource StatCaptionStyle}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Chart card -->
+            <Border Grid.Row="4" Style="{StaticResource CardStyle}">
                 <Grid RowSpacing="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -267,7 +303,7 @@
             </Border>
 
             <!-- Cycles list card -->
-            <Border Grid.Row="4" Style="{StaticResource CardStyle}">
+            <Border Grid.Row="5" Style="{StaticResource CardStyle}">
                 <Grid RowSpacing="4">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />

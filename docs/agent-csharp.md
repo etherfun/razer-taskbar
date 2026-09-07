@@ -80,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
 | watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖 |
 | battery.rs | Core/Models + DeviceSelector | 选择规则/字形/五段色 |
-| history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/加权/instant 兜底逐条移植 |
+| history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页) |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
 | i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |
 | viewer.rs | MainWindow + Views/HistoryPage + Controls/BatteryChart | NavigationView 合并窗口;图表 = WinUI Shapes(网格/色带/面积/分段折线/换电点/5 刻度) |

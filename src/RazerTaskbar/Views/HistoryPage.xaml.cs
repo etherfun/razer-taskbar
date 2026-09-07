@@ -77,9 +77,17 @@ public sealed partial class HistoryPage : Page
         StatCyclesCaption.Text = I18n.Tr("discharge cycles");
         StatUseCaption.Text = I18n.Tr("usable per 100% charge");
         StatChargeCaption.Text = I18n.Tr("per full charge");
+        // Battery health card.
+        HealthHeader.Text = I18n.Tr("battery health");
+        HealthSohCaption.Text = I18n.Tr("estimated capacity");
+        HealthFadeCaption.Text = I18n.Tr("fade per month");
+        HealthEolCaption.Text = I18n.Tr("est. to 80%");
+        HealthTip.Text = I18n.Tr("Capacity estimated from charge speed relative to the earliest recorded sessions — charge current is usage-independent, so charge speed isolates capacity fade. Percentage readings quantize coarsely; values are approximate.");
+        HealthSohValue.Foreground = new SolidColorBrush(
+            new Windows.UI.Color { A = 0xFF, R = 0x60, G = 0xCD, B = 0xFF });
         // Stat card hover tooltips (longer explanations).
         TipCycles.Text = I18n.Tr("Discharge cycles completed within the selected range. A cycle runs from one charge session to the next; off periods are not counted.");
-        TipUse.Text = I18n.Tr("Estimated usable time per 100% of charge, from the discharge cycles in range. The newest 10 cycles count fully, older ones at half weight.");
+        TipUse.Text = I18n.Tr("Estimated usable time per 100% of charge, from the discharge cycles in range. Recent cycles count most — weight decays with a 30-day half-life (tracking battery aging and habit changes).");
         TipCharge.Text = I18n.Tr("Estimated time to fully charge the device, from the charge sessions in range.");
         TipNow.Text = I18n.Tr("Estimated usable time right now (discharging) or time until full (charging), anchored at the current level and counting down in real time.");
         // Restore the checkbox against the field without triggering a reload.
@@ -213,6 +221,18 @@ public sealed partial class HistoryPage : Page
         ExportInfoBar.IsOpen = true;
     }
 
+    /// <summary>"14 mo"-style remaining-lifespan text (localized unit),
+    /// capped so a near-flat fade trend doesn't print absurd horizons.</summary>
+    private static string FormatMonths(double months)
+    {
+        if (months < 1)
+        {
+            return I18n.Tr("<1 mo");
+        }
+        var n = (long)Math.Round(months);
+        return I18n.Tr("{} mo").Replace("{}", n >= 120 ? "120+" : $"{n}");
+    }
+
     private void Compare_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_suppressSelection)
@@ -293,6 +313,27 @@ public sealed partial class HistoryPage : Page
         StatNowValue.Foreground = new SolidColorBrush(
             new Windows.UI.Color { A = 0xFF, R = 0x60, G = 0xCD, B = 0xFF });
         StatNowCaption.Text = I18n.Tr(est is { Charging: true } ? "until full (now)" : "time remaining now");
+
+        // Battery health (computed over ALL recorded data, not range-limited:
+        // fade is a years-scale trend).
+        var health = HistoryService.HealthStatsOf(samples);
+        if (health is { } h)
+        {
+            HealthSohValue.Text = $"≈{Math.Round(h.SohPct)}%";
+            HealthFadeValue.Text = h.FadePerMonthPct >= 0.1 ? $"−{h.FadePerMonthPct:0.0}%" : I18n.Tr("stable");
+            HealthEolValue.Text = h.MonthsToEol switch
+            {
+                0 => I18n.Tr("at 80% now"),
+                null => "--",
+                { } months => I18n.Tr("to 80% in {}").Replace("{}", FormatMonths(months)),
+            };
+        }
+        else
+        {
+            HealthSohValue.Text = I18n.Tr("insufficient data");
+            HealthFadeValue.Text = "--";
+            HealthEolValue.Text = "--";
+        }
 
             // Compare series picker: None + other recorded devices.
             _suppressSelection = true;

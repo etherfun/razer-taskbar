@@ -13,8 +13,27 @@
 //   20s, seen live 2026-09-06) is held out of battery.db for 60s; falling
 //   back near the pre-jump level within the window drops the whole segment
 //   before it is ever recorded, expiry commits it as a real swap.
-// - Prediction: the newest 10 cycles count fully, the next 90 at half
-//   weight, cycles beyond 100 are ignored.
+// - Prediction is a three-tier estimator:
+//     1. per-level transit profile: every session contributes its observed
+//        seconds-per-percent between successive high/low-water levels
+//        (EWMA, 30-day half-life); the endpoint estimate sums these per
+//        level, filling never-observed levels with the tier-2 rate. Top-up
+//        / dock habits (sessions that never reach 100% / 0%) still count —
+//        they simply cover fewer levels — and the CC-CV charge taper and
+//        fast drain tail come from real shape data wherever it exists;
+//     2. blended rate: pooled hours-per-percent over past cycles with
+//        EWMA recency weights (halves every 30 days, data beyond 180 days
+//        dropped — small-cell aging literature: calendar fade and habit
+//        shifts accumulate in wall-clock time, so weights follow age in
+//        days, not cycle counts) blended with the current session's own
+//        observed rate (its weight grows with the percent already moved);
+//     3. instant rate over the trailing 30 minutes (fresh installs).
+// - Battery health (history page): charge speed is the clean capacity-fade
+//   proxy derivable from % samples — charge current is set by the dock, so
+//   unlike drain rate it is usage-independent, and capacity fade shortens
+//   hours-per-percent proportionally. SOH = recent EWMA charge rate
+//   relative to the earliest recorded sessions; a least-squares fade trend
+//   is extrapolated to the industry 80% end-of-life threshold.
 // - Pseudo countdown (display): the shown remaining is anchored when the
 //   level updates and shrinks in real time (predicted minus elapsed).
 
@@ -37,14 +56,55 @@ public static class HistoryService
     /// a battery swap, not data noise.</summary>
     private const int SwapJumpPct = 30;
 
-    /// <summary>Newest cycles that count with full weight.</summary>
-    private const int RecentFull = 10;
+    /// <summary>EWMA half-life for cycle weights: a cycle's weight halves
+    /// every 30 days of age. Scale rationale (small Li-ion/LiPo cells in
+    /// peripherals): calendar aging is 1–3%/yr mild / 5–20%/yr consumer
+    /// conditions and accumulates in wall-clock time, so month-old data is
+    /// only fractionally stale while usage habits shift on week scales.</summary>
+    private const double HalfLifeDays = 30.0;
 
-    /// <summary>Cycles older than this (counted from the newest backwards) are ignored.</summary>
-    private const int ExtendedLimit = 100;
+    /// <summary>Cycles older than this are dropped: at ~180 days accumulated
+    /// calendar+cycle fade (~2–5%) breaks the "same battery" assumption, and
+    /// post-knee degradation is tracked by the recent-weighted tail anyway.</summary>
+    private const double MaxAgeDays = 180.0;
 
-    /// <summary>Weight of cycles between RecentFull and ExtendedLimit.</summary>
-    private const double ExtendedWeight = 0.5;
+    /// <summary>Blending constant for the current session: a session that has
+    /// moved BlendKPct percent points carries half the total weight, so a
+    /// fresh habit shows up quickly while early-session noise stays damped.</summary>
+    private const double BlendKPct = 8.0;
+
+    /// <summary>The open current session must have moved at least this many
+    /// percent (and CurSessionMinActiveSecs) before its rate is trusted.</summary>
+    private const double CurSessionMinPct = 2.0;
+
+    private const long CurSessionMinActiveSecs = 5 * 60;
+
+    /// <summary>Profile lookup: if the exact level has no entry, the nearest
+    /// entry within this many points is used (closer wins; tie picks the
+    /// longer/conservative side).</summary>
+    private const int ProfileLevelTolerance = 2;
+
+    // Battery health (history page).
+    /// <summary>Charge sessions below this much moved percent are excluded:
+    /// a 90→100 taper-only session quantizes too coarsely for a SOH signal.</summary>
+    private const int HealthMinChargePct = 20;
+
+    private const int HealthMinSpans = 3;
+
+    /// <summary>The recorded window must span at least this many days before
+    /// a fade trend means anything.</summary>
+    private const double HealthMinWindowDays = 60.0;
+
+    /// <summary>Industry end-of-life convention (BU-808): rated cycle count
+    /// ends at 80% of design capacity.</summary>
+    private const double HealthEolPct = 80.0;
+
+    /// <summary>Fade slower than this per month reads as "stable" (below the
+    /// quantization noise of percentage readings).</summary>
+    private const double HealthStableFadePerMonth = 0.1;
+
+    /// <summary>Sanity cap on the fitted fade trend (%/month).</summary>
+    private const double HealthMaxFadePerMonth = 5.0;
 
     /// <summary>A cycle/session must move at least this many percent to count.</summary>
     private const int MinSpanDropPct = 5;
@@ -536,39 +596,102 @@ public static class HistoryService
         }
     }
 
-    /// <summary>Weighted "active hours per percent" over spans, newest first:
-    /// the newest RecentFull count fully, the next batch at ExtendedWeight,
-    /// anything past ExtendedLimit is ignored. Spans below the drop/activity
-    /// floors are skipped entirely.</summary>
+    /// <summary>EWMA recency weight for a span/session ending at <paramref
+    /// name="ts"/> relative to the newest observation: 1.0 now, 0.5 after
+    /// HalfLifeDays, effectively zero past MaxAgeDays.</summary>
+    internal static double RecencyWeight(long newestTs, long ts)
+        => Math.Pow(0.5, Math.Max(newestTs - ts, 0L) / 86400.0 / HalfLifeDays);
+
+    /// <summary>Weighted "active hours per percent" over spans: each span is
+    /// weighted by its age in days (EWMA, see <see cref="RecencyWeight"/>),
+    /// spans beyond MaxAgeDays are ignored, and spans below the drop/activity
+    /// floors are skipped — weight follows time only, so a junk span neither
+    /// dilutes nor consumes anything.</summary>
     internal static double? WeightedHoursPerPct(IReadOnlyList<Span> spans)
     {
+        if (spans.Count == 0)
+        {
+            return null;
+        }
         var sorted = spans.OrderBy(s => -s.EndTs).ToList(); // stable, newest first
+        long newest = sorted[0].EndTs;
         double wHours = 0.0;
         double wPct = 0.0;
-        for (int i = 0; i < sorted.Count; i++)
+        foreach (var s in sorted)
         {
-            double w;
-            if (i < RecentFull)
+            if ((newest - s.EndTs) / 86400.0 > MaxAgeDays)
             {
-                w = 1.0;
+                break; // everything after is older still
             }
-            else if (i < ExtendedLimit)
-            {
-                w = ExtendedWeight;
-            }
-            else
-            {
-                break;
-            }
-            if (!sorted[i].Qualifies(MinSpanDropPct, MinSpanActiveSecs))
+            if (!s.Qualifies(MinSpanDropPct, MinSpanActiveSecs))
             {
                 continue;
             }
-            wHours += w * sorted[i].ActiveSecs / 3600.0;
-            wPct += w * sorted[i].MovedPct;
+            double w = RecencyWeight(newest, s.EndTs);
+            wHours += w * s.ActiveSecs / 3600.0;
+            wPct += w * s.MovedPct;
         }
         return wPct <= 0.0 ? null : wHours / wPct;
     }
+
+    /// <summary>Active hours and percent points accumulated by the open
+    /// current session (trailing same-mode connected run, short gaps only),
+    /// or null while it is too small to trust as a rate observation.</summary>
+    internal static (double Hours, double Pct)? CurrentSessionProgress(IReadOnlyList<Sample> samples, bool charging)
+    {
+        int i = samples.Count - 1;
+        if (i < 0 || samples[i].Charging != charging || !samples[i].Connected)
+        {
+            return null;
+        }
+        double hours = 0.0;
+        double pct = 0.0;
+        while (i > 0)
+        {
+            var a = samples[i - 1];
+            var b = samples[i];
+            if (a.Charging != charging || !b.Connected || b.Ts - a.Ts > GapBreakSecs)
+            {
+                break;
+            }
+            int delta = charging ? b.Level - a.Level : a.Level - b.Level;
+            if (delta > 0)
+            {
+                hours += (b.Ts - a.Ts) / 3600.0;
+                pct += delta;
+            }
+            i -= 1;
+        }
+        if (pct < CurSessionMinPct || hours * 3600.0 < CurSessionMinActiveSecs)
+        {
+            return null;
+        }
+        return (hours, pct);
+    }
+
+    /// <summary>Historical pooled rate blended with the current session's own
+    /// rate: f = pct/(pct + BlendKPct), so the blend shifts toward what the
+    /// device is doing right now as the session accumulates evidence. Either
+    /// side alone is returned when the other is missing.</summary>
+    internal static double? BlendedRate(IReadOnlyList<Sample> samples, IReadOnlyList<Span> spans, bool charging)
+    {
+        double? hist = WeightedHoursPerPct(spans);
+        var cur = CurrentSessionProgress(samples, charging);
+        if (cur is null)
+        {
+            return hist;
+        }
+        double curRate = cur.Value.Hours / cur.Value.Pct;
+        if (hist is null)
+        {
+            return curRate;
+        }
+        double f = cur.Value.Pct / (cur.Value.Pct + BlendKPct);
+        return (1.0 - f) * hist.Value + f * curRate;
+    }
+
+    private static double? PctTimesRate(double? hoursPerPct, int pct)
+        => hoursPerPct is null ? null : pct * hoursPerPct.Value * 3600.0;
 
     /// <summary>Fallback for fresh installs (no usable cycle yet): drain/charge
     /// rate over the trailing InstantWindowSecs of connected samples.</summary>
@@ -612,25 +735,211 @@ public static class HistoryService
         return hours / pct;
     }
 
+    /// <summary>Per-level charge transits: transit[k] = observed seconds to
+    /// charge from k% to k+1%, EWMA-weighted across ALL charge sessions
+    /// (recent sessions count more). Sessions do NOT need to reach 100% —
+    /// top-up / dock habits simply cover fewer levels. Within a session only
+    /// successive high-water levels are attributed, so idle time at a held
+    /// level (docked at full, powered off) never pollutes the transits.</summary>
+    internal static double?[] ChargeTransitProfile(IReadOnlyList<Sample> samples, List<Span> chargeSpans)
+        => TransitProfile(samples, chargeSpans, toFull: true);
+
+    /// <summary>Per-level discharge transits: transit[k] = observed seconds
+    /// to drain from k+1% to k%. Partial cycles (swap-ended, or the device
+    /// re-docked before empty) contribute exactly the levels they crossed.</summary>
+    internal static double?[] DischargeTransitProfile(IReadOnlyList<Sample> samples, List<Span> dischargeSpans)
+        => TransitProfile(samples, dischargeSpans, toFull: false);
+
+    private static double?[] TransitProfile(IReadOnlyList<Sample> samples, List<Span> spans, bool toFull)
+    {
+        var transit = new double?[100];
+        var participating = spans
+            .Where(s => s.ActiveSecs >= MinSpanActiveSecs)
+            .OrderBy(s => s.EndTs)
+            .ToList();
+        if (participating.Count == 0)
+        {
+            return transit;
+        }
+        long reference = participating[^1].EndTs;
+        var acc = new double[100];
+        var wsum = new double[100];
+        int i = 0;
+        foreach (var span in participating)
+        {
+            double w = RecencyWeight(reference, span.EndTs);
+            // Walk the span's samples once (spans are disjoint in time, so a
+            // single forward pointer suffices).
+            while (i < samples.Count && samples[i].Ts < span.StartTs)
+            {
+                i++;
+            }
+            int extreme = toFull ? -1 : 101;
+            long extremeTs = 0;
+            for (int j = i; j < samples.Count && samples[j].Ts <= span.EndTs; j++)
+            {
+                int level = Math.Clamp(samples[j].Level, 0, 100);
+                bool isNewExtreme = toFull ? level > extreme : level < extreme;
+                if (!isNewExtreme)
+                {
+                    continue;
+                }
+                if (extreme is not (-1 or 101))
+                {
+                    // Spread the elapsed time evenly over the levels crossed
+                    // since the previous extreme (per-level resolution comes
+                    // from ordinary 1%-step reports; large multi-point jumps
+                    // — sleep gaps — divide it uniformly).
+                    double per = (samples[j].Ts - extremeTs) / (double)Math.Abs(level - extreme);
+                    for (int k = Math.Min(extreme, level); k < Math.Max(extreme, level); k++)
+                    {
+                        acc[k] += w * per;
+                        wsum[k] += w;
+                    }
+                }
+                extreme = level;
+                extremeTs = samples[j].Ts;
+            }
+        }
+        for (int k = 0; k < 100; k++)
+        {
+            if (wsum[k] > 0.0)
+            {
+                transit[k] = acc[k] / wsum[k];
+            }
+        }
+        return transit;
+    }
+
+    /// <summary>Seconds-to-full (charging) or seconds-to-empty (discharging)
+    /// summed from per-level transits: from L the charge estimate needs
+    /// transits L..99, the discharge estimate 0..L-1. Levels nobody observed
+    /// are filled with <paramref name="fillPerPctSecs"/> (the tier-2 rate),
+    /// so partial histories still yield a complete estimate — the result
+    /// differs from a flat rate exactly where real shape data exists.
+    /// Uncompletable sums (missing data, no fill) stay null.</summary>
+    private static double?[] EndpointSums(double?[] transit, bool toFull, double? fillPerPctSecs)
+    {
+        var profile = new double?[101];
+        for (int level = 0; level <= 100; level++)
+        {
+            double sum = 0.0;
+            bool complete = true;
+            if (toFull)
+            {
+                for (int k = level; k <= 99; k++)
+                {
+                    if (!TryAddTransit(ref sum, transit[k], fillPerPctSecs))
+                    {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                for (int k = 0; k < level; k++)
+                {
+                    if (!TryAddTransit(ref sum, transit[k], fillPerPctSecs))
+                    {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            profile[level] = complete ? sum : null;
+        }
+        return profile;
+    }
+
+    private static bool TryAddTransit(ref double sum, double? transit, double? fill)
+    {
+        if (transit is { } v)
+        {
+            sum += v;
+            return true;
+        }
+        if (fill is { } f)
+        {
+            sum += f;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Endpoint profile from completed coverage only (no rate fill):
+    /// test/inspection form of <see cref="EndpointSums"/>.</summary>
+    internal static double?[] ChargeTimeToFullProfile(IReadOnlyList<Sample> samples)
+    {
+        var (_, charge) = ComputeSpans(samples);
+        return EndpointSums(ChargeTransitProfile(samples, charge), toFull: true, fillPerPctSecs: null);
+    }
+
+    internal static double?[] ChargeTimeToFullProfile(IReadOnlyList<Sample> samples, List<Span> chargeSpans, double? fillPerPctSecs)
+        => EndpointSums(ChargeTransitProfile(samples, chargeSpans), toFull: true, fillPerPctSecs);
+
+    internal static double?[] DischargeTimeToEmptyProfile(IReadOnlyList<Sample> samples)
+    {
+        var (discharge, _) = ComputeSpans(samples);
+        return EndpointSums(DischargeTransitProfile(samples, discharge), toFull: false, fillPerPctSecs: null);
+    }
+
+    internal static double?[] DischargeTimeToEmptyProfile(IReadOnlyList<Sample> samples, List<Span> dischargeSpans, double? fillPerPctSecs)
+        => EndpointSums(DischargeTransitProfile(samples, dischargeSpans), toFull: false, fillPerPctSecs);
+
+    /// <summary>Look up a profile entry for <paramref name="level"/>: exact
+    /// hit first, else the nearest entry within <see cref="ProfileLevelTolerance"/>
+    /// points; a distance tie picks the lower level (the longer/conservative
+    /// estimate).</summary>
+    internal static double? LookupProfile(double?[] profile, int level)
+    {
+        level = Math.Clamp(level, 0, 100);
+        if (profile[level] is { } exact)
+        {
+            return exact;
+        }
+        for (int d = 1; d <= ProfileLevelTolerance; d++)
+        {
+            bool hasLower = level - d >= 0 && profile[level - d] is not null;
+            bool hasUpper = level + d <= 100 && profile[level + d] is not null;
+            if (hasLower)
+            {
+                return profile[level - d];
+            }
+            if (hasUpper)
+            {
+                return profile[level + d];
+            }
+        }
+        return null;
+    }
+
     /// <summary>Predict the usable time left (discharging) or time to full
-    /// (charging) from the sample series plus the device's current state.</summary>
+    /// (charging) from the sample series plus the device's current state.
+    /// Tier 1: per-level transit profile (nonlinear endpoint curve, partial
+    /// sessions included, unobserved levels filled from tier 2). Tier 2:
+    /// EWMA-weighted cycle rate blended with the current session. Tier 3:
+    /// trailing-window instant rate (fresh installs).</summary>
     public static Estimate? Predict(IReadOnlyList<Sample> samples, int levelNow, bool chargingNow)
     {
         var (discharge, charge) = ComputeSpans(samples);
-        var spans = chargingNow ? charge : discharge;
-        var rate = WeightedHoursPerPct(spans);
-        if (rate is not null)
+        double? secs;
+        if (chargingNow)
         {
-            int left = chargingNow ? 100 - levelNow : levelNow;
-            return new Estimate((long)Math.Round(left * rate.Value * 3600.0), chargingNow);
+            double? rate = BlendedRate(samples, charge, true);
+            secs = LookupProfile(
+                       ChargeTimeToFullProfile(samples, charge, PctTimesRate(rate, 1)), levelNow)
+                ?? PctTimesRate(rate, 100 - levelNow);
         }
-        rate = InstantRate(samples, chargingNow);
-        if (rate is null)
+        else
         {
-            return null;
+            double? rate = BlendedRate(samples, discharge, false);
+            secs = LookupProfile(
+                       DischargeTimeToEmptyProfile(samples, discharge, PctTimesRate(rate, 1)), levelNow)
+                ?? PctTimesRate(rate, levelNow);
         }
-        int leftFallback = chargingNow ? 100 - levelNow : levelNow;
-        return new Estimate((long)Math.Round(leftFallback * rate.Value * 3600.0), chargingNow);
+        secs ??= PctTimesRate(InstantRate(samples, chargingNow), chargingNow ? 100 - levelNow : levelNow);
+        return secs is null ? null : new Estimate((long)Math.Round(secs.Value), chargingNow);
     }
 
     /// <summary>Cycle count + weighted rates for the history page header.</summary>
@@ -641,6 +950,72 @@ public static class HistoryService
             discharge.Count(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs)),
             WeightedHoursPerPct(discharge),
             WeightedHoursPerPct(charge));
+    }
+
+    /// <summary>Battery health / lifespan estimate for the history page, or
+    /// null when there is not enough recorded data yet.
+    ///
+    /// Charge speed is the only clean capacity-fade proxy available from
+    /// percentage samples: the charge current is set by the dock/cable (not
+    /// by usage), and as capacity fades each percent holds less charge, so
+    /// charge-hours-per-percent shrinks proportionally. Drain rate can't be
+    /// used — it tracks usage, not health. SOH is the recent EWMA rate
+    /// relative to the earliest recorded sessions (i.e. relative health, valid
+    /// even for a battery that was already aged when recording started); the
+    /// fade trend is a least-squares slope over session rates, extrapolated
+    /// to the 80% end-of-life convention.</summary>
+    public static HealthStats? HealthStatsOf(IReadOnlyList<Sample> samples)
+    {
+        var (_, charge) = ComputeSpans(samples);
+        var qualified = charge
+            .Where(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs) && s.MovedPct >= HealthMinChargePct)
+            .OrderBy(s => s.EndTs)
+            .ToList();
+        if (qualified.Count < HealthMinSpans
+            || (qualified[^1].EndTs - qualified[0].EndTs) / 86400.0 < HealthMinWindowDays)
+        {
+            return null;
+        }
+        var pts = qualified
+            .Select(s => (T: (double)(s.StartTs + s.EndTs) / 2.0, Rate: s.ActiveSecs / 3600.0 / s.MovedPct))
+            .ToList();
+
+        // "New battery" reference: the earliest sessions on record.
+        double baseline = pts.Take(HealthMinSpans).Average(p => p.Rate);
+        if (baseline <= 0.0)
+        {
+            return null;
+        }
+
+        // Recent rate: EWMA across all sessions (recent cycles dominate).
+        long newest = qualified[^1].EndTs;
+        double wSum = 0.0, wRate = 0.0;
+        for (int i = 0; i < pts.Count; i++)
+        {
+            double w = RecencyWeight(newest, qualified[i].EndTs);
+            wSum += w;
+            wRate += w * pts[i].Rate;
+        }
+        double soh = Math.Clamp(100.0 * (wRate / wSum) / baseline, 5.0, 100.0);
+
+        // Fade trend: least-squares slope of rate vs time (a shrinking rate
+        // means fading capacity), expressed as % of baseline lost per month.
+        double meanT = pts.Average(p => p.T);
+        double meanR = pts.Average(p => p.Rate);
+        double num = 0.0, den = 0.0;
+        foreach (var p in pts)
+        {
+            num += (p.T - meanT) * (p.Rate - meanR);
+            den += (p.T - meanT) * (p.T - meanT);
+        }
+        double fadePerMonth = den > 0.0 && num < 0.0
+            ? Math.Min(-num / den * (86400.0 * 30.0) / baseline * 100.0, HealthMaxFadePerMonth)
+            : 0.0;
+
+        double? monthsToEol = soh <= HealthEolPct ? 0.0
+            : fadePerMonth >= HealthStableFadePerMonth ? (soh - HealthEolPct) / fadePerMonth
+            : null;
+        return new HealthStats(soh, fadePerMonth, monthsToEol);
     }
 
     public static string FormatDuration(long totalSecs)

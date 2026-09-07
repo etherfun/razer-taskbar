@@ -278,37 +278,40 @@ public sealed class HistoryTests
     }
 
     [Fact]
-    public void WeightingRecentFullExtendedHalfOldIgnored()
+    public void WeightingEwmaHalfLifeCutoffAndJunkSpans()
     {
         static Span Span(long end, long active, int moved)
             => new(end - active, end, active, 100, 100 - moved, moved);
+        const long Day = 86400;
 
-        // 10 recent cycles: 1h per 10% (rate 0.1 h/%); 2 older ones are much
-        // worse (5h per 5%) and must only count at half weight.
-        var spans = Enumerable.Range(0, 10).Select(i => Span(1000 + i, 3600, 10)).ToList();
-        spans.Add(Span(900, 5 * 3600, 5));
-        spans.Add(Span(800, 5 * 3600, 5));
-        // w_hours = 10*1 + 0.5*(5+5) = 15; w_pct = 10*1 + 0.5*(5+5) = 105.
-        var rate = HistoryService.WeightedHoursPerPct(spans)!.Value;
-        Assert.Equal(15.0 / 105.0, rate, 9);
+        // A cycle exactly one half-life (30d) older counts at half weight:
+        // (1.0 + 0.5)h / (10% + 5%) = 0.1 h/%.
+        var spans = new List<Span>
+        {
+            Span(10 * Day, 3600, 10),
+            Span(10 * Day - 30 * Day, 3600, 10),
+        };
+        Assert.Equal(1.5 / 15.0, HistoryService.WeightedHoursPerPct(spans)!.Value, 9);
 
-        // Beyond EXTENDED_LIMIT the oldest spans drop out entirely.
-        var many = Enumerable.Range(0, 10).Select(i => Span(2000 + i, 3600, 10)).ToList();
-        many.AddRange(Enumerable.Range(0, 95).Select(i => Span(1000 + i, 3600, 10)));
-        many.Add(Span(100, 10 * 3600, 10)); // oldest, must be ignored
-        // 100 counted spans * 1h / (100 * 10%) = 0.1 h/%.
-        var rate2 = HistoryService.WeightedHoursPerPct(many)!.Value;
-        Assert.Equal(0.1, rate2, 9);
+        // Beyond MaxAgeDays (180d) a span drops out entirely.
+        var cutoff = new List<Span>
+        {
+            Span(10 * Day, 3600, 10),
+            Span(10 * Day - 181 * Day, 3600, 10),
+        };
+        Assert.Equal(0.1, HistoryService.WeightedHoursPerPct(cutoff)!.Value, 9);
 
-        // Degenerate spans (tiny move / too short) never contribute.
-        List<Span> junk =
-        [
-            Span(500, 30, 1),  // too short
-            Span(600, 120, 2), // move below floor
-            Span(700, 6 * 3600, 10),
-        ];
-        var rate3 = HistoryService.WeightedHoursPerPct(junk)!.Value;
-        Assert.Equal(0.6, rate3, 9);
+        // Junk spans are transparent: they neither contribute nor consume —
+        // the weight depends only on each qualifying span's own timestamp.
+        var junkBetween = new List<Span>
+        {
+            Span(10 * Day, 3600, 10),
+            Span(10 * Day - 15 * Day, 30, 1), // too short + too little move
+            Span(10 * Day - 30 * Day, 3600, 10),
+        };
+        Assert.Equal(1.5 / 15.0, HistoryService.WeightedHoursPerPct(junkBetween)!.Value, 9);
+
+        // Degenerate-only input stays null.
         Assert.Null(HistoryService.WeightedHoursPerPct([Span(500, 30, 1)]));
     }
 
@@ -395,5 +398,255 @@ public sealed class HistoryTests
         // tick lands in cycle 1).
         var rate = HistoryService.WeightedHoursPerPct(dis)!.Value;
         Assert.Equal(2.5 / 30.0, rate, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // Current-session blending
+    // ------------------------------------------------------------------
+
+    /// <summary>A dock charge session 20→50 at secsPerPct seconds per percent
+    /// (rate = secsPerPct/3600 h/%), closed by an unplug sample.</summary>
+    private static List<Sample> ChargeSession(long startTs, int from, int to, long secsPerPct)
+    {
+        var list = new List<Sample> { new(startTs, from, true, true) };
+        for (var l = from + 1; l <= to; l++)
+        {
+            list.Add(new Sample(startTs + (l - from) * secsPerPct, l, true, true));
+        }
+        list.Add(new Sample(startTs + (to - from) * secsPerPct + 1, to, false, true));
+        return list;
+    }
+
+    private static List<Sample> Merge(params IReadOnlyList<Sample>[] parts)
+        => parts.SelectMany(p => p).ToList();
+
+    [Fact]
+    public void CurrentSessionRateThresholds()
+    {
+        // Below 2% moved → not trusted.
+        List<Sample> tiny = [S(0, 80, false, true), S(600, 79, false, true)];
+        Assert.Null(HistoryService.CurrentSessionProgress(tiny, charging: false));
+        // Below 5 minutes active → not trusted.
+        List<Sample> brief = [S(0, 80, false, true), S(120, 78, false, true)];
+        Assert.Null(HistoryService.CurrentSessionProgress(brief, charging: false));
+        // A 2% drop over 10 min qualifies.
+        List<Sample> ok = [S(0, 80, false, true), S(300, 79, false, true), S(600, 78, false, true)];
+        var p = HistoryService.CurrentSessionProgress(ok, charging: false)!.Value;
+        Assert.Equal(600.0 / 3600.0, p.Hours, 9);
+        Assert.Equal(2.0, p.Pct, 9);
+        // A disconnected tail is no session at all.
+        List<Sample> off = [S(0, 80, false, true), S(600, 78, false, false)];
+        Assert.Null(HistoryService.CurrentSessionProgress(off, charging: false));
+    }
+
+    [Fact]
+    public void BlendShiftsPredictionTowardCurrentSession()
+    {
+        // Closed cycle: 10% over 3600s → 0.1 h/%. The open current session
+        // drains much faster (5% over 1500s → 0.0833 h/%); with pct=5 the
+        // blend weight is f = 5/(5+8), so the prediction must sit clearly
+        // below the pure-cycle estimate (~15.3ks).
+        List<Sample> samples =
+        [
+            S(0, 100, false, true),
+            S(1800, 95, false, true),
+            S(3600, 90, false, true),
+            S(3601, 90, true, true),
+            S(5401, 95, true, true),
+            S(5402, 95, false, true),
+            S(5702, 94, false, true),
+            S(6002, 93, false, true),
+            S(6302, 92, false, true),
+            S(6602, 91, false, true),
+            S(6902, 90, false, true),
+        ];
+        var e = HistoryService.Predict(samples, 45, chargingNow: false)!.Value;
+        Assert.False(e.Charging);
+        Assert.InRange(e.Secs, 14400, 14900);
+    }
+
+    // ------------------------------------------------------------------
+    // Completed-session profiles (nonlinear endpoint extrapolation)
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void ChargeProfileCapturesSlowTail()
+    {
+        // 10→90 at 1 min/% (CC phase), 90→100 at 6 min/% (CV taper). From
+        // 95% the profile must predict ≈30 min — the flat rate (~1.6 min/%)
+        // would claim ≈8 min.
+        var samples = new List<Sample> { S(0, 10, true, true) };
+        for (var l = 11; l <= 90; l++)
+        {
+            samples.Add(S((l - 10) * 60L, l, true, true));
+        }
+        for (var l = 91; l <= 100; l++)
+        {
+            samples.Add(S(80 * 60L + (l - 90) * 360L, l, true, true));
+        }
+        samples.Add(S(80 * 60L + 10 * 360L + 1, 100, false, true)); // unplug: complete
+
+        var prof = HistoryService.ChargeTimeToFullProfile(samples);
+        Assert.Equal(3600.0, prof[90]!.Value, 1); // ten CV steps × 6 min
+        Assert.Equal(1800.0, prof[95]!.Value, 1); // five CV steps × 6 min
+        var e = HistoryService.Predict(samples, 95, chargingNow: true)!.Value;
+        Assert.True(e.Charging);
+        Assert.InRange(e.Secs, 1740, 1860);
+    }
+
+    [Fact]
+    public void DischargeProfileCapturesFastTail()
+    {
+        // 100→20 at 15 min/%, then the last 20% collapses at 6 min/%. From
+        // 10% the profile must predict ≈1h, not the flat-rate ≈2.2h.
+        var samples = new List<Sample> { S(0, 100, false, true) };
+        for (var l = 99; l >= 20; l--)
+        {
+            samples.Add(S((100 - l) * 900L, l, false, true));
+        }
+        long tailStart = 80 * 900L;
+        for (var l = 19; l >= 0; l--)
+        {
+            samples.Add(S(tailStart + (20 - l) * 360L, l, false, true));
+        }
+
+        var prof = HistoryService.DischargeTimeToEmptyProfile(samples);
+        Assert.Equal(3600.0, prof[10]!.Value, 1); // ten tail steps × 6 min
+        var e = HistoryService.Predict(samples, 10, chargingNow: false)!.Value;
+        Assert.InRange(e.Secs, 3540, 3660);
+    }
+
+    [Fact]
+    public void PartialSessionsFeedTransitProfile()
+    {
+        // Top-up / dock habits: a partial charge (unplugged at 96%) and
+        // swap-ended discharge cycles never complete, yet every level they
+        // actually crossed contributes its observed seconds-per-percent.
+        List<Sample> chgSamples =
+        [
+            S(0, 50, true, true),
+            S(900, 70, true, true),
+            S(1800, 96, true, true),
+            S(1801, 96, false, true),
+        ];
+        var (_, chgSpans) = HistoryService.ComputeSpans(chgSamples);
+        var ct = HistoryService.ChargeTransitProfile(chgSamples, chgSpans);
+        Assert.Equal(45.0, ct[50]!.Value, 1);          // 900s / 20 levels
+        Assert.Equal(900.0 / 26.0, ct[95]!.Value, 1);  // 900s / 26 levels
+        Assert.Null(ct[10]);                           // never visited
+        // Without rate fill the endpoint sum can't cross the unobserved
+        // 96→100 stretch, so every below-full entry stays null (100 = full).
+        var strict = HistoryService.ChargeTimeToFullProfile(chgSamples);
+        for (int l = 0; l < 100; l++)
+        {
+            Assert.Null(strict[l]);
+        }
+        Assert.Equal(0.0, strict[100]!.Value);
+
+        List<Sample> disSamples =
+        [
+            S(0, 20, false, true),
+            S(900, 15, false, true),
+            S(1800, 80, false, true), // swap jump starts a fresh cycle
+            S(2700, 75, false, true),
+        ];
+        var (disSpans, _) = HistoryService.ComputeSpans(disSamples);
+        var dt = HistoryService.DischargeTransitProfile(disSamples, disSpans);
+        Assert.Equal(180.0, dt[15]!.Value, 1); // 900s / 5 levels
+        Assert.Equal(180.0, dt[79]!.Value, 1); // 900s / 5 levels
+        Assert.Null(dt[10]);
+    }
+
+    [Fact]
+    public void PredictFillsUnobservedLevelsFromRate()
+    {
+        // A completed 50→100 session (uniform 36s/%) plus the device now
+        // parked at 30%: levels 32..49 were never observed, so the endpoint
+        // sum fills them with the blended rate (36s/%) — 68 × 36 = 2448s.
+        // The bare (fill-less) lookup at 30 stays null.
+        List<Sample> samples =
+        [
+            S(0, 50, true, true),
+            S(900, 75, true, true),
+            S(1800, 100, true, true),
+            S(1801, 100, false, true),
+            S(3600, 30, true, true),
+        ];
+        Assert.Null(HistoryService.LookupProfile(HistoryService.ChargeTimeToFullProfile(samples), 30));
+        var e = HistoryService.Predict(samples, 32, chargingNow: true)!.Value;
+        Assert.True(e.Charging);
+        Assert.InRange(e.Secs, 2400, 2500);
+    }
+
+    // ------------------------------------------------------------------
+    // Battery health / lifespan
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void HealthTracksFadingChargeRate()
+    {
+        // Six month-spaced dock sessions whose charge rate decays linearly
+        // 0.25 → 0.20 h/% (−1.67%/mo relative to the 0.24 baseline mean):
+        // SOH ≈ 87, fade ≈ 4.2%/mo, ≈1.7 months left to the 80% threshold.
+        long month = 30 * 86400;
+        var samples = Merge(
+            ChargeSession(0 * month, 20, 50, 900),
+            ChargeSession(1 * month, 20, 50, 864),
+            ChargeSession(2 * month, 20, 50, 828),
+            ChargeSession(3 * month, 20, 50, 792),
+            ChargeSession(4 * month, 20, 50, 756),
+            ChargeSession(5 * month, 20, 50, 720));
+        var h = HistoryService.HealthStatsOf(samples)!.Value;
+        Assert.InRange(h.SohPct, 86.0, 88.5);
+        Assert.InRange(h.FadePerMonthPct, 3.9, 4.4);
+        Assert.NotNull(h.MonthsToEol);
+        Assert.InRange(h.MonthsToEol!.Value, 1.5, 1.95);
+    }
+
+    [Fact]
+    public void HealthStableRateNoTrend()
+    {
+        // Identical charge rates → SOH 100, no fade trend, no EOL horizon.
+        long month = 30 * 86400;
+        var samples = Merge(
+            ChargeSession(0 * month, 20, 50, 900),
+            ChargeSession(month, 20, 50, 900),
+            ChargeSession(2 * month, 20, 50, 900),
+            ChargeSession(3 * month, 20, 50, 900));
+        var h = HistoryService.HealthStatsOf(samples)!.Value;
+        Assert.InRange(h.SohPct, 99.5, 100.0);
+        Assert.True(h.FadePerMonthPct < 0.1);
+        Assert.Null(h.MonthsToEol);
+    }
+
+    [Fact]
+    public void HealthInsufficientData()
+    {
+        // Two sessions only → null even though they span 90 days…
+        long month = 30 * 86400;
+        var two = Merge(
+            ChargeSession(0, 20, 50, 900),
+            ChargeSession(3 * month, 20, 50, 900));
+        Assert.Null(HistoryService.HealthStatsOf(two));
+        // …and three sessions inside a 30-day window are still too short.
+        var dense = Merge(
+            ChargeSession(0, 20, 50, 900),
+            ChargeSession(15 * 86400, 20, 50, 900),
+            ChargeSession(30 * 86400, 20, 50, 900));
+        Assert.Null(HistoryService.HealthStatsOf(dense));
+    }
+
+    [Fact]
+    public void HealthIgnoresShortChargeSpans()
+    {
+        // Taper-only top-ups (10% moved) sit below the 20% floor: with only
+        // those on record there is no usable health signal.
+        long month = 30 * 86400;
+        var tops = Merge(
+            ChargeSession(0, 90, 100, 900),
+            ChargeSession(month, 90, 100, 900),
+            ChargeSession(2 * month, 90, 100, 900),
+            ChargeSession(3 * month, 90, 100, 900));
+        Assert.Null(HistoryService.HealthStatsOf(tops));
     }
 }
