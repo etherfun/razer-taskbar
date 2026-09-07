@@ -176,11 +176,15 @@ public static class RazerReport
     {
         return scale switch
         {
-            BatteryScale.Scaled255 => raw * 100 / 255,
+            // Rounded, not floored: the firmware rounds the same way (Joro
+            // raw 247 reports as 97 via its own GATT Battery Service; a
+            // floor here would show 96 on HID and 97 on BLE for the same
+            // byte — a fake 1% dip on every transport switch).
+            BatteryScale.Scaled255 => (raw * 100 + 127) / 255,
             BatteryScale.Direct100 => Math.Min(100, (int)raw),
             // Unknown generation: values above 100 can only be the 0..255
             // scale; small values are ambiguous and assumed direct.
-            _ => raw <= 100 ? Math.Min(100, (int)raw) : raw * 100 / 255,
+            _ => raw <= 100 ? Math.Min(100, (int)raw) : (raw * 100 + 127) / 255,
         };
     }
 }
