@@ -210,19 +210,61 @@ public sealed class HidWatcher
         return serial.Length > 0 && !serial.All(c => c == '0') ? serial : $"HID:{reading.ProductId:X4}";
     }
 
+    /// <summary>Identity bridge across the two battery sources. When the
+    /// vendor serial query goes unanswered, HandleFor synthesizes a fallback
+    /// (`HID:{pid}` / `BLE:{mac}`) — but the same physical device is usually
+    /// already listed by the Synapse log under its real serial, and both
+    /// identities would surface as two hover-panel rows and two history
+    /// series. Fold the fallback reading into the same-name serial entry
+    /// (HID battery values win, matching battery_source=auto's direct-read
+    /// preference) and let the caller drop the stale fallback entry. Returns
+    /// the effective handle plus the stale one (null = the fallback stands
+    /// alone, e.g. Synapse not running). Two units of one model where BOTH
+    /// fail serial resolution would merge into one row — accepted: serial
+    /// resolution is the norm; the fallback is the exception.</summary>
+    public static (string Handle, string? Stale) ResolveIdentity(
+        IReadOnlyDictionary<string, RazerDevice> map,
+        string handle,
+        HidDeviceReading reading,
+        IReadOnlySet<string> seen)
+    {
+        // Real serial (vendor answer or BLE identity bridge): the log source
+        // carries the same value, the dictionary dedupes by itself.
+        if (handle.IndexOf(':') < 0)
+        {
+            return (handle, null);
+        }
+        var name = reading.NameOverride ?? reading.ProductName;
+        if (name.Length == 0)
+        {
+            return (handle, null);
+        }
+        string? twin = null;
+        foreach (var (key, device) in map)
+        {
+            if (key == handle
+                || key.Contains(':') // only serial identities from the log source
+                || seen.Contains(key) // already claimed by a reading this round
+                || !string.Equals(device.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            twin = key;
+            break;
+        }
+        return twin is null ? (handle, null) : (twin, handle);
+    }
+
     private void Commit(DeviceStore devices, List<HidDeviceReading> readings, string shown)
     {
-        var seen = new HashSet<string>();
-        foreach (var reading in readings)
-        {
-            seen.Add(HandleFor(reading));
-        }
         devices.Mutate(map =>
         {
+            var seen = new HashSet<string>();
             foreach (var reading in readings)
             {
-                var handle = HandleFor(reading);
+                var (handle, stale) = ResolveIdentity(map, HandleFor(reading), reading, seen);
                 var merged = ToRazerDevice(reading, handle, shown);
+                seen.Add(handle);
                 // Same handle from two transports (cable + BT charging at
                 // once): keep the entry that knows charging — GATT has no
                 // charging flag, so a BLE reading must not erase it.
@@ -232,6 +274,10 @@ public sealed class HidWatcher
                     continue;
                 }
                 map[handle] = merged;
+                if (stale is { } dead && dead != handle)
+                {
+                    map.Remove(dead);
+                }
             }
             // This source only manages connectivity of the entries it wrote:
             // a device missing from this round starts a miss counter (dongle
