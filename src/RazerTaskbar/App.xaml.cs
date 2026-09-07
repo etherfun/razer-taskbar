@@ -52,6 +52,9 @@ public partial class App : Application
                     Instance._mainWindow = new MainWindow();
                 }
                 Instance._mainWindow.OpenTab(selectSettings);
+                // Hidden-by-close windows must be shown again before
+                // Activate (close = hide, see MainWindow's Closing hook).
+                Instance._mainWindow.AppWindow.Show();
                 Instance._mainWindow.Activate();
             }
             catch (Exception e)

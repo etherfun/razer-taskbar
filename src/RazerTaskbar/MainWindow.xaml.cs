@@ -37,6 +37,17 @@ public sealed partial class MainWindow : Window
 
         Nav.SelectedItem = NavHistory;
         ContentFrame.Navigate(typeof(Views.HistoryPage));
+
+        // Tray-resident app: this is the only XAML window, and destroying it
+        // would shut down the XAML dispatcher — Application.Start's loop
+        // returns and the process exits, taking the widget threads with it
+        // (the Rust build's GDI settings window just destroys itself). Hide
+        // instead; the tray menu / widget menu reopen it.
+        AppWindow.Closing += (sender, args) =>
+        {
+            args.Cancel = true;
+            sender.Hide();
+        };
     }
 
     /// <summary>Open the window on the given tab; no-op when already there.</summary>
