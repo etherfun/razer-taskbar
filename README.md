@@ -12,7 +12,10 @@ the fallback data source (devices the direct queries can't reach, e.g.
 headsets) and the identity/charging bridge when the Bluetooth channel is
 busy.
 
-Inspired by [Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBatteryTaskbar),
+The Synapse log watcher and device selection are ported from
+[sanraith/razer-taskbar](https://github.com/sanraith/razer-taskbar)
+(TypeScript / Electron). The widget idea was inspired by
+[Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBatteryTaskbar),
 the top-level-overlay embedding of
 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor)
 and the event-driven layout of
@@ -50,7 +53,8 @@ Battery polling (`battery_source=auto`) tries, in order:
 2. **Razer vendor GATT channel** (Bluetooth) — battery *and* charging from
    the device itself, below.
 3. **Synapse logs** — for devices the direct queries can't reach (e.g.
-   headsets), ported from the old Electron `src/watcher/*`:
+   headsets), ported from the Electron original's `src/watcher/*.ts`
+   (sanraith/razer-taskbar):
    * `%LOCALAPPDATA%\Razer\Synapse3\Log\Razer Synapse 3.log` (V3:
      `_OnBatteryLevelChanged` / `_OnDeviceLoaded` / `_OnDeviceRemoved`)
    * `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2*.log`
@@ -266,6 +270,23 @@ array (canonical serial, category, `chargingStatus`); a heartbeat older than
 
 ## Attributions
 
+* sanraith/razer-taskbar — direct upstream: the Synapse log watcher and
+  device selection are ported from its TypeScript sources:
+  <https://github.com/sanraith/razer-taskbar>
+* OpenRazer — the USB HID vendor protocol is ported from its kernel driver:
+  <https://github.com/openrazer/openrazer>
 * RazerBatteryTaskbar: <https://github.com/Tekk-Know/RazerBatteryTaskbar>
 * TrafficMonitor taskbar embedding: <https://github.com/zhongyang219/TrafficMonitor>
 * Taskbar-Lyrics overlay + event-driven layout: <https://github.com/mo-jinran/Taskbar-Lyrics>
+
+## License
+
+Licensed under the GNU GPLv3 or any later version — see
+[LICENSE](LICENSE) (SPDX: `GPL-3.0-or-later`). Third-party code keeps its
+own terms; attributions and license texts are collected in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md):
+
+* [sanraith/razer-taskbar](https://github.com/sanraith/razer-taskbar) — MIT
+  (Synapse log watcher, device-selection logic).
+* [OpenRazer](https://github.com/openrazer/openrazer) — GPL-2.0-or-later
+  (USB HID protocol layer in `src/RazerTaskbar.Core/Hid/`).
