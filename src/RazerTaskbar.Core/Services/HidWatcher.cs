@@ -255,8 +255,45 @@ public sealed class HidWatcher
         return twin is null ? (handle, null) : (twin, handle);
     }
 
-    private void Commit(DeviceStore devices, List<HidDeviceReading> readings, string shown)
+    /// <summary>Same-round pid dedup: a slot whose battery answered but whose
+    /// serial query failed yields the fallback identity `HID:{pid}` — and the
+    /// same physical device may have answered with its real serial on another
+    /// slot/transaction of the same pid in the same poll (dongles expose
+    /// several transaction ids that all reach the mouse). The serial reading
+    /// wins; the pid-shaped fallback of an already-resolved pid is dropped.
+    /// Kept: fallbacks of pids with no serial answer this round (the device
+    /// still needs its entry) and BLE MAC fallbacks (per-device, not
+    /// pid-derived — a second same-model unit on the same BLE pid must not
+    /// be swallowed).</summary>
+    internal static List<HidDeviceReading> DedupRound(List<HidDeviceReading> readings)
     {
+        var serialPids = new HashSet<int>();
+        foreach (var r in readings)
+        {
+            if (HandleFor(r).IndexOf(':') < 0)
+            {
+                serialPids.Add(r.ProductId);
+            }
+        }
+        List<HidDeviceReading>? result = null;
+        for (int i = 0; i < readings.Count; i++)
+        {
+            var r = readings[i];
+            var h = HandleFor(r);
+            if (serialPids.Contains(r.ProductId)
+                && h == $"HID:{r.ProductId:X4}")
+            {
+                result ??= new List<HidDeviceReading>(readings.Take(i));
+                continue;
+            }
+            result?.Add(r);
+        }
+        return result ?? readings;
+    }
+
+    internal void Commit(DeviceStore devices, List<HidDeviceReading> readings, string shown)
+    {
+        readings = DedupRound(readings);
         devices.Mutate(map =>
         {
             var seen = new HashSet<string>();
@@ -277,6 +314,25 @@ public sealed class HidWatcher
                 if (stale is { } dead && dead != handle)
                 {
                     map.Remove(dead);
+                }
+                // A serial that resolved after earlier fallback rounds retires
+                // the fallback entry rooted while the radio was still waking
+                // (cold start: ResolveIdentity had no serial twin to fold
+                // into, so HID:{pid} took root and reached battery.db). The
+                // pid-derived form is unambiguous — it is exactly what this
+                // device's failed serial query produces. BLE:{mac} fallbacks
+                // are not pid-derived; their rooted entries keep relying on
+                // the name-based fold and the startup DB merge.
+                if (handle.IndexOf(':') < 0)
+                {
+                    var rooted = $"HID:{reading.ProductId:X4}";
+                    if (map.ContainsKey(rooted))
+                    {
+                        map.Remove(rooted);
+                        _misses.Remove(rooted);
+                        Log.Info($"hid: serial resolved, retiring rooted fallback {rooted} -> {handle}");
+                        HistoryService.MergeAlias(rooted, handle);
+                    }
                 }
             }
             // This source only manages connectivity of the entries it wrote:

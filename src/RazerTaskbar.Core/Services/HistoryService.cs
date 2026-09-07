@@ -155,6 +155,115 @@ public static class HistoryService
         {
             _db = conn;
         }
+        MergeAliasedRows();
+    }
+
+    /// <summary>Startup heal for identity pollution: one physical device can
+    /// take root under a synthesized fallback handle (HID:{pid} / BLE:{mac})
+    /// when the vendor serial query went unanswered at startup, and both it
+    /// and the later real-serial row end up in battery.db — two history
+    /// series for one device. Every fallback-keyed row whose (unique)
+    /// same-name serial row exists is folded into it: samples re-pointed,
+    /// alias row dropped, in-memory series merged.</summary>
+    private static void MergeAliasedRows()
+    {
+        List<(string Src, string Dst)> aliases;
+        lock (Sync)
+        {
+            aliases = AliasPairs(_names);
+        }
+        foreach (var (src, dst) in aliases)
+        {
+            Log.Info($"history: merged aliased HID device rows: {src} -> {dst}");
+            MergeAlias(src, dst);
+        }
+    }
+
+    /// <summary>Pure pairing rule for <see cref="MergeAliasedRows"/>: for each
+    /// fallback handle (contains ':') the same-name serial handle — but only
+    /// when it is unambiguous (two same-name serial rows could be two units
+    /// of one model; the alias then stays).</summary>
+    internal static List<(string Src, string Dst)> AliasPairs(IReadOnlyDictionary<string, string> names)
+    {
+        var aliases = new List<(string, string)>();
+        foreach (var (src, srcName) in names)
+        {
+            if (src.IndexOf(':') < 0)
+            {
+                continue;
+            }
+            string? dst = null;
+            foreach (var (key, name) in names)
+            {
+                if (key.Contains(':')
+                    || !string.Equals(name, srcName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (dst is not null)
+                {
+                    dst = null; // two same-name serial rows: could be two units — leave alone
+                    break;
+                }
+                dst = key;
+            }
+            if (dst is not null)
+            {
+                aliases.Add((src, dst));
+            }
+        }
+        return aliases;
+    }
+
+    /// <summary>Fold a fallback identity's history into its resolved serial
+    /// identity (one physical device, two handles over time). Merges the
+    /// in-memory series and — while the DB is open — moves the samples and
+    /// drops the alias row. On a timestamp tie the dst sample (recorded under
+    /// the canonical identity) wins.</summary>
+    internal static void MergeAlias(string src, string dst)
+    {
+        lock (Sync)
+        {
+            if (_series.TryGetValue(src, out var srcHist))
+            {
+                var dstHist = _series.TryGetValue(dst, out var h) ? h : new List<Sample>();
+                dstHist.AddRange(srcHist);
+                var merged = dstHist.OrderBy(s => s.Ts).ToList(); // stable: dst wins ties
+                _series.Remove(src);
+                _series[dst] = merged;
+            }
+            _names.Remove(src);
+            _estimates.Remove(src);
+        }
+        SqliteConnection? conn;
+        lock (DbLock)
+        {
+            conn = _db;
+        }
+        if (conn is null)
+        {
+            return;
+        }
+        MergeAlias(conn, src, dst);
+    }
+
+    /// <summary>DB half of <see cref="MergeAlias"/> on an explicit connection
+    /// (testable against a scratch database).</summary>
+    internal static void MergeAlias(SqliteConnection conn, string src, string dst)
+    {
+        try
+        {
+            Exec(conn,
+                "INSERT OR IGNORE INTO samples(handle, ts, level, charging, connected) " +
+                "SELECT $dst, ts, level, charging, connected FROM samples WHERE handle = $src",
+                ("$src", src), ("$dst", dst));
+            Exec(conn, "DELETE FROM samples WHERE handle = $src", ("$src", src));
+            Exec(conn, "DELETE FROM devices WHERE handle = $src", ("$src", src));
+        }
+        catch (Exception e)
+        {
+            Log.Error($"history: alias merge failed ({src} -> {dst})", e);
+        }
     }
 
     private static readonly SpikeFilter _spikes = new();
@@ -438,6 +547,17 @@ public static class HistoryService
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void Exec(SqliteConnection conn, string sql, params (string Name, string Value)[] args)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        foreach (var (name, value) in args)
+        {
+            cmd.Parameters.AddWithValue(name, value);
+        }
         cmd.ExecuteNonQuery();
     }
 

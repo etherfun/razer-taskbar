@@ -109,4 +109,84 @@ public sealed class DeviceIdentityTests
         Assert.Equal(Fallback, handle);
         Assert.Null(stale);
     }
+
+    // — same-round pid dedup (DedupRound) —
+
+    [Fact]
+    public void SameRoundSerialWinsOverSamePidFallback()
+    {
+        // The mouse answered the battery query on two transaction ids of one
+        // dongle; one slot's serial query failed. One physical device, one
+        // entry — the serial identity wins, in either arrival order.
+        var resolved = Reading with { Serial = Serial };
+        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { resolved, Reading }));
+        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { Reading, resolved }));
+    }
+
+    [Fact]
+    public void FallbackOnlyRoundIsKept()
+    {
+        // Cold start with the radio still waking: the fallback is the only
+        // identity available and the entry must exist.
+        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { Reading }));
+    }
+
+    [Fact]
+    public void FallbackOfAnotherPidIsKept()
+    {
+        // A serial on pid 0x00C1 says nothing about pid 0x0088's device.
+        var other = Reading with { ProductId = 0x00C1, Serial = Serial };
+        var round = HidWatcher.DedupRound(new List<HidDeviceReading> { other, Reading });
+        Assert.Equal(2, round.Count);
+    }
+
+    [Fact]
+    public void ComboDongleKeyboardFallbackYieldsToSamePidSerial()
+    {
+        // The mouse resolved its serial; the keyboard slot's serial query
+        // failed. Its pid fallback would root a phantom "Razer Keyboard" row
+        // colliding with the mouse's fallback namespace — drop until it can
+        // answer under a real identity.
+        var mouse = Reading with { Serial = Serial };
+        var keyboard = Reading with { NameOverride = "Razer Keyboard", KindOverride = DeviceKind.Keyboard };
+        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { mouse, keyboard }));
+    }
+
+    [Fact]
+    public void BleFallbackSurvivesSamePidSerial()
+    {
+        // BLE MAC fallbacks are per-device, not pid-derived: a resolved BLE
+        // pid must not swallow another unit's MAC identity.
+        var resolved = Reading with { Serial = Serial };
+        var ble = Reading with { ProductId = 0x02CE, Serial = "BLE:001122334455" };
+        var round = HidWatcher.DedupRound(new List<HidDeviceReading> { resolved, ble });
+        Assert.Equal(2, round.Count);
+    }
+
+    // — cross-round heal (Commit): the fallback rooted at cold start must be
+    // retired the moment its device answers with the real serial —
+
+    [Fact]
+    public void SerialResolutionRetiresRootedFallbackEntry()
+    {
+        var store = new DeviceStore();
+        var hid = new HidWatcher();
+        hid.Commit(store, new List<HidDeviceReading> { Reading }, "");
+        Assert.True(store.Snapshot().ContainsKey(Fallback));
+        hid.Commit(store, new List<HidDeviceReading> { Reading with { Serial = Serial } }, "");
+        var map = store.Snapshot();
+        Assert.False(map.ContainsKey(Fallback));
+        Assert.True(map.ContainsKey(Serial));
+    }
+
+    [Fact]
+    public void SameRoundDuplicateNeverRootsFallback()
+    {
+        var store = new DeviceStore();
+        var hid = new HidWatcher();
+        hid.Commit(store, new List<HidDeviceReading> { Reading, Reading with { Serial = Serial } }, "");
+        var map = store.Snapshot();
+        Assert.False(map.ContainsKey(Fallback));
+        Assert.True(map.ContainsKey(Serial));
+    }
 }
