@@ -109,7 +109,7 @@ public static class I18n
         "Which device's battery the widget displays." => "挂件显示哪台设备的电量。",
         "Anchor the widget on the left or right side of the taskbar." => "将挂件锚定在任务栏左侧或右侧。",
         "Second row with the predicted remaining / time-to-full duration." => "第二行显示预计剩余 / 充满时长。",
-        "Tint the battery glyph by level and charge state." => "按电量与充放电状态给电池图标着色。",
+        "Charging / saver keep their state colors; this adds the green-to-red level gradient." => "充电/省电状态色始终显示；开启后普通模式电量按绿→红渐变着色。",
         "Notification-area icon with tooltip and menu." => "带提示与菜单的通知区图标。",
         "Hover the widget to list every known device." => "悬停挂件列出所有已知设备。",
         "Display refresh cadence (seconds) when there is no log activity." => "无日志活动时的显示刷新间隔(秒)。",

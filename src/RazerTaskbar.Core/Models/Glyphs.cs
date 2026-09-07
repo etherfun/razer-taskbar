@@ -80,16 +80,17 @@ public static class BatteryColors
 
     /// <summary>Layer-1 (level glyph) color of the two-layer battery icon:
     /// flat light green #9FD89F while charging, amber #EAA300 in device
-    /// battery saver, otherwise the Win11 level tint; gray when
-    /// disconnected. Saver wins over charging. Applied when Settings →
-    /// Colored battery icon is on; call sites draw the default white glyph
-    /// otherwise.</summary>
-    public static RgbColor LevelFillColor(int level, bool connected, bool saver, bool charging)
+    /// battery saver, gray when disconnected — those state colors show
+    /// regardless of Settings → Colored battery icon. The option gates only
+    /// the plain-discharge Win11 level tint (the green→red gradient); with
+    /// it off, a plain connected device draws the default white glyph.
+    /// Saver wins over charging.</summary>
+    public static RgbColor LevelFillColor(int level, bool connected, bool saver, bool charging, bool colorize)
     {
         if (!connected) return new(0x80, 0x80, 0x80);
         if (saver) return new(0xEA, 0xA3, 0x00);    // #EAA300
         if (charging) return new(0x9F, 0xD8, 0x9F); // #9FD89F
-        return ColorFor(level);
+        return colorize ? ColorFor(level) : new(0xFF, 0xFF, 0xFF);
     }
 }
 

@@ -61,14 +61,17 @@ public sealed class BatteryTests
     [Fact]
     public void LevelFillColorUsesStateColors()
     {
-        // Charging: flat #9FD89F regardless of level; saver: #EAA300 and
-        // wins over charging; plain discharge keeps the level tint;
-        // disconnected is gray.
-        Assert.Equal(new RgbColor(0x9F, 0xD8, 0x9F), BatteryColors.LevelFillColor(50, true, false, true));
-        Assert.Equal(new RgbColor(0x9F, 0xD8, 0x9F), BatteryColors.LevelFillColor(90, true, false, true));
-        Assert.Equal(new RgbColor(0xEA, 0xA3, 0x00), BatteryColors.LevelFillColor(50, true, true, true));
-        Assert.Equal(BatteryColors.ColorFor(72), BatteryColors.LevelFillColor(72, true, false, false));
-        Assert.Equal(new RgbColor(0x80, 0x80, 0x80), BatteryColors.LevelFillColor(50, false, false, true));
+        // State colors are independent of the rainbow option: charging is
+        // flat #9FD89F regardless of level, saver is #EAA300 and wins over
+        // charging, disconnected is gray. Only the plain-discharge level
+        // tint is gated by the option: off draws the default white glyph,
+        // on keeps the Win11 level tint.
+        Assert.Equal(new RgbColor(0x9F, 0xD8, 0x9F), BatteryColors.LevelFillColor(50, true, false, true, colorize: false));
+        Assert.Equal(new RgbColor(0x9F, 0xD8, 0x9F), BatteryColors.LevelFillColor(90, true, false, true, colorize: true));
+        Assert.Equal(new RgbColor(0xEA, 0xA3, 0x00), BatteryColors.LevelFillColor(50, true, true, true, colorize: false));
+        Assert.Equal(new RgbColor(0x80, 0x80, 0x80), BatteryColors.LevelFillColor(50, false, false, true, colorize: false));
+        Assert.Equal(new RgbColor(0xFF, 0xFF, 0xFF), BatteryColors.LevelFillColor(72, true, false, false, colorize: false));
+        Assert.Equal(BatteryColors.ColorFor(72), BatteryColors.LevelFillColor(72, true, false, false, colorize: true));
     }
 
     [Fact]

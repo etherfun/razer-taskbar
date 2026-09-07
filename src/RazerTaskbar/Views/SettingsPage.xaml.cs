@@ -46,7 +46,7 @@ public sealed partial class SettingsPage : Page
             LblEst.Text = I18n.Tr("Show time remaining on widget");
             DescEst.Text = I18n.Tr("Second row with the predicted remaining / time-to-full duration.");
             LblColor.Text = I18n.Tr("Colored battery icon");
-            DescColor.Text = I18n.Tr("Tint the battery glyph by level and charge state.");
+            DescColor.Text = I18n.Tr("Charging / saver keep their state colors; this adds the green-to-red level gradient.");
             LblTray.Text = I18n.Tr("Show tray icon");
             DescTray.Text = I18n.Tr("Notification-area icon with tooltip and menu.");
             LblHover.Text = I18n.Tr("Show devices on hover");

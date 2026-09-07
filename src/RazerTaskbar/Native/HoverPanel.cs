@@ -430,10 +430,10 @@ public static class HoverPanel
             int nameLeft = glyphX + glyphW + gap;
             int nameRight = Math.Max(left, nameLeft);
 
-            // Coloring is opt-in (Settings → Colored battery icon, off by
-            // default): the glyph draws plain white and the pct keeps the
-            // level tint; when on, glyph layer 1 and the pct take the
-            // state/level color. Disconnected stays gray either way.
+            // Coloring: the charging/saver/disconnected state colors always
+            // tint glyph layer 1 and the pct; Settings → Colored battery
+            // icon gates only the plain-discharge level gradient (off:
+            // those rows draw the default white glyph/pct).
             bool colorize = AppState.Instance.ConfigSnapshot().ColorBatteryIcon;
 
             int y = pad;
@@ -441,8 +441,7 @@ public static class HoverPanel
             {
                 int top = y;
                 int bottom = y + rowH;
-                var c = colorize ? BatteryColors.LevelFillColor(r.Level, r.Connected, r.Saver, r.Charging)
-                    : (r.Connected ? BatteryColors.ColorFor(r.Level) : new RgbColor(0x80, 0x80, 0x80));
+                var c = BatteryColors.LevelFillColor(r.Level, r.Connected, r.Saver, r.Charging, colorize);
                 uint levelColor = GdiText.ColorRef(c.R, c.G, c.B);
                 // Device-type icon: light gray for connected, dim for not;
                 // centered in the kind column and the row.
@@ -467,10 +466,10 @@ public static class HoverPanel
                 var glyph = new[] { BatteryGlyphs.LevelGlyph(r.Level, r.Connected, r.Saver, r.Charging) };
                 var grc = new RECT { Left = glyphX, Top = top, Right = glyphX + glyphW + 4, Bottom = bottom };
                 SelectObject(hdc, iconFont);
-                // Layer 1: default white for connected devices while
-                // coloring is off; otherwise levelColor (state/level tint,
-                // gray while disconnected).
-                SetTextColor(hdc, r.Connected && !colorize ? 0x00FF_FFFFu : levelColor);
+                // Layer 1: levelColor — the state colors always, the level
+                // gradient only while the option is on (see LevelFillColor;
+                // off + plain discharge is the default white).
+                SetTextColor(hdc, levelColor);
                 DrawTextW(hdc, glyph, glyph.Length, ref grc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
                 if (BatteryGlyphs.StatusOverlayGlyph(r.Connected, r.Saver, r.Charging) is { } statusGlyph)
                 {
@@ -501,7 +500,7 @@ public static class HoverPanel
                     SetTextColor(hdc, 0x00B0B0B0u);
                     DrawTextW(hdc, eta, eta.Length, ref erc, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
                 }
-                // Percentage, level-colored, right-aligned.
+                // Percentage, state/level-colored, right-aligned.
                 var pct = r.Pct.ToCharArray();
                 var prc = new RECT { Left = pctLeft - 2, Top = top, Right = pctRight, Bottom = bottom };
                 SelectObject(hdc, textFont);

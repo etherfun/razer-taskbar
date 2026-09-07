@@ -720,7 +720,10 @@ public static class WidgetWindow
             var hfont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_SEMIBOLD);
             SelectObject(hdc, hfont);
 
-            var fill = BatteryColors.LevelFillColor(level, connected, saver, charging);
+            // Rainbow option gates only the plain-discharge level gradient;
+            // the charging/saver/disconnected state colors always show.
+            bool colorize = AppState.Instance.ConfigSnapshot().ColorBatteryIcon;
+            var fill = BatteryColors.LevelFillColor(level, connected, saver, charging, colorize);
             uint textColor = connected ? fgColor : dim;
             var wide = topLabel.ToCharArray();
             // Measure text first so the glyph+text group can be centered.
@@ -820,15 +823,13 @@ public static class WidgetWindow
             // bolt/leaf glyph's own ink box is taller (the symbol pokes
             // above the outline), and self-centering each layer would
             // visibly misalign the coinciding outlines. Layer 1 takes the
-            // state/level color only when Settings → Colored battery icon
-            // is on (default off: both layers draw the plain white glyph);
-            // disconnected stays gray either way.
+            // state/level color — the charging/saver/disconnected state
+            // colors always, the plain-discharge level gradient only when
+            // Settings → Colored battery icon is on (off: default white
+            // glyph; see LevelFillColor).
             SelectObject(hdc, hiconFont);
             int iconDy = GdiText.InkCenterDelta(hdc, iconCh);
-            bool colorize = AppState.Instance.ConfigSnapshot().ColorBatteryIcon;
-            uint iconColor = !connected ? GdiText.ColorRef(0x80, 0x80, 0x80)
-                : colorize ? GdiText.ColorRef(fill.R, fill.G, fill.B)
-                : fgColor;
+            uint iconColor = GdiText.ColorRef(fill.R, fill.G, fill.B);
             GdiText.DrawInkText(hdc, hiconFont, iconCh, iconX, topRect, iconColor, iconDy);
             if (BatteryGlyphs.StatusOverlayGlyph(connected, saver, charging) is { } statusGlyph)
             {
