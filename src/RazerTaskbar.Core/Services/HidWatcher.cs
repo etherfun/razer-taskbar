@@ -97,13 +97,31 @@ public sealed class HidWatcher
             foreach (var group in paths.GroupBy(p => p.Pid))
             {
                 // BLE HID carries no vendor feature channel (its report map
-                // rejects the 91-byte vendor buffer) — those devices read the
-                // battery from the GATT Battery Service instead. The MAC is
+                // rejects the 91-byte vendor buffer). Power comes from
+                // Razer's private vendor GATT channel when it is free —
+                // battery AND the charging flag, no heartbeat needed — and
+                // from the plain GATT Battery Service otherwise. The MAC is
                 // the same for every collection of the device.
                 var bleMac = group.All(p => IsBlePath(p.Path)) ? BleMac(group.First().Path) : null;
                 if (bleMac is { } mac)
                 {
-                    if (BleBattery.TryRead(mac) is { } ble)
+                    if (BleVendor.TryReadPower(mac) is { } power)
+                    {
+                        // Identity (serial/name) still rides the Synapse
+                        // heartbeat bridge; the vendor serial read is a
+                        // third transaction we skip at poll cadence.
+                        var identity = BleIdentityFor(mac,
+                            DeviceClassifier.FromCategoryAndName("", power.Name));
+                        var serial = identity?.Serial ?? $"BLE:{mac:X12}";
+                        var name = identity is { Name.Length: > 0 } ? identity.Name
+                            : (power.Name.Length > 0 ? power.Name : null)
+                            ?? "Razer Keyboard";
+                        readings.Add(new HidDeviceReading(group.Key, "", serial,
+                            power.RawBattery, BleVendor.BatteryPercent(power.RawBattery),
+                            power.Charging, name,
+                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name)));
+                    }
+                    else if (BleBattery.TryRead(mac) is { } ble)
                     {
                         // Identity bridge: Synapse's heartbeat device arrays
                         // log every paired device with its canonical serial

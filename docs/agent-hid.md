@@ -101,34 +101,76 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
   0x03（与我们探针一致）；**该 PR 无电量方法**（仅灯光/宏），OpenRazer 也**不支持蓝牙设备**
   （BT 不识别为 USB 设备）——GATT 路线无先例可抄。
 
-### 厂商定制通道（BLE 规范留口处，2026-09-07 真机）
+### 厂商定制通道（BLE 规范留口处，2026-09-07 真机 + 已逆向）
 
 规范留给厂商的定制点只有两处，Joro 上各有一份：
 
-1. **128-bit 厂商 GATT 服务 `52401523-f97c-7f90-0e7f-6c6f4e36db1c`**（Razer 私有，无公开逆向）：
+1. **128-bit 厂商 GATT 服务 `52401523-f97c-7f90-0e7f-6c6f4e36db1c`**（Razer 私有，
+   **2026-09-07 三期已逆向出命令协议**，Linux bluetoothctl 输出可见同族 UUID，无其他公开先例）：
 
-   | 特征 | 属性 | 观测值 |
+   | 特征 | 属性 | 用途 |
    |---|---|---|
-   | `52401524-…` | Write | Razer 自己的 BT 控制协议命令通道（未逆向，**禁盲写**） |
-   | `52401525-…` | Read+Notify | 设备身份：`00…00 02 + ASCII "8701637"` = 厂商串号尾 7 位（SI2522F1**8701637**） |
-   | `52401526-…` | Read+Notify | 8 字节 `6EA77DCFC5DD2D85`（疑似配对 token / 设备 id） |
+   | `52401524-…` | Write | 命令通道（Write Request） |
+   | `52401525-…` | Read+Notify | 应答寄存器（20 字节快照，Notify 推送） |
+   | `52401526-…` | Read+Notify | 8 字节 token `6EA77DCFC5DD2D85`（疑似配对 token，未用） |
 
-   **Synapse（RazerAppEngine）运行时该服务特征枚举 AccessDenied**——被其独占持有；
-   `OpenAsync(SharedReadAndWrite)` 也解不开，**只有停掉 RazerAppEngine 才能访问**。
-   Synapse 蓝牙模式的电量/充电状态大概率走这条通道（0x2A19 那种 BAS 它也可见），
-   深挖价值：原生 BT 电量+充电+完整串号。后续如需逆向：先 HCI/btsnoop 抓 Synapse 对
-   `52401524` 的写序列，严禁在无地图时盲写。
+   **命令格式**（8 字节 Write Request）：`[seq][payload_len] 00 00 [page][id][param:2]`；
+   `payload_len=0` 为查询，非 0 为写入（命令帧后紧跟等长 payload 写，如节能配置写
+   `05 0a` + `00 2c 01 14`）。**应答**（52401525 的 20 字节寄存器快照）：
+   头帧 `[echo_seq][len] 00 00 00 00 00 [tag]`（tag `0x02`=成功 / `0x05`=未知命令），
+   `len` 个载荷字节按 20 字节快照流式续传（串号 22 字节分 2 帧），快照中超出本次载荷的
+   字节是**寄存器残留**（典型为串号尾 "8701637"）——禁止解读超出声明的长度。
+   另有 CCCD：写 `0100` 到 52401525 的 CCCD 句柄开启通知。
+
+   **已验证命令表**（Joro，差分实验确认）：
+
+   | page/id/param | 语义 | 观测 |
+   |---|---|---|
+   | 05/81/0001 | **电量，Scaled255**（raw×100/255） | F7=97%（与 BAS 一致；插线 1 分钟涨到 F9=98%） |
+   | 05/85/0001 | **充电标志** 0/1 | 插线 0→1，拔线 →0（两次翻转） |
+   | 01/83/0000 | 完整串号（22 字节） | "SI2522F18701637"——蓝牙原生身份，不依赖心跳 |
+   | 01/86/0000 | 3 字节，恒 `01 00 00` | 未知（状态？） |
+   | 01/82/0000 | 2 字节，恒 `03 00` | 未知 |
+   | 01/A0/0000 | 1 字节，恒 `02` | 未知 |
+   | 05/80/0001 | 1 字节，恒 `01` | 未知 |
+   | 05/84/0000 | 2 字节，恒 900 (0x0384) | 疑似容量/阈值类常量（Synapse 与 87 成对轮询） |
+   | 05/87/0001 | 1 字节，恒 `00` | 未知（插线时仍 0；怀疑"充电完成"——满电插线可验证） |
+   | 05/8A/0001 | 4 字节 `[n][秒][分]` | 节能配置 `[01][300][20]`；Synapse 经 05/0a 写入（`[idx][LE16 值][?]`，180→300 生效回读确认） |
+   | 05/8D/0001 | 1 字节，恒 `00` | 未知 |
+   | (page)/80/0000 | 该页支持的 id 列表 | page01→`40 81 C2 C3 C6`，page05→`40 41 C2 C3 C4 45 C6 C7 CA`（0x4x 是 set 半区镜像，勿碰） |
+   | 10/05/0100 + payload 00 | Synapse 设置写入（亮度类） | seq 1b/1c/1d 三连发，对应操作亮度 |
+   | 06/02/0008、07/0B/0000 | Synapse 设置写入 | 同上（节能相关），payload 1 字节 |
+
+   **通道占用语义**（真机实测，重要）：通道**不是** Synapse UI 一跑就独占——
+   RazerAppEngine 空闲（未开设备页）时共享可读；**驱动/服务层活跃时才占**
+   （占用者疑似 `razerwdl.exe` / Synapse 打开设备页后的 GATT 会话）——表现为服务可见但
+   特征枚举失败（"characteristics missing"），不是 AccessDenied。挂件策略：
+   `BleVendor.TryReadPower` 先试厂商通道（电量+充电一次拿全），特征枚举失败/订阅失败
+   自动回退 BAS + 心跳充电位（`HidWatcher` BLE 分支）。
+
+   **抓包方法**（复现用）：`logman start trace -ets BthCap -p {8A1F9517-3A8C-4A9E-A018-4F17A200F277}`
+   `0xC000000000000000 0x04 -o cap.etl -nb 128 256`（Microsoft-Windows-BTH-BTHPORT，HCI 关键字
+   0x4000…+HCIRAW 0x8000…）→ 停止后用 BTP 包的 `BTETLParse -cfa cap.btsnoop cap.etl` 转 btsnoop，
+   Wireshark/tshark 直接读。抓 Synapse 会话：杀 RazerAppEngine → 开抓包 → 起 Synapse → 打开设备页
+   操作（它只在需要时才开厂商 GATT 会话）。**探针**：`razer-taskbar.exe --ble-vendor`（重放）/
+   `--sweep`（get 半区只读枚举）/ `--raw=LEN:PAGE:ID:PARAM[:hex]`（单发，LEN≠0 需 `--yes-i-know`）/
+   `--power`（生产 TryReadPower 自检）。
+
+   **键盘本地开关对主机不可见**：FN+ESC（节能开关）连按两次，通道所有寄存器零变化——
+   纯固件行为，别指望从主机读它。
 2. **HID Report Map 的厂商 usage page（0xFF00+）**：无。preparsed caps 显示 BLE collections
    只有标准页（键盘 0x06/鼠标 0x02/consumer 0x0C + 页 0x80、0x00 两段杂项，feature 最长
    3 字节）——**没有 90 字节厂商 feature，也没有标准化 Battery Strength（0x06 页 usage 0x20）**。
    0x1812 HID 服务的特征（含 Report Map 0x2A4B）被 Windows HID 栈独占，GATT 直读恒
    AccessDenied，这是 HOGP 的设计行为（描述符只能走 HidD_GetPreparsedData）。
+   另观测：HOGP 内某特征句柄（0x1B）周期性发**空通知**（5-8 连发、间隔 100-300ms，
+   约 2-3 分钟一波），内容恒空、含义未明（疑似状态广播），不影响本挂件。
 
 探针 BLE 段（`--hid-probe`）现 dump 全部 GATT 服务/特征（含属性位与值；Uncached 失败
 回退 Cached）。标准服务一览：0x1800（名"Joro"/外观 0x03C1/连接参数）、0x1801（GATT）、
 0x180A（Manufacturer="Razer"+PnP ID `028E06CE02…`）、0x180F（BAS，Read+Notify）。
-- **无充电标志**：GATT BAS 只有电量。BT+线同时（边充边用）时 `IsCharging` 未知，
-  `Commit` 会保留有线读数的充电状态不被 BLE 读数覆盖。
+- **充电标志现状**：厂商通道可用时充电位来自 (05,85)；通道被占回退 BAS（无充电）+
+  心跳 `chargingStatus`。`Commit` 仍保留有线读数的充电状态不被 BLE 读数覆盖。
 - 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——2 轮后判离线。
 
 ## get 半区全段扫描（2026-09-07 真机，`--hid-scan`，结果 hid-scan.log）

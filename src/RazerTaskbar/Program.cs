@@ -25,6 +25,14 @@ internal static class Program
             return HidProbe.Run(args);
         }
 
+        // Standalone BLE vendor-channel probe (--ble-vendor): replay/sweep the
+        // Razer private GATT command service. Needs Synapse stopped (it holds
+        // the channel); read-only unless explicitly overridden.
+        if (args.Contains("--ble-vendor"))
+        {
+            return BleVendorProbe.Run(args);
+        }
+
         // Single instance (port of find_existing_instance): the overlay is a
         // findable top-level window; embedded children need the enum fallback.
         if (SingleInstance.AnotherInstanceRunning())
