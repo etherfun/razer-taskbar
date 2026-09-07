@@ -170,6 +170,7 @@ public static class ConfigExt
         SynapseVersion = c.SynapseVersion,
         BatterySource = c.BatterySource,
         WidgetSide = c.WidgetSide,
+        EmbedIntoWidgetsSpace = c.EmbedIntoWidgetsSpace,
         AvoidOverlapWithWidgets = c.AvoidOverlapWithWidgets,
         TaskbarLeftSpaceWin11 = c.TaskbarLeftSpaceWin11,
         TaskbarRightSpaceWin11 = c.TaskbarRightSpaceWin11,

@@ -40,7 +40,7 @@ cargo test --quiet      # 单元测试（battery / watcher 解析规则）
 ## 配置速览
 
 - 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `serde(default)` 回填。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：优先 USB HID 直读电量；蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS）、无 HID/BLE 设备回退日志解析，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，C# 双层字形渲染）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：优先 USB HID 直读电量；蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS）、无 HID/BLE 设备回退日志解析，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`embed_into_widgets_space`（默认 false；开启后挂件嵌入任务栏小组件按钮内部空位并忽略 widget_side，旧值 widget_side=widgets 载入时自动归一为本开关）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，C# 双层字形渲染）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
 - 自启动：`HKCU\...\Run\RazerTaskbar`，由菜单切换同步。
 

@@ -113,6 +113,7 @@ public static class Win32Consts
     // UIA
     public const uint UIA_AUTOMATION_ID_PROPERTY_ID = 30011;
     public const uint TREE_SCOPE_DESCENDANTS = 4;
+    public const int UIA_TEXT_CONTROL_TYPE_ID = 50020;
 }
 
 [StructLayout(LayoutKind.Sequential)]

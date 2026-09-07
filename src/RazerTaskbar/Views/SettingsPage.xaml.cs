@@ -43,6 +43,8 @@ public sealed partial class SettingsPage : Page
             DescShownDevice.Text = I18n.Tr("Which device's battery the widget displays.");
             LblSide.Text = I18n.Tr("Widget side");
             DescSide.Text = I18n.Tr("Anchor the widget on the left or right side of the taskbar.");
+            LblEmbedWidgets.Text = I18n.Tr("Embed in widgets free space");
+            DescEmbedWidgets.Text = I18n.Tr("Place the widget inside the Windows widgets button's empty area (right of the weather) instead of beside it.");
             LblEst.Text = I18n.Tr("Show time remaining on widget");
             DescEst.Text = I18n.Tr("Second row with the predicted remaining / time-to-full duration.");
             LblColor.Text = I18n.Tr("Colored battery icon");
@@ -69,6 +71,7 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(ComboDevice, LblShownDevice.Text);
             AutomationProperties.SetName(ComboSide, LblSide.Text);
             AutomationProperties.SetName(SwitchEst, LblEst.Text);
+            AutomationProperties.SetName(SwitchEmbedWidgets, LblEmbedWidgets.Text);
             AutomationProperties.SetName(SwitchColor, LblColor.Text);
             AutomationProperties.SetName(SwitchTray, LblTray.Text);
             AutomationProperties.SetName(SwitchHover, LblHover.Text);
@@ -102,6 +105,7 @@ public sealed partial class SettingsPage : Page
 
             // Toggles.
             SwitchEst.IsOn = cfg.ShowEstimatedTime;
+            SwitchEmbedWidgets.IsOn = cfg.EmbedIntoWidgetsSpace;
             SwitchColor.IsOn = cfg.ColorBatteryIcon;
             SwitchTray.IsOn = cfg.ShowTrayIcon;
             SwitchHover.IsOn = cfg.HoverDevices;
@@ -167,6 +171,17 @@ public sealed partial class SettingsPage : Page
         string side = ComboSide.SelectedIndex == 0 ? "left" : "right";
         AppState.PostModifyConfig(c => c.WidgetSide = side);
         AppState.PostReposition();
+    }
+
+    private void SwitchEmbedWidgets_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress)
+        {
+            return;
+        }
+        bool on = SwitchEmbedWidgets.IsOn;
+        AppState.PostModifyConfig(c => c.EmbedIntoWidgetsSpace = on);
+        AppState.PostReposition(); // anchor depends on the toggle
     }
 
     private void SwitchEst_Toggled(object sender, RoutedEventArgs e)

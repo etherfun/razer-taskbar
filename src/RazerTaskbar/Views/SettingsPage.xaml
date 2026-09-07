@@ -42,6 +42,19 @@
                         <ComboBox x:Name="ComboSide" Grid.Column="1" Width="140" VerticalAlignment="Center"
                                   SelectionChanged="Side_SelectionChanged" />
                     </Grid>
+                    <!-- Embed in widgets free space -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblEmbedWidgets" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescEmbedWidgets" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchEmbedWidgets" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchEmbedWidgets_Toggled" />
+                    </Grid>
                     <!-- Show estimated time -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>

@@ -108,6 +108,28 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
   右侧锚点;左缘的板由左侧 min_x 的 160px 禁区覆盖。实测 right→x=2068(紧贴托盘)、left→x=162。
 
 
+- **HID↔日志身份桥接(同一设备只出现一次)**:dongle 厂商序列号查询未应答时,HID 源以合成句柄
+  (`HID:{pid}`/`BLE:{mac}`,`HandleFor`)入库,与 Synapse 日志源的同一物理设备(真实序列号句柄)
+  形成两个条目——悬停面板出两行、历史记两条序列(2026-09-08 用户实报"鼠标出现两个":
+  Viper V3 HyperSpeed 同时有 `31000D44` 与 `HID:0088` 两行)。修复:`HidWatcher.ResolveIdentity`
+  (纯函数,有单测)把合成句柄读数并入同名真实序列号条目(HID 电量值优先,对应
+  battery_source=auto 的直读偏好)并删除陈旧合成条目;序列号正常应答或 Synapse 未运行时行为不变。
+  接受的边界:同型号两台设备且两台都解析不出序列号时会并成一行(序列号解析是常态,合成句柄是例外)。
+- **`embed_into_widgets_space`(C# 扩展,嵌入小组件按钮内部,设置页开关"嵌入小组件空余空间")**:
+  26340 实测 `WidgetsButton`
+  (UIA 矩形 2007-2159,紧邻 TrayNotifyWnd)内部天气文字(最右 Text 子元素右缘 x≈2075)到按钮右缘
+  之间有一段 OS 留空的内部区域(用户截图红框)。widgets 模式把挂件**居中**在该空位上:
+  UIA 查询除按钮矩形外还做按钮子树的有界 DFS(`ScanInnerTextRight`,ControlType==Text,
+  深度≤3/每层兄弟≤12)取天气文字右缘,`x = (textRight + boardRight)/2 + bias - w/2`,
+  其中 `bias = clamp((w - freeWidth)/4, 0, 16)`:墨迹通常比空位宽,精确居中会让鼠标图标压住
+  "多云"文字,向按钮右缘偏置(右缘是透明点击穿透区,可容忍悬出;左缘文字必须让开);文字扫描失败回退
+  按钮整体居中,板矩形缺失(TaskbarDa=0/UIA miss)回退右锚。挂件仍是 TOPMOST 点击穿透覆盖层,
+  不改 Windows 小组件本身。开关关闭时回到普通左/右锚点(小组件板恢复为禁区)。曾短暂以
+  `widget_side=widgets` 形式存在,Load() 时自动归一为本开关。板信息与避让共用同一 30s 缓存
+  (`WidgetsBoardInfo`,含 TextRight;`WidgetsButtonRect` 变为其 Rect 投影),`TaskbarCreated`
+  失效路径不变。
+
+
 - C# 版空闲内存约 100MB+ 量级(Rust 约 30MB):.NET 运行时 + WinUI 投影程序集;
   窗口惰性创建使 XAML 在首次打开前不加载。
 - 启动竞态三处已按 Rust 语义处理:WndProc 在 `_state` 赋值前到达(WM_NCCREATE)→ DefWindowProc;

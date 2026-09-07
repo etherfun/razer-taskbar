@@ -120,6 +120,8 @@ public static class I18n
         // Settings row descriptions
         "Which device's battery the widget displays." => "挂件显示哪台设备的电量。",
         "Anchor the widget on the left or right side of the taskbar." => "将挂件锚定在任务栏左侧或右侧。",
+        "Embed in widgets free space" => "嵌入小组件空余空间",
+        "Place the widget inside the Windows widgets button's empty area (right of the weather) instead of beside it." => "开启后挂件嵌入任务栏小组件按钮（天气）的空余区域内；关闭时在小组件外侧独立摆放。",
         "Second row with the predicted remaining / time-to-full duration." => "第二行显示预计剩余 / 充满时长。",
         "Charging / saver keep their state colors; this adds the green-to-red level gradient." => "充电/省电状态色始终显示；开启后普通模式电量按绿→红渐变着色。",
         "Notification-area icon with tooltip and menu." => "带提示与菜单的通知区图标。",

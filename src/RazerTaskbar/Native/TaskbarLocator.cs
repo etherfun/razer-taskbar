@@ -53,7 +53,8 @@ public static class TaskbarLocator
     /// <summary>Compute widget placement inside the taskbar band. Right side
     /// (default): `x = notify.left - w + 2`; the widgets board reserve is a
     /// hard limit. Left side: anchored after `Start`, keeping the reserved
-    /// icons zone.</summary>
+    /// icons zone. `embedWidgetsSpace`: sit inside the widgets button itself
+    /// (the empty area right of the weather text), overriding the side.</summary>
     public static Placement? ComputePlacement(
         IntPtr tray,
         int w,
@@ -63,7 +64,8 @@ public static class TaskbarLocator
         int offsetTop,
         int leftSpaceWin11,
         int rightSpaceFallback,
-        bool avoidWidgets)
+        bool avoidWidgets,
+        bool embedWidgetsSpace = false)
     {
         var kind = DetectKind(tray);
         var bar = WindowRect(tray);
@@ -93,8 +95,8 @@ public static class TaskbarLocator
             // inside the bridge. Its UIA rect is the ground truth; fall back
             // to the registry estimate only when UIA is unavailable. The
             // reserve is UNCONDITIONAL — the board is OS chrome.
-            var board = WidgetsButtonRect();
-            int? boardLeft = board is { } boardRect ? boardRect.Left - barRect.Left : null;
+            var boardInfo = WidgetsBoardInfo();
+            int? boardLeft = boardInfo is { } wbRect ? wbRect.Rect.Left - barRect.Left : null;
             int startLeft = start is { } s ? s.Left - barRect.Left : 0;
             int startW = start is { } s2 ? s2.Right - s2.Left : 0;
             int minX = startLeft + startW + 2 + WidgetsZoneWidth();
@@ -120,13 +122,44 @@ public static class TaskbarLocator
                 Log.Info("placement: " + diag);
                 _lastPlacementDiag = diag;
             }
-            int x = AnchorXWin11(side, maxRight - 2, minX, w) + offsetLeft;
-            // The board reserve is a hard floor for LEFT-anchored widgets:
-            // clamp() alone could push us back onto the weather board when
-            // the band is crowded, so re-assert min_x afterwards.
-            if (side == "left")
+            int x;
+            if (embedWidgetsSpace)
             {
-                x = Math.Max(x, minX);
+                // Inside the widgets button: center the widget over the
+                // button's free inner area — right of the weather label (UIA
+                // text extent) and left of the button's right edge, where the
+                // OS leaves the button itself empty. min_x / the board reserve
+                // deliberately do not apply — overlapping the board is the
+                // point. Without a board rect (TaskbarDa=0, UIA miss) fall
+                // back to the right anchor.
+                if (boardInfo is { } wb && wb.IsValid)
+                {
+                    int freeLeft = wb.TextRight > wb.Rect.Left ? wb.TextRight : wb.Rect.Left;
+                    int freeWidth = wb.Rect.Right - freeLeft;
+                    int freeCenter = (freeLeft + wb.Rect.Right) / 2 - barRect.Left;
+                    // The ink (centered inside the window) usually runs wider
+                    // than the free area, and exact centering collides with
+                    // the weather label on the left. Bias toward the button's
+                    // right edge: the chevron side tolerates a transparent
+                    // (click-through) overhang, the label side does not.
+                    int bias = Math.Clamp((w - freeWidth) / 4, 0, 16);
+                    x = freeCenter + bias - w / 2 + offsetLeft;
+                }
+                else
+                {
+                    x = notifyLeft - w + 2 + offsetLeft;
+                }
+            }
+            else
+            {
+                x = AnchorXWin11(side, maxRight - 2, minX, w) + offsetLeft;
+                // The board reserve is a hard floor for LEFT-anchored widgets:
+                // clamp() alone could push us back onto the weather board when
+                // the band is crowded, so re-assert min_x afterwards.
+                if (side == "left")
+                {
+                    x = Math.Max(x, minX);
+                }
             }
             x = Math.Clamp(x, 2, Math.Max(barW - w - 2, 2));
 
@@ -165,9 +198,17 @@ public static class TaskbarLocator
 
     // — Widgets board (weather) rect cache —
 
+    /// <summary>Geometry of the Win11 widgets button. `TextRight` is the
+    /// screen x of the rightmost text inside the button (the weather label) —
+    /// the free inner area the "widgets" side mode centers over starts there.</summary>
+    public readonly record struct WidgetsBoard(RECT Rect, int TextRight)
+    {
+        public bool IsValid => Rect.Right - Rect.Left > 0 && Rect.Bottom - Rect.Top > 0;
+    }
+
     private sealed class WidgetsRectCache
     {
-        public RECT? Rect;
+        public WidgetsBoard? Board;
         /// <summary>The board sits just left of TrayNotifyWnd: a changed notify
         /// edge means the board moved, so the cache must not survive it.</summary>
         public int NotifyLeft;
@@ -194,7 +235,7 @@ public static class TaskbarLocator
     /// UIA. The board is NOT an HWND occupant; UIA is the only reliable source.
     /// Cached for WidgetsCacheTtl or until the notify edge shifts. When the
     /// board is disabled (registry TaskbarDa=0) the search is skipped.</summary>
-    public static RECT? WidgetsButtonRect()
+    public static WidgetsBoard? WidgetsBoardInfo()
     {
         // Registry first: with the board off, UIA would report nothing — skip
         // the search (registry flips are picked up live on the next placement).
@@ -216,21 +257,26 @@ public static class TaskbarLocator
         {
             if (_widgetsCache is { } c && c.NotifyLeft == notifyLeft && c.Seen.Elapsed < WidgetsCacheTtl)
             {
-                return c.Rect;
+                return c.Board;
             }
         }
-        var rect = WidgetsButtonRectUia();
+        var board = WidgetsBoardUia();
         lock (WidgetsCacheLock)
         {
-            _widgetsCache = new WidgetsRectCache { Rect = rect, NotifyLeft = notifyLeft };
+            _widgetsCache = new WidgetsRectCache { Board = board, NotifyLeft = notifyLeft };
         }
-        return rect;
+        return board;
     }
 
-    /// <summary>Uncached UIA search for the `WidgetsButton` rect. Engine-side
-    /// descendant search: FindFirst pushes the traversal into the provider,
-    /// which keeps working when the walker view does not (26340 observation).</summary>
-    private static RECT? WidgetsButtonRectUia()
+    /// <summary>Board rect only — the avoid-overlap consumers' view.</summary>
+    public static RECT? WidgetsButtonRect() => WidgetsBoardInfo()?.Rect;
+
+    /// <summary>Uncached UIA search for the `WidgetsButton` rect plus its
+    /// inner text extent. Engine-side descendant search: FindFirst pushes the
+    /// traversal into the provider, which keeps working when the walker view
+    /// does not (26340 observation). The text scan only walks the button's
+    /// own small subtree.</summary>
+    private static WidgetsBoard? WidgetsBoardUia()
     {
         try
         {
@@ -250,6 +296,11 @@ public static class TaskbarLocator
                 "WidgetsButton",
                 out var condition);
             root.FindFirst(Win32Consts.TREE_SCOPE_DESCENDANTS, condition, out var el);
+            if (el is null)
+            {
+                Log.Info("WidgetsButton not found via UIA");
+                return null;
+            }
             el.GetCurrentBoundingRectangle(out var r);
             var rect = new RECT
             {
@@ -259,17 +310,67 @@ public static class TaskbarLocator
                 Bottom = r.bottom,
             };
             el.GetCurrentName(out var name);
-            Log.Info($"WidgetsButton found: name=\"{name}\" rect=({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom})");
-            if (rect.Right - rect.Left <= 0 || rect.Bottom - rect.Top <= 0)
+            int textRight = ScanInnerTextRight(uia, el);
+            Log.Info($"WidgetsButton found: name=\"{name}\" rect=({rect.Left},{rect.Top})-({rect.Right},{rect.Bottom}) textRight={textRight}");
+            if (!new WidgetsBoard(rect, textRight).IsValid)
             {
                 DumpTaskbarTree(uia, root);
             }
-            return rect;
+            return new WidgetsBoard(rect, textRight);
         }
         catch (Exception)
         {
             return null;
         }
+    }
+
+    /// <summary>Rightmost screen x over the Text elements inside the widgets
+    /// button (the weather label "26°C / 多云"). Bounded DFS over the small
+    /// subtree; any interop failure just keeps the partial result.</summary>
+    private static int ScanInnerTextRight(Interop.IUIAutomation uia, Interop.IUIAutomationElement button)
+    {
+        int textRight = 0;
+        try
+        {
+            uia.GetControlViewWalker(out var walker);
+            var stack = new List<Interop.IUIAutomationElement> { button };
+            int guard = 0;
+            while (stack.Count > 0 && guard < 24)
+            {
+                var cur = stack[^1];
+                stack.RemoveAt(stack.Count - 1);
+                guard++;
+                try
+                {
+                    cur.GetCurrentControlType(out var ct);
+                    if (ct == Win32Consts.UIA_TEXT_CONTROL_TYPE_ID)
+                    {
+                        cur.GetCurrentBoundingRectangle(out var tr);
+                        if (tr.right - tr.left > 0 && tr.right > textRight)
+                        {
+                            textRight = tr.right;
+                        }
+                    }
+                    walker.GetFirstChildElement(cur, out var child);
+                    int siblings = 0;
+                    while (child is not null && siblings < 12)
+                    {
+                        siblings++;
+                        stack.Add(child);
+                        walker.GetNextSiblingElement(child, out child);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Dead element / no children — continue with the rest.
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Partial result is fine: placement falls back to the button rect.
+        }
+        return textRight;
     }
 
     private static bool _treeDumped;

@@ -33,6 +33,12 @@ public sealed class Config
     [JsonPropertyName("widget_side")]
     public string WidgetSide { get; set; } = "right";
 
+    /// <summary>Sit inside the Win11 widgets button's free inner area (right
+    /// of the weather label) instead of anchoring to a taskbar side;
+    /// `widget_side` is ignored while set.</summary>
+    [JsonPropertyName("embed_into_widgets_space")]
+    public bool EmbedIntoWidgetsSpace { get; set; }
+
     [JsonPropertyName("avoid_overlap_with_widgets")]
     public bool AvoidOverlapWithWidgets { get; set; } = true;
 
@@ -136,6 +142,13 @@ public static class ConfigService
         if (cfg.HistoryPollIntervalSecs == 0)
         {
             cfg.HistoryPollIntervalSecs = 5;
+        }
+        // The widgets-space anchor started life as a `widget_side` value;
+        // normalize it into the dedicated toggle (written back on next save).
+        if (cfg.WidgetSide == "widgets")
+        {
+            cfg.WidgetSide = "right";
+            cfg.EmbedIntoWidgetsSpace = true;
         }
         return cfg;
     }

@@ -213,7 +213,8 @@ public static class WidgetWindow
             config.WindowOffsetTop,
             config.TaskbarLeftSpaceWin11,
             config.TaskbarRightSpaceWin11,
-            config.AvoidOverlapWithWidgets);
+            config.AvoidOverlapWithWidgets,
+            config.EmbedIntoWidgetsSpace);
         if (pl is not { } placement)
         {
             return;
