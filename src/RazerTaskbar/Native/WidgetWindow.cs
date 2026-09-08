@@ -109,6 +109,11 @@ public static class WidgetWindow
         public Stopwatch? LastCoveredLog;
         public bool Embedded;
         public bool EmbedFailed;
+        /// <summary>Click shield currently applied to the presented frame
+        /// (embed_into_widgets_space). Tracked so a flip forces a repaint:
+        /// the alpha floor lives in the presented DIB, and Paint's signature
+        /// dedupe would otherwise never re-present it.</summary>
+        public bool ClickShield;
         // — Cross-fade transition (overlay/ULW presentation only) —
         /// <summary>Premultiplied previous / new frame; both null while idle.</summary>
         public byte[]? FadePrev;
@@ -378,8 +383,9 @@ public static class WidgetWindow
         PatBlt(st.MemDc, 0, 0, st.MemW, st.MemH, BLACKNESS);
         // AlphaPresent pokes the band so the invisible frame is what gets
         // snapshotted, then give DWM a beat to present it before the window
-        // (and its surface) disappears.
-        AlphaPresent(st, st.Hwnd);
+        // (and its surface) disappears. No alpha floor: the ghost frame must
+        // stay fully alpha-0 — invisible AND click-through.
+        AlphaPresent(st, st.Hwnd, hitFloor: false);
         System.Threading.Thread.Sleep(120);
     }
 
@@ -678,8 +684,18 @@ public static class WidgetWindow
         }
         // Taskbar-Lyrics answers WM_NCHITTEST with HTTRANSPARENT so the
         // overlay never steals taskbar clicks; the tray icon carries the menu.
+        // Click-shield exception (embed_into_widgets_space): over the widgets
+        // button the widget takes the hits instead, so clicks on the button's
+        // free inner area never open the widgets board — DefWindowProc gives
+        // HTCLIENT and the mouse messages are then simply not handled. The
+        // alpha floor in AlphaPresent covers the fully transparent pixels
+        // that ULW hit-testing waves through regardless of this handler.
         if (msg == WM_NCHITTEST)
         {
+            if (ClickShield(hwnd))
+            {
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
             return (IntPtr)HTTRANSPARENT;
         }
         if (msg == WM_DESTROY)
@@ -734,6 +750,19 @@ public static class WidgetWindow
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    /// <summary>Click shield (embed_into_widgets_space): the widget occupies
+    /// the widgets button's free inner area, so it takes the mouse instead of
+    /// letting clicks fall through and open the widgets board. Two gates must
+    /// agree — WM_NCHITTEST (DefWindowProc → HTCLIENT) and the alpha floor in
+    /// AlphaPresent (ULW hit-testing is per pixel). Only the display window
+    /// shields; the anchor and the 1x1 poke helper share this wndproc.</summary>
+    private static bool ClickShield(IntPtr hwnd)
+    {
+        var st = _state;
+        return st is not null && hwnd == st.Hwnd
+            && AppState.Instance.ConfigSnapshot().EmbedIntoWidgetsSpace;
     }
 
     /// <summary>`true` while Shell_TrayWnd sits ABOVE our overlay — the
@@ -867,6 +896,14 @@ public static class WidgetWindow
             }
         }
         var sig = new PaintSig(topLabel, bottomLabel ?? "", level, charging, saver, connected, w, h);
+        // A click-shield flip (settings toggle) must re-present even when the
+        // content is unchanged: the alpha floor lives in the presented frame.
+        bool shield = ClickShield(hwnd);
+        if (st.ClickShield != shield)
+        {
+            st.ClickShield = shield;
+            st.PaintedSig = null;
+        }
         if (st.PaintedSig == sig)
         {
             // Nothing visually different; still validate the update region so
@@ -999,8 +1036,13 @@ public static class WidgetWindow
     /// is color*coverage and the coverage (== premultiplied alpha) is
     /// max(r,g,b). White text, gray icons and the tinted battery glyph all
     /// then blend against the REAL backdrop instead of the old black key;
-    /// untouched black pixels become fully transparent.</summary>
-    private static void Premultiply(WidgetState st)
+    /// untouched black pixels become fully transparent. With
+    /// <paramref name="alphaFloor"/> those untouched pixels are lifted to
+    /// alpha 1 instead — premultiplied (0,0,0,1) composites as 0.4% black,
+    /// visually nothing, but ULW hit-testing is per pixel and waves alpha-0
+    /// pixels through to the window below no matter what WM_NCHITTEST
+    /// answers, so the click shield needs every pixel hit-testable.</summary>
+    private static void Premultiply(WidgetState st, bool alphaFloor = false)
     {
         int bytes = st.MemW * st.MemH * 4;
         var buf = new byte[bytes];
@@ -1008,7 +1050,12 @@ public static class WidgetWindow
         for (int i = 0; i + 3 < bytes; i += 4)
         {
             byte b = buf[i], g = buf[i + 1], r = buf[i + 2];
-            buf[i + 3] = Math.Max(b, Math.Max(g, r));
+            byte a = Math.Max(b, Math.Max(g, r));
+            if (alphaFloor && a == 0)
+            {
+                a = 1;
+            }
+            buf[i + 3] = a;
         }
         System.Runtime.InteropServices.Marshal.Copy(buf, 0, st.MemBits, bytes);
     }
@@ -1085,10 +1132,12 @@ public static class WidgetWindow
         EndFade(_state);
     }
 
-    /// <summary>Hand the current DIB frame to DWM via UpdateLayeredWindow.</summary>
-    private static void AlphaPresent(WidgetState st, IntPtr hwnd)
+    /// <summary>Hand the current DIB frame to DWM via UpdateLayeredWindow.
+    /// `hitFloor: false` (ghost frames) keeps every pixel at alpha 0 —
+    /// invisible and click-through even under the click shield.</summary>
+    private static void AlphaPresent(WidgetState st, IntPtr hwnd, bool hitFloor = true)
     {
-        Premultiply(st);
+        Premultiply(st, hitFloor && ClickShield(hwnd));
 
         var dst = new POINT();
         if (TaskbarLocator.WindowRect(hwnd) is { } wr)
