@@ -86,6 +86,7 @@ public static class Win32Consts
     public const uint BLACKNESS = 0x42;
     public const uint BI_RGB = 0;
     public const uint DIB_RGB_COLORS = 0;
+    public const uint OBJ_FONT = 6;
     public const int NULL_BRUSH = 5;
     public const uint GDI_ERROR = 0xFFFF_FFFF;
     public const uint GGO_METRICS = 0;
@@ -527,6 +528,9 @@ public static class Gdi32
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern bool GetTextMetricsW(IntPtr hdc, out TEXTMETRICW lptm);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr GetCurrentObject(IntPtr hdc, uint uType);
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern uint GetGlyphOutlineW(IntPtr hdc, uint uChar, uint fuFormat, out GLYPHMETRICS lpgm, uint cjBuffer, IntPtr lpvBuffer, ref MAT2 lpmat2);

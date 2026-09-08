@@ -1210,8 +1210,12 @@ public static class WidgetWindow
             const uint fgColor = 0x00FF_FFFF;
             const uint dim = 0x00B0B0B0;
 
-            // Native Win11 glyphs: Segoe Fluent Icons battery; icon fonts snap
-            // to Microsoft's magic pixel sizes for crisp rendering.
+            // Native Win11 glyphs: Segoe Fluent Icons battery; icon fonts
+            // render crisply only at Microsoft's recommended sizes
+            // (16/20/24/32/40/48/64 — off-size renders come out blurry, per
+            // the icon font docs), so every icon box height goes through
+            // SnapSize: the battery at 20px, the status/est icons and the
+            // type icon at 16px.
             int iconH = DeviceIcons.SnapSize((int)MathF.Round(20.0f * scale));
             var hiconFont = DeviceIcons.IconFont(iconH);
             var hfont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_SEMIBOLD);
@@ -1290,7 +1294,7 @@ public static class WidgetWindow
             // device is shown ("--").
             int gap = (int)MathF.Round(5.0f * scale);
             var kind = device?.Kind;
-            int kindH = (int)MathF.Round(14.0f * scale);
+            int kindH = DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale));
             int kindW = kind is { } k ? DeviceIcons.WidthFor(hdc, kindH, k) : 0;
             int kindGap = kind is not null ? gap : 0;
             int groupX, iconX, textX, estIconX, estTextX;

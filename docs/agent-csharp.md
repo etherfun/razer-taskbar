@@ -111,6 +111,15 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 
 ## 已知差异 / 注意
 
+- **墨迹居中/测量走渲染实况(2026-09-09,用户实报"换字形后竖向居中不可用")**:图标字体的
+  声明度量(GGO_METRICS)与实际光栅不符——E850 电池字形声明 8px、实际渲染 10px@20px
+  (旧 EBA0 同样 12 vs 14),且图标字体行盒为纯 ascent(desc=0);行高收紧(窗口贴墨迹)后
+  GGO 居中的 1~2px 偏差变得可见。`GdiText.InkCenterDelta`/`InkHeight` 改为把文本用调用方
+  DC 的字体渲染进内存 DIB 后扫描实际墨迹行(单字符按 (字号,字符) 缓存,多字符标签直算,
+  GGO 仅作 InkHeight 兜底);`GetCurrentObject/OBJ_FONT` 为本次新增 P/Invoke。类型图标盒高
+  `kindH` 也走 `SnapSize` 吸附(微软图标字体推荐字号 16/20/24/32/40/48/64,偏离会模糊;
+  96 DPI 下 14→16),电池 20px、状态/预计图标 16px 均已吸附。
+
 - **ReboundFilter(弛豫回弹剔除,2026-09-08 用户实报案例)**:无线设备静置后电芯电压弛豫
   (端电压向 OCV 回升),电压式电量计唤醒时报高读数——实测鼠标 03:32 使用中 61% →
   06:56 静置后 65% → 07:48 恢复使用跌回 61%(BU-903:电压式 SoC 需数小时静置才准)。
