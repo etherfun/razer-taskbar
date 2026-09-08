@@ -13,19 +13,24 @@ public sealed class BatteryTests
     [Fact]
     public void BatteryGlyphSeriesMapping()
     {
-        // Normal: EBA0-EBAA, one glyph per 10% (EBAA is truly full).
-        Assert.Equal('\uEBA0', BatteryGlyphs.BatteryGlyph(0, BatteryGlyphState.Normal));
-        Assert.Equal('\uEBA7', BatteryGlyphs.BatteryGlyph(72, BatteryGlyphState.Normal));
-        Assert.Equal('\uEBAA', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Normal));
-        // Charging / saver: 11-glyph series, 100% hits the last one.
-        Assert.Equal('\uEBAB', BatteryGlyphs.BatteryGlyph(0, BatteryGlyphState.Charging));
-        Assert.Equal('\uEBB2', BatteryGlyphs.BatteryGlyph(72, BatteryGlyphState.Charging));
-        Assert.Equal('\uEBB5', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Charging));
-        Assert.Equal('\uEBB9', BatteryGlyphs.BatteryGlyph(30, BatteryGlyphState.Saver));
-        Assert.Equal('\uEBC0', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Saver));
+        // Normal: E850-E859 + E83F, one glyph per 10% (E83F is truly full).
+        Assert.Equal('\uE850', BatteryGlyphs.BatteryGlyph(0, BatteryGlyphState.Normal));
+        Assert.Equal('\uE857', BatteryGlyphs.BatteryGlyph(72, BatteryGlyphState.Normal));
+        Assert.Equal('\uE83F', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Normal));
+        // Charging / saver: 11-glyph series, the tail steps sit at detached
+        // codepoints (Charging9/10 = E83E/EA93, Saver9/10 = EA94/EA95).
+        Assert.Equal('\uE85A', BatteryGlyphs.BatteryGlyph(0, BatteryGlyphState.Charging));
+        Assert.Equal('\uE861', BatteryGlyphs.BatteryGlyph(72, BatteryGlyphState.Charging));
+        Assert.Equal('\uE83E', BatteryGlyphs.BatteryGlyph(90, BatteryGlyphState.Charging));
+        Assert.Equal('\uEA93', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Charging));
+        Assert.Equal('\uE866', BatteryGlyphs.BatteryGlyph(30, BatteryGlyphState.Saver));
+        Assert.Equal('\uEA94', BatteryGlyphs.BatteryGlyph(90, BatteryGlyphState.Saver));
+        Assert.Equal('\uEA95', BatteryGlyphs.BatteryGlyph(100, BatteryGlyphState.Saver));
+        // Normal stays contiguous through 90%: E859.
+        Assert.Equal('\uE859', BatteryGlyphs.BatteryGlyph(90, BatteryGlyphState.Normal));
         // Rounding: 0-4% stays on the empty glyph, 5% rounds up a step.
-        Assert.Equal('\uEBA0', BatteryGlyphs.BatteryGlyph(4, BatteryGlyphState.Normal));
-        Assert.Equal('\uEBA1', BatteryGlyphs.BatteryGlyph(5, BatteryGlyphState.Normal));
+        Assert.Equal('\uE850', BatteryGlyphs.BatteryGlyph(4, BatteryGlyphState.Normal));
+        Assert.Equal('\uE851', BatteryGlyphs.BatteryGlyph(5, BatteryGlyphState.Normal));
     }
 
     [Fact]
@@ -36,13 +41,13 @@ public sealed class BatteryTests
         // Disconnected rows draw the gray level glyph only.
         Assert.Null(BatteryGlyphs.StatusOverlayGlyph(false, false, false));
         Assert.Null(BatteryGlyphs.StatusOverlayGlyph(false, true, true));
-        // Plain discharge overlays the plain EBA0 outline (otherwise a high
-        // charge would read as a solid colored blob); charging: EBAB (bolt);
-        // saver wins over charging: EBB6 (leaf).
-        Assert.Equal('\uEBA0', BatteryGlyphs.StatusOverlayGlyph(true, false, false));
-        Assert.Equal('\uEBAB', BatteryGlyphs.StatusOverlayGlyph(true, false, true));
-        Assert.Equal('\uEBB6', BatteryGlyphs.StatusOverlayGlyph(true, true, false));
-        Assert.Equal('\uEBB6', BatteryGlyphs.StatusOverlayGlyph(true, true, true));
+        // Plain discharge overlays the plain E850 outline (otherwise a high
+        // charge would read as a solid colored blob); charging: E85A (bolt);
+        // saver wins over charging: E863 (leaf).
+        Assert.Equal('\uE850', BatteryGlyphs.StatusOverlayGlyph(true, false, false));
+        Assert.Equal('\uE85A', BatteryGlyphs.StatusOverlayGlyph(true, false, true));
+        Assert.Equal('\uE863', BatteryGlyphs.StatusOverlayGlyph(true, true, false));
+        Assert.Equal('\uE863', BatteryGlyphs.StatusOverlayGlyph(true, true, true));
     }
 
     [Fact]
@@ -51,11 +56,11 @@ public sealed class BatteryTests
         // Layer 1 must come from the same series as the status overlay: the
         // status glyphs cut their outline where the bolt/leaf crosses it,
         // and a normal-series outline underneath would peek through.
-        Assert.Equal('\uEBA5', BatteryGlyphs.LevelGlyph(50, true, false, false));
-        Assert.Equal('\uEBA5', BatteryGlyphs.LevelGlyph(50, false, true, true));
-        // Charging 50% = EBB0, saver 50% = EBBB; saver wins over charging.
-        Assert.Equal('\uEBB0', BatteryGlyphs.LevelGlyph(50, true, false, true));
-        Assert.Equal('\uEBBB', BatteryGlyphs.LevelGlyph(50, true, true, true));
+        Assert.Equal('\uE855', BatteryGlyphs.LevelGlyph(50, true, false, false));
+        Assert.Equal('\uE855', BatteryGlyphs.LevelGlyph(50, false, true, true));
+        // Charging 50% = E85F, saver 50% = E868; saver wins over charging.
+        Assert.Equal('\uE85F', BatteryGlyphs.LevelGlyph(50, true, false, true));
+        Assert.Equal('\uE868', BatteryGlyphs.LevelGlyph(50, true, true, true));
     }
 
     [Fact]

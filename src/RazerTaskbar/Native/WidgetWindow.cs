@@ -1161,7 +1161,7 @@ public static class WidgetWindow
             DrawTextW(hdc, wide, wide.Length, ref measure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
             int textW = Math.Max(measure.Right - measure.Left, 1);
             // Two-layer battery icon: layer 1 is the ACTIVE series' level
-            // glyph (charging bolt EBAB- / saver leaf EBB6-) tinted with
+            // glyph (charging bolt E85A- / saver leaf E863-) tinted with
             // the state color; layer 2 — the same series' 0% glyph drawn on
             // top in the default color — masks the tinted outline and
             // symbol, so only the fill is colored. Layer 1 must be the same
@@ -1169,7 +1169,7 @@ public static class WidgetWindow
             // where the bolt/leaf crosses it, and a normal-series outline
             // underneath would peek through those gaps. Every connected
             // device renders two-layer (plain discharge overlays the plain
-            // EBA0 outline, or a high charge would read as a solid colored
+            // E850 outline, or a high charge would read as a solid colored
             // blob); disconnected draws the gray level glyph only.
             var iconCh = new[] { BatteryGlyphs.LevelGlyph(level, connected, saver, charging) };
             var iconMeasure = new RECT();

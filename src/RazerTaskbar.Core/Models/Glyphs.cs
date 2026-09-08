@@ -6,33 +6,44 @@ namespace RazerTaskbar.Core;
 
 public enum BatteryGlyphState
 {
-    /// <summary>EBA0-EBAA: normal level batteries (0% .. 100%).</summary>
+    /// <summary>E850-E859 + E83F: normal level batteries (0% .. 100%).</summary>
     Normal,
-    /// <summary>EBAB-EBB5: charging batteries (bolt inside).</summary>
+    /// <summary>E85A-E862 + E83E/EA93: charging batteries (bolt inside).</summary>
     Charging,
-    /// <summary>EBB6-EBC0: battery-saver batteries (leaf inside).</summary>
+    /// <summary>E863-E86B + EA94/EA95: battery-saver batteries (leaf inside).</summary>
     Saver,
 }
 
 public static class BatteryGlyphs
 {
+    // The three 11-glyph level series (one per 10% step) are contiguous
+    // from 0% up to 80/90% only — the last steps sit at detached codepoints
+    // (Battery10=E83F, Charging9/10=E83E/EA93, Saver9/10=EA94/EA95), so the
+    // mapping is a table, not base+idx arithmetic.
+    private static readonly int[] NormalSeries =
+        { 0xE850, 0xE851, 0xE852, 0xE853, 0xE854, 0xE855, 0xE856, 0xE857, 0xE858, 0xE859, 0xE83F };
+    private static readonly int[] ChargingSeries =
+        { 0xE85A, 0xE85B, 0xE85C, 0xE85D, 0xE85E, 0xE85F, 0xE860, 0xE861, 0xE862, 0xE83E, 0xEA93 };
+    private static readonly int[] SaverSeries =
+        { 0xE863, 0xE864, 0xE865, 0xE866, 0xE867, 0xE868, 0xE869, 0xE86A, 0xE86B, 0xEA94, 0xEA95 };
+
     /// <summary>Win11 battery glyph for `level` (0-100) in `state`.</summary>
     public static char BatteryGlyph(int level, BatteryGlyphState state)
     {
         int idx = (Math.Min(Math.Max(level, 0), 100) + 5) / 10; // 0..=10, rounded to 10%
-        int baseCp = state switch
+        int[] series = state switch
         {
-            BatteryGlyphState.Normal => 0xEBA0,
-            BatteryGlyphState.Charging => 0xEBAB,
-            _ => 0xEBB6,
+            BatteryGlyphState.Normal => NormalSeries,
+            BatteryGlyphState.Charging => ChargingSeries,
+            _ => SaverSeries,
         };
-        return (char)(baseCp + idx);
+        return (char)series[idx];
     }
 
     /// <summary>
     /// Layer 1 of the two-layer battery icon: the level glyph of the ACTIVE
-    /// series (charging bolt EBAB- / saver leaf EBB6-) to tint with the
-    /// state color; plain or disconnected devices get the normal EBA0-
+    /// series (charging bolt E85A- / saver leaf E863-) to tint with the
+    /// state color; plain or disconnected devices get the normal E850-
     /// series. Layer 1 must come from the same series as the status overlay:
     /// the status glyphs cut their outline where the bolt/leaf crosses it,
     /// so a normal-series outline underneath would peek through those gaps.
@@ -45,7 +56,7 @@ public static class BatteryGlyphs
 
     /// <summary>
     /// Layer 2 of the two-layer battery icon: the 0% glyph of the same
-    /// series as layer 1 (EBA0 plain outline / EBAB bolt / EBB6 leaf —
+    /// series as layer 1 (E850 plain outline / E85A bolt / E863 leaf —
     /// outline + symbol, empty fill). Drawn in the default color on top of
     /// the tinted <see cref="LevelGlyph"/> it masks the tinted outline, so
     /// only the fill keeps its color — every connected device (plain
