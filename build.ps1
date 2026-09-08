@@ -35,8 +35,22 @@ if ($wasRunning) {
     Start-Sleep -Milliseconds 800
 }
 
-# 2. Clean dist so publish cannot mix in stale files.
-if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+# 2. Clean dist so publish cannot mix in stale files. A held directory
+# handle (Explorer tree pane, AV scan) only blocks removing the directory
+# itself — an emptied dist is equivalent, so publish in place rather than
+# fail; only leftover files are fatal.
+if (Test-Path $dist) {
+    Remove-Item $dist -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $dist) {
+        $left = @(Get-ChildItem $dist -Force)
+        if ($left.Count -gt 0) { $left | Remove-Item -Recurse -Force }
+        if (@(Get-ChildItem $dist -Force).Count -gt 0) {
+            Write-Error 'dist is locked by another process and not empty; close the holder and retry'
+            exit 1
+        }
+        Write-Host 'dist dir handle is held but the folder is empty; publishing in place.'
+    }
+}
 
 # 3. Build + publish (publish implies build).
 dotnet publish $app -c Release -p:Platform=x64 -o $dist --nologo
