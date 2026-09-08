@@ -25,6 +25,9 @@ public sealed partial class MainWindow : Window
 
         // Reasonable minimums (viewer.rs: 920x660 default, 860x600 min).
         AppWindow.Resize(new Windows.Graphics.SizeInt32(980, 680));
+        // assets/app.ico is copied next to the exe (csproj None item); the
+        // taskbar / alt-tab button falls back to a generic icon otherwise.
+        AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "app.ico"));
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.PreferredMinimumWidth = 860;

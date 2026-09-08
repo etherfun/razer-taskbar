@@ -3,7 +3,8 @@
 Display the battery state of Razer products as a floating widget on the
 Windows taskbar — a click-through overlay, no PNG assets (a tray icon exists
 purely as a fallback menu entry point). C# / WinUI 3 implementation; the
-original Rust version lives in the git history.
+original Rust version lives in the git history. The only bundled image asset
+is the small app icon (`assets/app.ico`).
 
 Battery data is read **directly from the hardware** (`battery_source=auto`):
 USB HID vendor feature reports on the 2.4G dongle / cable, Razer's private
@@ -154,6 +155,29 @@ hover panel. The type comes from the Synapse V4 log's `category` field
 (MOUSE / KEYBOARD / HEADSET / …), falling back to product-name keywords for
 V3 logs and unknown categories.
 
+### App icon
+
+The exe / title-bar icon (`assets/app.ico`, 16–256 px) is the Razer
+triple-headed snake with a battery on a dark circular badge in the
+bottom-right corner, on a transparent background — the badge separates the
+battery from the snake and keeps it readable on both light and dark shells.
+Sizes are not a plain downscale: 48 px and up use the full composition, at
+32/24 px the battery + badge grow dominant while the snake shrinks, and the
+16 px icon is the battery alone (no badge — there is no snake to separate it
+from) — small sizes stay readable as a battery. It is composed per-size by
+`assets/make_icon.py`
+(Python + Pillow) from a 1280 px transparent render of the logo
+(`assets/snake-raw.png`); tweak the geometry and regenerate with:
+
+```powershell
+python assets/make_icon.py
+```
+
+The csproj embeds it via `<ApplicationIcon>` and copies it next to the exe so
+`MainWindow` can hand it to `AppWindow.SetIcon` (unpackaged apps have no
+package manifest to take the icon from). See [Disclaimer](#disclaimer) for
+the trademark situation.
+
 ## Menu (right-click the tray icon) & Settings window
 
 The overlay itself is click-through, so the tray icon carries the menu. It
@@ -290,3 +314,20 @@ own terms; attributions and license texts are collected in
   (Synapse log watcher, device-selection logic).
 * [OpenRazer](https://github.com/openrazer/openrazer) — GPL-2.0-or-later
   (USB HID protocol layer in `src/RazerTaskbar.Core/Hid/`).
+
+## Disclaimer
+
+This is an **unofficial** community tool. It is not affiliated with, endorsed
+by or sponsored by Razer Inc. "Razer" and the triple-headed snake logo are
+trademarks of Razer Inc., referenced here only to describe which hardware the
+tool works with.
+
+The app icon (`assets/app.ico`) incorporates the Razer snake logo, which
+remains the property of Razer Inc.; it is used without permission, for
+personal, non-commercial use only, and the icon's inclusion in this repository
+does not constitute a challenge to any Razer trademark or copyright. If you
+redistribute the project or prefer to avoid the trademark entirely, delete
+`assets/app.ico` (or replace it with your own) and drop the
+`<ApplicationIcon>` / `AppWindow.SetIcon` references in
+`src/RazerTaskbar/RazerTaskbar.csproj` and `MainWindow.xaml.cs` — the app
+builds and runs fine without it.

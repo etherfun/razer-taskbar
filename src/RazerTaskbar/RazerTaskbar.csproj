@@ -8,6 +8,7 @@
     <RootNamespace>RazerTaskbar</RootNamespace>
     <AssemblyName>razer-taskbar</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseWinUI>true</UseWinUI>
@@ -38,6 +39,12 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RazerTaskbar.Core\RazerTaskbar.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copied next to the exe so MainWindow can point AppWindow.Icon at it
+       (unpackaged apps have no package manifest to take the icon from). -->
+    <None Include="..\..\assets\app.ico" Link="app.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
