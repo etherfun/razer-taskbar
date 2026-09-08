@@ -12,7 +12,17 @@
 // - SpikeFilter (write time): an instantaneous jump (e.g. 65% → 100% for
 //   20s, seen live 2026-09-06) is held out of battery.db for 60s; falling
 //   back near the pre-jump level within the window drops the whole segment
-//   before it is ever recorded, expiry commits it as a real swap.
+//   before it is ever recorded, expiry commits it as a real swap. A segment
+//   that swings back across the jump (oscillation) is also dropped — that
+//   is the reconnect shape where the pre-jump anchor is a stale
+//   disconnected heartbeat (seen live 2026-09-08 06:56: 61% con=0 for 8
+//   minutes, reconnect first reports 100%, true level 65% — outside the ±3
+//   tolerance of the stale 61 — so expiry committed the glitch and its
+//   poisoned 100 anchor admitted the follow-up oscillation).
+// - Scrub (startup): CommittedGlitchTs applies the same retroactive rule to
+//   the loaded series — a suspect jump whose level fell back within 60s is
+//   deleted from battery.db and memory — healing rows recorded before the
+//   write-time guard existed or through its bugs.
 // - Prediction is a three-tier estimator:
 //     1. per-level transit profile: every session contributes its observed
 //        seconds-per-percent between successive high/low-water levels
@@ -156,6 +166,7 @@ public static class HistoryService
             _db = conn;
         }
         MergeAliasedRows();
+        ScrubGlitches();
     }
 
     /// <summary>Startup heal for identity pollution: one physical device can
@@ -263,6 +274,145 @@ public static class HistoryService
         catch (Exception e)
         {
             Log.Error($"history: alias merge failed ({src} -> {dst})", e);
+        }
+    }
+
+    /// <summary>Startup heal for committed glitch segments: rows recorded
+    /// before the write-time SpikeFilter existed (or through its stale-
+    /// anchor blind spot at reconnects) still sit in battery.db as 1-2
+    /// bogus spikes. Retroactively applies the same admission rule to the
+    /// loaded series — a suspect jump whose level fell back within the
+    /// grace window was never real (a swap moves once and stays) — and
+    /// deletes those rows from memory and the database.</summary>
+    private static void ScrubGlitches()
+    {
+        var doomed = new Dictionary<string, List<long>>();
+        lock (Sync)
+        {
+            foreach (var (h, hist) in _series)
+            {
+                var ts = CommittedGlitchTs(hist);
+                if (ts.Count > 0)
+                {
+                    doomed[h] = ts;
+                }
+            }
+        }
+        if (doomed.Count == 0)
+        {
+            return;
+        }
+        SqliteConnection? conn;
+        lock (DbLock)
+        {
+            conn = _db;
+        }
+        int removed = 0;
+        if (conn is not null)
+        {
+            foreach (var (h, ts) in doomed)
+            {
+                removed += DeleteSamples(conn, h, ts);
+            }
+        }
+        lock (Sync)
+        {
+            foreach (var (h, ts) in doomed)
+            {
+                if (_series.TryGetValue(h, out var hist))
+                {
+                    hist.RemoveAll(s => ts.Contains(s.Ts));
+                }
+            }
+        }
+        Log.Info($"history: scrubbed {removed} committed glitch sample(s) in {doomed.Count} series");
+    }
+
+    /// <summary>Pure rule for <see cref="ScrubGlitches"/>: timestamps of the
+    /// samples a series is better off without. A jump suspect under the
+    /// SpikeFilter admission rule whose level returns to near the anchor
+    /// level — or swings back across the jump — inside GraceSecs was a
+    /// reporting glitch; the jump rows up to (not including) the returning
+    /// sample are deleted, the returning sample stays (it is the device's
+    /// true reading). A jump with no fall-back inside the window is a real
+    /// swap/reconnect and is kept.</summary>
+    internal static List<long> CommittedGlitchTs(IReadOnlyList<Sample> hist)
+    {
+        var doomed = new List<long>();
+        int i = 0;
+        while (i + 1 < hist.Count)
+        {
+            var a = hist[i];
+            var b = hist[i + 1];
+            int rise = b.Level - a.Level;
+            bool suspect = Math.Abs(rise) >= SpikeFilter.JumpPct
+                || (!b.Charging && rise >= SpikeFilter.RiseSuspectPct);
+            if (!suspect)
+            {
+                i++;
+                continue;
+            }
+            int k = -1;
+            int peak = b.Level, trough = b.Level;
+            for (int m = i + 2; m < hist.Count; m++)
+            {
+                var r = hist[m];
+                if (r.Ts - b.Ts > SpikeFilter.GraceSecs)
+                {
+                    break; // window expired with the level still away: real jump
+                }
+                if (Math.Abs(r.Level - a.Level) <= SpikeFilter.TolerancePct)
+                {
+                    k = m;
+                    break;
+                }
+                if (!r.Connected)
+                {
+                    break; // a disconnect ends the hunt (oscillation needs live readings)
+                }
+                peak = Math.Max(peak, r.Level);
+                trough = Math.Min(trough, r.Level);
+                if (peak - trough >= SpikeFilter.JumpPct)
+                {
+                    k = m;
+                    break;
+                }
+            }
+            if (k < 0)
+            {
+                i++;
+                continue;
+            }
+            for (int m = i + 1; m < k; m++)
+            {
+                doomed.Add(hist[m].Ts);
+            }
+            i = k;
+        }
+        return doomed;
+    }
+
+    /// <summary>DB half of <see cref="ScrubGlitches"/> on an explicit
+    /// connection (testable against a scratch database).</summary>
+    internal static int DeleteSamples(SqliteConnection conn, string handle, IReadOnlyList<long> tss)
+    {
+        try
+        {
+            int n = 0;
+            foreach (var ts in tss)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "DELETE FROM samples WHERE handle = $h AND ts = $t";
+                cmd.Parameters.AddWithValue("$h", handle);
+                cmd.Parameters.AddWithValue("$t", ts);
+                n += cmd.ExecuteNonQuery();
+            }
+            return n;
+        }
+        catch (Exception e)
+        {
+            Log.Error($"history: glitch scrub failed ({handle})", e);
+            return 0;
         }
     }
 

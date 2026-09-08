@@ -99,23 +99,11 @@ public sealed class AppState
     /// position or width: side, avoid-overlap, estimated-time toggle).</summary>
     public static void RepositionWidget()
     {
-        var hwnd = WidgetThread.Hwnd;
-        if (hwnd == 0)
-        {
-            return;
-        }
-        WidgetWindow.PlaceWidget(hwnd);
-        Interop.User32.InvalidateRect(hwnd, 0, true);
+        WidgetWindow.PlaceWidget();
+        WidgetWindow.InvalidateDisplay();
     }
 
-    public static void InvalidateWidget()
-    {
-        var hwnd = WidgetThread.Hwnd;
-        if (hwnd != 0)
-        {
-            Interop.User32.InvalidateRect(hwnd, 0, true);
-        }
-    }
+    public static void InvalidateWidget() => WidgetWindow.InvalidateDisplay();
 
     /// <summary>Switch the displayed device ("" = auto). Stamps `is_selected`
     /// so the pick rule follows immediately (the watcher re-reads the config
@@ -150,6 +138,10 @@ public sealed class AppState
     /// baselines re-prime without spurious drop triggers).</summary>
     public static void PostResetModeState() => WidgetThread.Post(() => Instance.ModeState.Reset());
 
+    /// <summary>Transition toggle turned off mid-animation: stop blending on
+    /// the widget thread, keeping the currently presented frame.</summary>
+    public static void PostResetFade() => WidgetThread.Post(WidgetWindow.CancelFade);
+
     public static void PostReposition() => WidgetThread.Post(RepositionWidget);
 
     public static void PostTraySetEnabled(bool enabled) => WidgetThread.Post(() => TrayIcon.SetEnabled(enabled));
@@ -158,14 +150,7 @@ public sealed class AppState
 
     public static void PostTrayRefresh() => WidgetThread.Post(TrayIcon.Refresh);
 
-    public static void PostExit() => WidgetThread.Post(() =>
-    {
-        var hwnd = WidgetThread.Hwnd;
-        if (hwnd != 0)
-        {
-            Interop.User32.DestroyWindow(hwnd);
-        }
-    });
+    public static void PostExit() => WidgetThread.Post(WidgetWindow.ExitWidget);
 }
 
 public static class ConfigExt
@@ -193,6 +178,7 @@ public static class ConfigExt
         RecordBatteryHistory = c.RecordBatteryHistory,
         ShowEstimatedTime = c.ShowEstimatedTime,
         ColorBatteryIcon = c.ColorBatteryIcon,
+        FadeTransition = c.FadeTransition,
         HistoryPollIntervalSecs = c.HistoryPollIntervalSecs,
         Language = c.Language,
         EmbedIntoTaskbar = c.EmbedIntoTaskbar,

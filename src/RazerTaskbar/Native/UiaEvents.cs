@@ -17,18 +17,34 @@ public static class UiaEvents
 {
     private static readonly SemaphoreSlim RebindSignal = new(0);
 
+    /// <summary>Window that receives the layout notification. Mutable: the
+    /// display window is destroyed and recreated on embed-mode switches, so
+    /// Rebind() re-registers against the current value.</summary>
+    private static IntPtr _target;
+    private static uint _msg;
+
     /// <summary>Spawn the listener thread. `target` receives `msg` on every
     /// taskbar structure change. Signal Rebind() whenever TaskbarCreated is
     /// observed.</summary>
     public static void Spawn(IntPtr target, uint msg)
     {
-        var thread = new Thread(() => RunLoop(target, msg))
+        _target = target;
+        _msg = msg;
+        var thread = new Thread(() => RunLoop())
         {
             Name = "razer-uia-events",
             IsBackground = true,
         };
         thread.SetApartmentState(ApartmentState.MTA);
         thread.Start();
+    }
+
+    /// <summary>Retarget layout notifications to a new display window and
+    /// re-register the handler (embed-mode window recreation).</summary>
+    public static void Retarget(IntPtr target)
+    {
+        _target = target;
+        Rebind();
     }
 
     /// <summary>Wake the listener so it re-checks the taskbar HWND and
@@ -50,6 +66,7 @@ public static class UiaEvents
     private sealed class Registration
     {
         public required IntPtr Tray;
+        public required IntPtr Target;
         public required Interop.IUIAutomation Uia;
         public required Interop.IUIAutomationElement Element;
         public required Interop.IUIAutomationStructureChangedEventHandler Handler;
@@ -67,7 +84,7 @@ public static class UiaEvents
         }
     }
 
-    private static void RunLoop(IntPtr target, uint msg)
+    private static void RunLoop()
     {
         var hr = CoInitializeEx(0, CoinitMultithreaded);
         if (hr < 0)
@@ -85,21 +102,22 @@ public static class UiaEvents
                 // Check/rebind FIRST, then wait: the first iteration registers
                 // immediately instead of waiting out the 30s idle timeout.
                 var tray = TaskbarLocator.FindShellTray();
+                var target = _target;
                 bool needRebind = (reg, tray) switch
                 {
                     (null, 0) => false,
-                    (null, _) => true,
+                    (null, _) => target != 0,
                     (_, 0) => false, // stale registration on a dead taskbar costs nothing
-                    ({ } r, _) when r.Tray != tray => true,
+                    ({ } r, _) when r.Tray != tray || r.Target != target => true,
                     _ => false,
                 };
                 if (needRebind)
                 {
                     reg?.Teardown();
                     reg = null;
-                    if (tray != 0)
+                    if (tray != 0 && target != 0)
                     {
-                        reg = Register(tray, target, msg);
+                        reg = Register(tray, target, _msg);
                     }
                 }
                 // Wake on rebind signal, or at least every 30s to notice the
@@ -132,7 +150,7 @@ public static class UiaEvents
             var handler = new StructureChangedHandler(target, msg);
             uia.AddStructureChangedEventHandler(element, TREE_SCOPE_DESCENDANTS, 0, handler);
             Console.Error.WriteLine("razer-taskbar: UIA structure listener registered");
-            return new Registration { Tray = tray, Uia = uia, Element = element, Handler = handler };
+            return new Registration { Tray = tray, Target = target, Uia = uia, Element = element, Handler = handler };
         }
         catch (Exception e)
         {

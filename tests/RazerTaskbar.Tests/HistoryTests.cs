@@ -86,6 +86,53 @@ public sealed class HistoryTests
     }
 
     [Fact]
+    public void SpikeFilterDropsReconnectGlitchWithStaleAnchor()
+    {
+        // Real failure from battery.db (2026-09-08 06:56, Viper
+        // 632516H31000044): 8 minutes of disconnected heartbeats at 61%,
+        // then the device reconnects through a flapping dongle — first
+        // reading 100%, true level 65 two polls later. 65 is outside the
+        // ±3 tolerance of the stale anchor 61, so expiry committed the
+        // glitch, and its poisoned 100 anchor then admitted the follow-up
+        // oscillation. The swing-back rule must drop the segment and trust
+        // nothing until the true level re-reports against the clean series.
+        var f = new SpikeFilter();
+        Assert.Equal(new[] { S(0, 61, false, false) }, f.Admit("v", S(0, 61, false, false), 61));
+        Assert.Empty(f.Admit("v", S(471, 100, false, true), 61)); // reconnect, bogus 100 — held
+        Assert.Empty(f.Admit("v", S(473, 65, false, true), 61));  // swings 100→65: glitch, trust nothing
+        Assert.Equal(new[] { S(474, 65, false, true) }, f.Admit("v", S(474, 65, false, true), 61));
+        // A later oscillation against the clean anchor drops via tolerance.
+        Assert.Empty(f.Admit("v", S(477, 100, false, true), 65));
+        Assert.Equal(new[] { S(478, 65, false, true) }, f.Admit("v", S(478, 65, false, true), 65));
+    }
+
+    [Fact]
+    public void SpikeFilterHoldsNearFullGlitchBelowJumpPct()
+    {
+        // 85% → 100% is only a 15-point jump — under JumpPct — but an
+        // instantaneous rise while discharging is never real: held, and the
+        // fall-back to the fresh anchor drops it. A genuine plug-in of the
+        // same size rises with the charging flag set and is not held.
+        var f = new SpikeFilter();
+        Assert.Equal(new[] { S(0, 85, false, true) }, f.Admit("n", S(0, 85, false, true), 85));
+        Assert.Empty(f.Admit("n", S(5, 100, false, true), 85));
+        Assert.Equal(new[] { S(10, 82, false, true) }, f.Admit("n", S(10, 82, false, true), 85));
+        Assert.Equal(new[] { S(20, 88, true, true) }, f.Admit("n", S(20, 88, true, true), 82));
+    }
+
+    [Fact]
+    public void SpikeFilterCommitsSmallRealSwapAfterWindow()
+    {
+        // A rise caught by the rise rule that never falls back is a real
+        // battery swap: the held backlog commits when the window expires.
+        var f = new SpikeFilter();
+        Assert.Equal(new[] { S(0, 20, false, true) }, f.Admit("s", S(0, 20, false, true), 20));
+        Assert.Empty(f.Admit("s", S(5, 26, false, true), 20));
+        var commit = f.Admit("s", S(70, 25, false, true), 20);
+        Assert.Equal(new[] { S(5, 26, false, true), S(70, 25, false, true) }, commit);
+    }
+
+    [Fact]
     public void LevelAnchorStartsAtCurrentLevel()
     {
         // Anchor = when the device reached its current level: the trailing

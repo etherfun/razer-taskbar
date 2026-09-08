@@ -43,6 +43,7 @@ public static class Win32Consts
 
     // Messages
     public const uint WM_DESTROY = 2;
+    public const uint WM_CLOSE = 0x0010;
     public const uint WM_PAINT = 0x0F;
     public const uint WM_COMMAND = 0x111;
     public const uint WM_TIMER = 0x113;
@@ -353,6 +354,9 @@ public static class User32
 
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);

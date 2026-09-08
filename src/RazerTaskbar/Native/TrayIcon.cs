@@ -116,9 +116,9 @@ public static class TrayIcon
     {
         if (enabled)
         {
-            if (_hwnd == 0 && WidgetThread.Hwnd != 0)
+            if (_hwnd == 0 && WidgetWindow.DisplayHwnd != 0)
             {
-                EnsureCreated(WidgetThread.Hwnd);
+                EnsureCreated(WidgetWindow.DisplayHwnd);
             }
             else
             {

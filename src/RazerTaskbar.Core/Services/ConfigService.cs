@@ -95,6 +95,12 @@ public sealed class Config
     [JsonPropertyName("color_battery_icon")]
     public bool ColorBatteryIcon { get; set; }
 
+    /// <summary>Cross-fade the widget when the displayed device changes
+    /// (rotate / drop-swap / selection switches). Works in both modes —
+    /// embed presents through the same ULW pipeline (docs/agent-embed.md).</summary>
+    [JsonPropertyName("fade_transition")]
+    public bool FadeTransition { get; set; } = true;
+
     /// <summary>Watcher cadence while recording is enabled — finer than the
     /// display poll so connect/charge/level transitions are timestamped
     /// precisely.</summary>

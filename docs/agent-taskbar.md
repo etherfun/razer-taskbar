@@ -41,12 +41,13 @@
 - 曾经实现过完整的 occupant 避让状态机（枚举子窗口、屏幕采样收紧 content rect、grace/hold/跳跃上限），但实测歌词窗内容秒级变化，反应式避让永远慢半拍且来回抖动；Lyricify 自身又无避让逻辑，僵局无解——2026-09 经用户确认整体移除。若未来要恢复，参考 git 历史（`2111fea` 及之前）。
 - 仍保留的边界：`TrayNotifyWnd`/`Start` 锚点约束，小组件板（天气）硬保留（XAML 内容 HWND 枚举不可见，经 UIA `WidgetsButton` 查询 + 注册表 `TaskbarDa` 门控，30s 缓存）。
 
-## 实验性嵌入模式（`embed_into_taskbar`，默认关）
+## 嵌入模式（`embed_into_taskbar`，默认关；embed v2 已在 C# 版实现）
 
-- **2026-09 在 Windows 26340（Insider）上确认失效**：子窗口存在（`EnumChildWindows` 可见、日志正常）但 DWM 不再合成带内分层子窗口的内容——无论新旧绘制代码均整窗不可见（对照实验：同机 overlay 模式渲染正常）。故本机应保持 `embed=false`；该模式留作未来 Windows 版本回测用。
-- `taskbar::set_taskbar_child`：Lyricify 任务栏歌词同款——跨进程 `SetParent` 进任务栏带（Win11 是 `Shell_TrayWnd`，Classic 是 `ReBarWindow32`），`WS_POPUP→WS_CHILD`、去 `WS_EX_TOPMOST`、保留 `WS_EX_LAYERED|NOACTIVATE`，并 `HWND_TOP` 保持兄弟第 0 位（压在 XAML 桥上）。子窗口随任务栏生灭，z 序争夺战（`arm_z_burst`/`z_covered`）整体跳过，改为每秒 `reassert_child_top`。
-- 坐标换算：定位数学输出带坐标，子窗口用父 CLIENT 坐标，差值即 `client_origin(parent)`。
-- 失败回退：`SetParent` 被拒（安全软件拦截等）置 `embed_failed` 粘性回退覆盖模式；explorer 重启后父窗被拆，`place_widget` 每轮校验 `is_child_of`，丢父即重嵌或回退。
+- **归因修正（2026-09 实测，详见 `docs/agent-embed.md`）**：26340 上旧实现的失效**不是**"DWM 不合成带内分层子窗口"，而是两个死点叠加——(1) 带（`Shell_TrayWnd`）对子窗口按"出生即子窗口"快照合成，**`SetParent` 迁移进来的窗口被完全忽略**；(2) **ULW（`UpdateLayeredWindow`）帧在两次带重建之间被冻结**（句柄/几何/Z 序全部正常、ULW 返回成功，但只有子窗口创建/销毁触发的带重建才会把当时表面快照上屏）。旧实现两条都踩中。可用配方：**出生即 `WS_CHILD` + 出帧后 poke 一次带重建**（GDI 直绘亦可实时，但 AA 在 colorkey 下有暗毛边，弃用）。
+- **C# 版 embed v2 实现**：切换模式时**销毁重建**显示窗口（进嵌入态 = 销毁顶层覆盖层、在带上直接创建 `WS_CHILD`）；渲染与覆盖层共用 ULW 管线，`AlphaPresent` 末尾 poke 带重建使新帧上屏。`WS_CHILD` 随任务栏生灭 → 线程级绑定（定时器/`WmInvoke`/UIA 事件/`TaskbarCreated`）全部迁到永生的隐形**锚窗口**；explorer 重启后锚窗口发现显示窗口已死即重建重嵌。
+- 坐标换算：定位数学输出带坐标，子窗口用父 CLIENT 坐标，差值即 `client_origin(parent)`；每秒 `reassert_child_top` 保持兄弟第 0 位（实测 z-touch 不触发重建）。
+- 幽灵协议：带会永久保留被销毁子窗口的最后一帧快照（explorer 重启才清）——销毁/迁出前先呈现一帧全透明 ULW（含 poke）再等 120ms。强杀进程仍会留残影（已知限制）。
+- 失败回退：子窗口创建失败置 `embed_failed` 粘性回退覆盖模式；Classic（Win10）任务栏不支持嵌入（无 XAML 桥，自动走覆盖）。
 - `embed_into_taskbar=false` 或删除该键即回到纯覆盖模式。
 
 ## 绘制与菜单

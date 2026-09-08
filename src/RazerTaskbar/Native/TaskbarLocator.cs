@@ -488,43 +488,11 @@ public static class TaskbarLocator
             SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING | SWP_SHOWWINDOW);
     }
 
-    /// <summary>Experimental embed mode (Lyricify's taskbar lyrics): reparent
-    /// `widget` into the taskbar band `parent` as a plain WS_CHILD and park it
-    /// at sibling index 0. Unsupported and update-fragile; the caller falls
-    /// back to the overlay when this returns false.</summary>
-    public static bool SetTaskbarChild(IntPtr widget, IntPtr parent, bool embed)
-    {
-        ShowWindow(widget, SW_HIDE);
-        if (embed)
-        {
-            var ex = GetWindowLongPtrW(widget, GWL_EXSTYLE).ToInt64();
-            SetWindowLongPtrW(widget, GWL_EXSTYLE, (IntPtr)(ex & ~((long)WS_EX_TOPMOST)));
-            if (SetParent(widget, parent) == 0)
-            {
-                // Restore exactly what was there and let the caller stay in
-                // overlay mode.
-                SetWindowLongPtrW(widget, GWL_EXSTYLE, (IntPtr)ex);
-                ShowWindow(widget, SW_SHOWNA);
-                return false;
-            }
-            var style = GetWindowLongPtrW(widget, GWL_STYLE).ToInt64();
-            SetWindowLongPtrW(widget, GWL_STYLE, (IntPtr)((style & ~(long)WS_POPUP) | WS_CHILD));
-            // Sibling #0 — above DesktopWindowContentBridge.
-            SetWindowPos(widget, HwndTop, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        }
-        else
-        {
-            var style = GetWindowLongPtrW(widget, GWL_STYLE).ToInt64();
-            SetWindowLongPtrW(widget, GWL_STYLE, (IntPtr)((style & ~(long)WS_CHILD) | WS_POPUP));
-            var ex = GetWindowLongPtrW(widget, GWL_EXSTYLE).ToInt64();
-            SetWindowLongPtrW(widget, GWL_EXSTYLE, (IntPtr)(ex | WS_EX_TOPMOST));
-            SetParent(widget, 0);
-        }
-        return true;
-    }
-
     /// <summary>`true` while `widget` is parented into `parent` (embed mode's
-    /// live check — explorer restarts re-create the band).</summary>
+    /// live check — explorer restarts re-create the band). Embed v2 recreates
+    /// the window directly as a band child instead of SetParent-migrating it:
+    /// the band ignores migrated windows and ULW presentation entirely
+    /// (docs/agent-embed.md).</summary>
     public static bool IsChildOf(IntPtr widget, IntPtr parent)
         => GetAncestor(widget, GA_PARENT) == parent;
 

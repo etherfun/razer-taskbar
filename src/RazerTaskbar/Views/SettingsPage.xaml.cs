@@ -57,10 +57,14 @@ public sealed partial class SettingsPage : Page
             DescSide.Text = I18n.Tr("Anchor the widget on the left or right side of the taskbar.");
             LblEmbedWidgets.Text = I18n.Tr("Embed in widgets free space");
             DescEmbedWidgets.Text = I18n.Tr("Place the widget inside the Windows widgets button's empty area (right of the weather) instead of beside it.");
+            LblEmbedTaskbar.Text = I18n.Tr("Embed into the taskbar");
+            DescEmbedTaskbar.Text = I18n.Tr("Recreate the widget as a real child of the taskbar band (survives fullscreen apps). Experimental.");
             LblEst.Text = I18n.Tr("Show time remaining on widget");
             DescEst.Text = I18n.Tr("Second row with the predicted remaining / time-to-full duration.");
             LblColor.Text = I18n.Tr("Colored battery icon");
             DescColor.Text = I18n.Tr("Charging / saver keep their state colors; this adds the green-to-red level gradient.");
+            LblFade.Text = I18n.Tr("Fade transition");
+            DescFade.Text = I18n.Tr("Cross-fade the widget when the displayed device changes.");
             LblTray.Text = I18n.Tr("Show tray icon");
             DescTray.Text = I18n.Tr("Notification-area icon with tooltip and menu.");
             LblHover.Text = I18n.Tr("Show devices on hover");
@@ -87,7 +91,9 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(ComboSide, LblSide.Text);
             AutomationProperties.SetName(SwitchEst, LblEst.Text);
             AutomationProperties.SetName(SwitchEmbedWidgets, LblEmbedWidgets.Text);
+            AutomationProperties.SetName(SwitchEmbedTaskbar, LblEmbedTaskbar.Text);
             AutomationProperties.SetName(SwitchColor, LblColor.Text);
+            AutomationProperties.SetName(SwitchFade, LblFade.Text);
             AutomationProperties.SetName(SwitchTray, LblTray.Text);
             AutomationProperties.SetName(SwitchHover, LblHover.Text);
             AutomationProperties.SetName(ComboPoll, LblPoll.Text);
@@ -145,7 +151,9 @@ public sealed partial class SettingsPage : Page
             // Toggles.
             SwitchEst.IsOn = cfg.ShowEstimatedTime;
             SwitchEmbedWidgets.IsOn = cfg.EmbedIntoWidgetsSpace;
+            SwitchEmbedTaskbar.IsOn = cfg.EmbedIntoTaskbar;
             SwitchColor.IsOn = cfg.ColorBatteryIcon;
+            SwitchFade.IsOn = cfg.FadeTransition;
             SwitchTray.IsOn = cfg.ShowTrayIcon;
             SwitchHover.IsOn = cfg.HoverDevices;
             SwitchRec.IsOn = cfg.RecordBatteryHistory;
@@ -275,6 +283,17 @@ public sealed partial class SettingsPage : Page
         AppState.PostReposition(); // anchor depends on the toggle
     }
 
+    private void SwitchEmbedTaskbar_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress)
+        {
+            return;
+        }
+        bool on = SwitchEmbedTaskbar.IsOn;
+        AppState.PostModifyConfig(c => c.EmbedIntoTaskbar = on);
+        AppState.PostReposition(); // the display window is recreated on toggle
+    }
+
     private void SwitchEst_Toggled(object sender, RoutedEventArgs e)
     {
         if (_suppress)
@@ -294,6 +313,21 @@ public sealed partial class SettingsPage : Page
         }
         bool on = SwitchColor.IsOn;
         AppState.PostModifyConfig(c => c.ColorBatteryIcon = on);
+    }
+
+    private void SwitchFade_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress)
+        {
+            return;
+        }
+        bool on = SwitchFade.IsOn;
+        AppState.PostModifyConfig(c => c.FadeTransition = on);
+        // Toggled off mid-animation: stop blending, leave the current frame.
+        if (!on)
+        {
+            AppState.PostResetFade();
+        }
     }
 
     private void SwitchTray_Toggled(object sender, RoutedEventArgs e)

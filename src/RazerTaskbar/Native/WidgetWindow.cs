@@ -6,6 +6,17 @@
 //!   glyph + percentage on top, predicted time below — into a 32bpp DIB that
 //!   UpdateLayeredWindow presents with per-pixel alpha (AA edges blend with
 //!   the real backdrop, like DirectWrite taskbar text).
+//! - Embed mode (`embed_into_taskbar`): the display window is DESTROYED and
+//!   recreated as a direct `WS_CHILD` of Shell_TrayWnd. Presentation is the
+//!   same ULW pipeline as the overlay — the band ignores SetParent-migrated
+//!   windows and freezes ULW frames between band rebuilds, so AlphaPresent
+//!   pokes a rebuild (throwaway 1x1 band child) after every frame
+//!   (docs/agent-embed.md).
+//! - A never-shown anchor window (same class) owns every thread-lifetime
+//!   binding: timers, WmInvoke, UIA layout events and the TaskbarCreated
+//!   broadcast. The display window is disposable — as a band child it dies
+//!   together with the taskbar on explorer restarts, and the anchor detects
+//!   that and recreates the widget.
 //! - Right-click menu lives on the tray icon (overlay is click-through).
 //! - Layout is event-driven: TaskbarCreated broadcast (explorer restart) and
 //!   UIA structure-change events both trigger an immediately coalesced
@@ -33,8 +44,13 @@ public static class WidgetWindow
     private const IntPtr TimerHover = 3;
     /// <summary>Fast re-assert burst after the taskbar covered the widget.</summary>
     private const IntPtr TimerZBurst = 4;
+    /// <summary>Cross-fade animation ticks while a device switch blends in.</summary>
+    private const IntPtr TimerFade = 5;
     private const uint ZBurstTickMs = 150;
     private const uint ZBurstTicks = 12;
+    /// <summary>Cross-fade duration and tick for device-switch transitions.</summary>
+    private const int FadeMs = 300;
+    private const uint FadeTickMs = 16;
     /// <summary>Log a "covered" event at most this often.</summary>
     private static readonly TimeSpan CoveredLogEvery = TimeSpan.FromSeconds(30);
     private const uint HoverPollMs = 120;
@@ -66,6 +82,9 @@ public static class WidgetWindow
     private sealed class WidgetState
     {
         public IntPtr Tray;
+        /// <summary>The never-shown anchor window: owns timers, WmInvoke,
+        /// UIA layout events and TaskbarCreated. Outlives the display window.</summary>
+        public IntPtr MsgHwnd;
         public IntPtr Hwnd;
         public int WidgetW;
         public int WidgetH;
@@ -73,14 +92,14 @@ public static class WidgetWindow
         /// Everything paints here (GDI leaves the alpha byte zero), then
         /// AlphaPresent turns coverage into premultiplied alpha and hands the
         /// frame to DWM via UpdateLayeredWindow — per-pixel transparency like
-        /// the native widgets, no black color key.</summary>
+        /// the native widgets, no black color key. Both modes present through
+        /// this surface (embed pokes a band rebuild after each frame).</summary>
         public IntPtr MemDc;
         public IntPtr MemBmp;
         public IntPtr MemBits;
         public int MemW;
         public int MemH;
         public bool UlwFailedLogged;
-        public uint TaskbarCreatedMsg;
         public (int X, int Y, int W, int H)? LastLayout;
         public string? LastLog;
         public PaintSig? PaintedSig;
@@ -90,17 +109,73 @@ public static class WidgetWindow
         public Stopwatch? LastCoveredLog;
         public bool Embedded;
         public bool EmbedFailed;
+        // — Cross-fade transition (overlay/ULW presentation only) —
+        /// <summary>Premultiplied previous / new frame; both null while idle.</summary>
+        public byte[]? FadePrev;
+        public byte[]? FadeNew;
+        public long FadeStart;
+        /// <summary>Device handle whose frame is fully on screen (null until
+        /// the first paint) — a change arms the cross-fade.</summary>
+        public string? OnScreenHandle;
+        /// <summary>Set right before the final DestroyWindow on exit: makes
+        /// WM_DESTROY run the full teardown + quit instead of the lightweight
+        /// recreate path.</summary>
+        public bool Teardown;
     }
 
     private static WidgetState _state = null!;
+    private static IntPtr _hinstance;
+    private static uint _taskbarCreatedMsg;
+    /// <summary>TaskbarCreated reaches both the anchor and (in overlay mode)
+    /// the display window — handle it once per broadcast.</summary>
+    private static readonly Stopwatch LastTaskbarRebind = Stopwatch.StartNew();
 
     private static readonly WndProc WndProcDelegate = WndProcImpl;
+
+    /// <summary>Current display window (0 while recreating). The anchor window
+    /// is WidgetThread.Hwnd; the tray icon, hover panel and painting bind to
+    /// this one.</summary>
+    public static IntPtr DisplayHwnd => _state?.Hwnd ?? 0;
+
+    /// <summary>Invalidate the display window (content changed without a
+    /// move — the paint path dedupes by signature).</summary>
+    public static void InvalidateDisplay()
+    {
+        var st = _state;
+        if (st != null && st.Hwnd != 0 && IsWindow(st.Hwnd))
+        {
+            InvalidateRect(st.Hwnd, 0, true);
+        }
+    }
+
+    /// <summary>Tear the widget down (tray menu / app exit): leave the
+    /// ghost-free invisible frame when embedded, then destroy the anchor —
+    /// its WM_DESTROY runs the full teardown and quits the widget thread.</summary>
+    public static void ExitWidget()
+    {
+        var st = _state;
+        if (st is null)
+        {
+            return;
+        }
+        st.Teardown = true;
+        if (st.Embedded)
+        {
+            SilentFrame(st);
+        }
+        var hwnd = st.MsgHwnd != 0 && IsWindow(st.MsgHwnd) ? st.MsgHwnd : st.Hwnd;
+        if (hwnd != 0 && IsWindow(hwnd))
+        {
+            DestroyWindow(hwnd);
+        }
+    }
 
     /// <summary>Port of run_message_loop. Runs on the dedicated STA widget
     /// thread; never returns until quit.</summary>
     public static void Run()
     {
         var instance = GetModuleHandleW(null);
+        _hinstance = instance;
         var st = new WidgetState();
         var config = AppState.Instance.ConfigSnapshot();
 
@@ -112,6 +187,7 @@ public static class WidgetWindow
             return;
         }
         st.Tray = tray;
+        _taskbarCreatedMsg = RegisterWindowMessageW("TaskbarCreated");
 
         var wc = new WNDCLASSW
         {
@@ -127,13 +203,28 @@ public static class WidgetWindow
             Console.Error.WriteLine($"razer-taskbar: RegisterClassW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
         }
 
-        // 144x48: full taskbar height, wide enough for icon + "100%" text.
-        var hwnd = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+        // The anchor window is never shown; it only hosts the message
+        // bindings that must survive display-window recreation (timers,
+        // WmInvoke, UIA layout events, TaskbarCreated — a band child dies
+        // together with the taskbar on explorer restarts).
+        st.MsgHwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             ClassName, WindowTitle,
-            WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS,
-            0, 0, 144, 48,
+            WS_POPUP,
+            0, 0, 0, 0,
             0, 0, instance, 0);
+        if (st.MsgHwnd == 0)
+        {
+            Console.Error.WriteLine($"razer-taskbar: anchor CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            App.RequestExit();
+            return;
+        }
+
+        // 144x48: full taskbar height, wide enough for icon + "100%" text.
+        // Embed mode births the window straight into the band (a migrated
+        // window would never composite — docs/agent-embed.md).
+        bool embed = config.EmbedIntoTaskbar && TaskbarLocator.DetectKind(tray) == TaskbarKind.Win11;
+        var hwnd = CreateWidgetHwnd(embed, embed ? tray : 0);
         if (hwnd == 0)
         {
             Console.Error.WriteLine($"razer-taskbar: CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
@@ -141,17 +232,17 @@ public static class WidgetWindow
             return;
         }
         st.Hwnd = hwnd;
+        st.Embedded = embed;
         st.WidgetW = 144;
         st.WidgetH = 48;
         _state = st;
-        WidgetThread.Init(hwnd);
+        WidgetThread.Init(st.MsgHwnd);
 
         // Per-pixel-alpha layered presentation (UpdateLayeredWindow): text AA
         // blends against the REAL taskbar like the native widgets' DirectWrite
-        // text, instead of the color key's binary transparency whose edges
-        // melt into a fixed black (dirty halos over light wallpapers). A
-        // layered window paints nothing until its first ULW/SLWA call — push
-        // one fully transparent frame now so WM_PAINTs are delivered.
+        // text. A layered window paints nothing until its first ULW call —
+        // push one fully transparent frame now (AlphaPresent pokes the band
+        // to capture it in embed mode).
         EnsureMemSurface(st, hwnd, st.WidgetW, st.WidgetH);
         if (st.MemDc != 0)
         {
@@ -160,17 +251,16 @@ public static class WidgetWindow
 
         // First call anchors directly: the window still sits at its 0,0
         // creation rect, which is not a position worth defending.
-        PlaceWidget(hwnd);
+        PlaceWidget();
         if (config.ShowTrayIcon)
         {
             TrayIcon.EnsureCreated(hwnd);
         }
-        SetTimer(hwnd, TimerId, 1000, 0);
-        SetTimer(hwnd, TimerHover, HoverPollMs, 0);
+        SetTimer(st.MsgHwnd, TimerId, 1000, 0);
+        SetTimer(st.MsgHwnd, TimerHover, HoverPollMs, 0);
 
         // Event-driven re-layout (Taskbar-Lyrics port).
-        st.TaskbarCreatedMsg = RegisterWindowMessageW("TaskbarCreated");
-        UiaEvents.Spawn(hwnd, WmAppLayout);
+        UiaEvents.Spawn(st.MsgHwnd, WmAppLayout);
 
         var msg = new MSG();
         while (GetMessageW(out msg, 0, 0, 0) != 0)
@@ -178,6 +268,119 @@ public static class WidgetWindow
             TranslateMessage(ref msg);
             DispatchMessageW(ref msg);
         }
+    }
+
+    /// <summary>Create the display window. Overlay: hidden top-level
+    /// `WS_POPUP`, shown by the first placement pass (SWP_SHOWWINDOW).
+    /// Embedded: hidden `WS_CHILD` of the taskbar band. Both use ULW
+    /// presentation; the caller pushes an initial transparent frame.
+    /// Caller assigns st.Hwnd/st.Embedded.</summary>
+    private static IntPtr CreateWidgetHwnd(bool embedded, IntPtr parent)
+    {
+        uint ex = WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE;
+        uint style = embedded ? (WS_CHILD | WS_CLIPSIBLINGS) : (WS_POPUP | WS_CLIPSIBLINGS);
+        return CreateWindowExW(
+            ex,
+            ClassName, WindowTitle,
+            style,
+            0, 0, 144, 48,
+            embedded ? parent : 0, 0, _hinstance, 0);
+    }
+
+    /// <summary>The band snapshots ULW children only on band rebuilds (a band
+    /// child being created/destroyed); between rebuilds their frames are
+    /// frozen and never reach the screen. After each presented frame, poke a
+    /// rebuild with a throwaway 1x1 helper child so the fresh frame — and
+    /// every other child's — is re-captured. Paints are rare (signature
+    /// dedupe), so the churn is negligible (docs/agent-embed.md).</summary>
+    private static void PokeBandRebuild()
+    {
+        var st = _state;
+        if (st.Tray == 0)
+        {
+            return;
+        }
+        var helper = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+            ClassName, WindowTitle,
+            WS_CHILD,
+            0, 0, 1, 1,
+            st.Tray, 0, _hinstance, 0);
+        if (helper != 0)
+        {
+            // Keep the leaked 1x1 destroy-snapshot invisible.
+            SetLayeredWindowAttributes(helper, 0, 0, LWA_ALPHA);
+            DestroyWindow(helper);
+        }
+    }
+
+    /// <summary>Switch overlay↔band-child by DESTROYING and recreating the
+    /// display window — the band ignores SetParent-migrated windows and ULW
+    /// presentation, so the widget must be born into the band
+    /// (docs/agent-embed.md). Runs on the widget thread; retargets the tray
+    /// icon and resets paint/layout dedupe state. The anchor window and its
+    /// timers/messages are untouched.</summary>
+    private static bool RecreateWindow(bool embedded, IntPtr parent)
+    {
+        var st = _state;
+        var old = st.Hwnd;
+        if (old != 0 && IsWindow(old))
+        {
+            if (st.Embedded)
+            {
+                // Ghost protocol: the band keeps a snapshot of a destroyed
+                // child's last frame forever — leave a fully key-colored
+                // (invisible) frame behind instead of the widget.
+                SilentFrame(st);
+            }
+            DestroyWindow(old);
+        }
+        var hwnd = CreateWidgetHwnd(embedded, parent);
+        if (hwnd == 0)
+        {
+            Console.Error.WriteLine($"razer-taskbar: widget CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            st.Hwnd = 0;
+            return false;
+        }
+        st.Hwnd = hwnd;
+        st.Embedded = embedded;
+        st.PaintedSig = null;
+        st.LastLayout = null;
+        st.LastLog = null;
+        st.UlwFailedLogged = false;
+        EndFade(st);
+        st.OnScreenHandle = null;
+        st.WidgetW = 144;
+        st.WidgetH = 48;
+        // Transparent pre-show frame (ULW windows paint nothing otherwise);
+        // in embed mode AlphaPresent pokes the band to capture it.
+        EnsureMemSurface(st, hwnd, st.WidgetW, st.WidgetH);
+        if (st.MemDc != 0)
+        {
+            AlphaPresent(st, hwnd);
+        }
+        if (AppState.Instance.ConfigSnapshot().ShowTrayIcon)
+        {
+            TrayIcon.EnsureCreated(hwnd);
+        }
+        return true;
+    }
+
+    /// <summary>Paint one invisible frame on the embedded band child and poke
+    /// a band rebuild: the destroy-snapshot then leaks nothing visible.</summary>
+    private static void SilentFrame(WidgetState st)
+    {
+        if (st.Hwnd == 0 || !IsWindow(st.Hwnd) || st.MemDc == 0)
+        {
+            return; // never presented — no snapshot to silence
+        }
+        EndFade(st);
+        PatBlt(st.MemDc, 0, 0, st.MemW, st.MemH, BLACKNESS);
+        // AlphaPresent pokes the band so the invisible frame is what gets
+        // snapshotted, then give DWM a beat to present it before the window
+        // (and its surface) disappears.
+        AlphaPresent(st, st.Hwnd);
+        System.Threading.Thread.Sleep(120);
     }
 
     private static float DpiScale(IntPtr hwnd)
@@ -198,16 +401,24 @@ public static class WidgetWindow
     /// <summary>Recompute and apply the placement. Runs on the 1s fallback
     /// poll, after every coalesced UIA structure event, and on first anchor —
     /// move/invalidate and log are deduped against the previous pass.</summary>
-    internal static void PlaceWidget(IntPtr hwnd)
+    internal static void PlaceWidget() => PlaceWidgetCore(true);
+
+    private static void PlaceWidgetCore(bool allowRetry)
     {
         var st = _state;
-        var (w, h) = WidgetSize(hwnd);
-        st.WidgetW = w;
-        st.WidgetH = h;
+        if (st.MsgHwnd == 0)
+        {
+            return;
+        }
+        var hwnd = st.Hwnd;
+        if (hwnd != 0 && IsWindow(hwnd))
+        {
+            (st.WidgetW, st.WidgetH) = WidgetSize(hwnd);
+        }
         var config = AppState.Instance.ConfigSnapshot();
 
         var pl = TaskbarLocator.ComputePlacement(
-            st.Tray, w, h,
+            st.Tray, st.WidgetW, st.WidgetH,
             config.WidgetSide,
             config.WindowOffsetLeft,
             config.WindowOffsetTop,
@@ -220,41 +431,76 @@ public static class WidgetWindow
             return;
         }
 
-        // Experimental embed mode: keep the widget as a child of the taskbar
-        // band instead of a topmost overlay. The transition hides the window,
-        // so it must run before the placement pass repositions it.
-        bool wantEmbed = config.EmbedIntoTaskbar && !st.EmbedFailed;
-        if (st.Embedded != wantEmbed)
+        // Embed state machine (v2): the display window is DESTROYED and
+        // recreated — born into the band as WS_CHILD — instead of being
+        // SetParent-migrated, because the band ignores migrated windows and
+        // ULW presentation entirely (docs/agent-embed.md). A dead window (the
+        // band child died together with the taskbar on an explorer restart)
+        // recreates too.
+        bool wantEmbed = config.EmbedIntoTaskbar && !st.EmbedFailed
+            && placement.Kind == TaskbarKind.Win11;
+        bool needSwitch = st.Hwnd == 0 || !IsWindow(st.Hwnd) || st.Embedded != wantEmbed;
+        if (needSwitch)
         {
-            if (TaskbarLocator.SetTaskbarChild(hwnd, placement.Parent, wantEmbed))
+            if (!RecreateWindow(wantEmbed, wantEmbed ? placement.Parent : 0))
             {
-                st.Embedded = wantEmbed;
-                st.LastLayout = null;
-                Console.Error.WriteLine($"razer-taskbar: embed={wantEmbed} applied");
+                if (!wantEmbed)
+                {
+                    return; // nothing drawable; retry on the next tick
+                }
+                // Band-child creation refused: stick to the overlay for this
+                // session and retry the switch once, as an overlay.
+                st.EmbedFailed = true;
+                Console.Error.WriteLine("razer-taskbar: embed rejected, staying as overlay");
+                if (!allowRetry || !RecreateWindow(false, 0))
+                {
+                    return;
+                }
             }
             else
             {
-                st.EmbedFailed = true;
-                st.LastLayout = null;
-                Console.Error.WriteLine("razer-taskbar: embed rejected (SetParent), staying as overlay");
+                Console.Error.WriteLine($"razer-taskbar: embed={wantEmbed} applied");
+            }
+            st.LastLayout = null;
+            if (allowRetry)
+            {
+                // Re-run with the fresh window's real DPI size.
+                PlaceWidgetCore(false);
+                return;
             }
         }
-        else if (st.Embedded && !TaskbarLocator.IsChildOf(hwnd, placement.Parent))
+        else if (st.Embedded && !TaskbarLocator.IsChildOf(st.Hwnd, placement.Parent))
         {
-            // Explorer restart re-created the band and detached our window:
-            // re-attach, or fall back to the overlay for this session.
-            if (TaskbarLocator.SetTaskbarChild(hwnd, placement.Parent, true))
+            // Alive but disowned (the band was rebuilt without destroying us):
+            // same remedy — recreate into the new band.
+            if (RecreateWindow(true, placement.Parent))
             {
                 st.LastLayout = null;
                 Console.Error.WriteLine("razer-taskbar: re-embedded after parent change");
+                if (allowRetry)
+                {
+                    PlaceWidgetCore(false);
+                    return;
+                }
             }
             else
             {
-                st.Embedded = false;
                 st.EmbedFailed = true;
-                st.LastLayout = null;
                 Console.Error.WriteLine("razer-taskbar: re-embed failed, falling back to overlay");
+                if (!RecreateWindow(false, 0) || !allowRetry)
+                {
+                    return;
+                }
+                st.LastLayout = null;
+                PlaceWidgetCore(false);
+                return;
             }
+        }
+
+        hwnd = st.Hwnd;
+        if (hwnd == 0 || !IsWindow(hwnd))
+        {
+            return;
         }
 
         // Convert to screen coords relative to the placement's own parent:
@@ -269,15 +515,18 @@ public static class WidgetWindow
         int sy = py + placement.Y;
 
         // One log line per distinct state; unchanged states stay silent.
-        string line = $"overlay kind={placement.Kind} pos=({sx},{sy}) size={w}x{h} embed={st.Embedded}";
+        string line = $"overlay kind={placement.Kind} pos=({sx},{sy}) size={st.WidgetW}x{st.WidgetH} embed={st.Embedded}";
         if (st.LastLog != line)
         {
             Console.Error.WriteLine($"razer-taskbar: {line}");
             st.LastLog = line;
         }
 
-        // Apply. MoveOverlay also re-asserts HWND_TOPMOST every pass. A pure
-        // move needs no repaint — invalidate only when the rect changed.
+        // Apply. MoveOverlay also re-asserts HWND_TOPMOST every pass; the
+        // embedded branch re-asserts sibling #0 (HwndTop). A pure move needs
+        // no repaint — invalidate only when the rect changed.
+        int w = st.WidgetW;
+        int h = st.WidgetH;
         bool changed = st.LastLayout != (sx, sy, w, h);
         if (st.Embedded)
         {
@@ -330,62 +579,77 @@ public static class WidgetWindow
             var timer = wParam;
             if (timer == TimerId)
             {
-                bool embedded = _state.Embedded;
-                if (embedded)
+                var wh = st.Hwnd;
+                bool alive = wh != 0 && IsWindow(wh);
+                if (st.Embedded)
                 {
                     // Children have no TOPMOST band: re-assert sibling order.
-                    TaskbarLocator.ReassertChildTop(hwnd);
+                    if (alive)
+                    {
+                        TaskbarLocator.ReassertChildTop(wh);
+                    }
                 }
-                else if (ZCovered(hwnd))
+                else if (alive && ZCovered(wh))
                 {
                     // Detect "the taskbar raised itself above us" BEFORE the
                     // re-asserting placement pass, and arm a fast repair burst.
-                    ArmZBurst(hwnd);
+                    ArmZBurst();
                 }
-                PlaceWidget(hwnd);
+                PlaceWidget();
                 TrayIcon.Refresh();
                 // Battery changes never move the rect; invalidate each second
                 // (paint() dedupes by signature).
-                InvalidateRect(hwnd, 0, true);
+                if (alive)
+                {
+                    InvalidateRect(wh, 0, true);
+                }
                 // A layout request coalesced right before the poll tick
                 // should not wait for its own timer — flush it now.
-                FlushPendingLayout(hwnd);
+                FlushPendingLayout();
             }
             else if (timer == TimerLayout)
             {
-                KillTimer(hwnd, TimerLayout);
-                FlushPendingLayout(hwnd);
+                KillTimer(st.MsgHwnd, TimerLayout);
+                FlushPendingLayout();
             }
             else if (timer == TimerHover)
             {
                 // Piggyback the z-order check on the 120ms tick (recover from
                 // taskbar raises within ~120ms).
-                if (!st.Embedded && ZCovered(hwnd))
+                var wh = st.Hwnd;
+                if (!st.Embedded && wh != 0 && IsWindow(wh) && ZCovered(wh))
                 {
-                    ArmZBurst(hwnd);
+                    ArmZBurst();
                 }
                 bool enabled = AppState.Instance.ConfigSnapshot().HoverDevices;
-                HoverPanel.Track(hwnd, enabled);
+                if (wh != 0 && IsWindow(wh))
+                {
+                    HoverPanel.Track(wh, enabled);
+                }
             }
             else if (timer == TimerZBurst)
             {
                 st.ZBurstLeft = st.ZBurstLeft == 0 ? 0 : st.ZBurstLeft - 1;
                 if (st.ZBurstLeft == 0)
                 {
-                    KillTimer(hwnd, TimerZBurst);
+                    KillTimer(st.MsgHwnd, TimerZBurst);
                 }
                 else
                 {
                     // PlaceWidget ends in MoveOverlay → re-asserts TOPMOST.
-                    PlaceWidget(hwnd);
+                    PlaceWidget();
                 }
+            }
+            else if (timer == TimerFade)
+            {
+                FadeTick();
             }
             return 0;
         }
         if (msg == WmAppLayout)
         {
             // UIA structure change on the taskbar (coalesced).
-            RequestLayout(hwnd);
+            RequestLayout();
             return 0;
         }
         if (msg == WidgetThread.WmInvoke)
@@ -393,14 +657,23 @@ public static class WidgetWindow
             WidgetThread.HandleInvoke(lParam);
             return 0;
         }
-        if (msg == st.TaskbarCreatedMsg && st.TaskbarCreatedMsg != 0)
+        if (msg == _taskbarCreatedMsg && _taskbarCreatedMsg != 0)
         {
-            HandleTaskbarCreated(hwnd);
+            HandleTaskbarCreated();
             return 0;
         }
         if (msg == WM_PAINT)
         {
             Paint(hwnd);
+            return 0;
+        }
+        if (msg == WM_CLOSE)
+        {
+            // Graceful shutdown (an external WM_CLOSE used to fall through to
+            // DefWindowProc's DestroyWindow, which now would only dispose the
+            // display window and orphan the thread). Run the full protocol:
+            // ghost-free last frame + teardown + quit.
+            ExitWidget();
             return 0;
         }
         // Taskbar-Lyrics answers WM_NCHITTEST with HTTRANSPARENT so the
@@ -411,12 +684,31 @@ public static class WidgetWindow
         }
         if (msg == WM_DESTROY)
         {
-            HoverPanel.Destroy();
-            TrayIcon.Destroy();
-            DestroyMemSurface(st);
-            HistoryService.Close();
-            PostQuitMessage(0);
-            App.RequestExit();
+            if (hwnd == st.MsgHwnd)
+            {
+                // The anchor is going away: full thread teardown + quit.
+                HoverPanel.Destroy();
+                TrayIcon.Destroy();
+                DestroyMemSurface(st);
+                HistoryService.Close();
+                PostQuitMessage(0);
+                App.RequestExit();
+                return 0;
+            }
+            if (hwnd == st.Hwnd && st.Teardown)
+            {
+                // Exit via the tray menu: final teardown; the anchor posts
+                // quit as well when the process tears it down.
+                HoverPanel.Destroy();
+                TrayIcon.Destroy();
+                DestroyMemSurface(st);
+                HistoryService.Close();
+                PostQuitMessage(0);
+                App.RequestExit();
+                return 0;
+            }
+            // Display window destroyed by a recreate (embed switch / band
+            // swap): thread and anchor stay alive, state is carried over.
             return 0;
         }
         if (msg == WM_COMMAND)
@@ -452,7 +744,7 @@ public static class WidgetWindow
     /// running — a repeated SetTimer would RESET the countdown, and the 120ms
     /// hover check firing while covered would keep postponing the 150ms burst
     /// forever (burst starvation, seen in testing).</summary>
-    private static void ArmZBurst(IntPtr hwnd)
+    private static void ArmZBurst()
     {
         var st = _state;
         if (st.LastCoveredLog is not { } last || last.Elapsed >= CoveredLogEvery)
@@ -463,14 +755,14 @@ public static class WidgetWindow
         if (st.ZBurstLeft == 0)
         {
             st.ZBurstLeft = ZBurstTicks;
-            SetTimer(hwnd, TimerZBurst, ZBurstTickMs, 0);
+            SetTimer(st.MsgHwnd, TimerZBurst, ZBurstTickMs, 0);
         }
     }
 
     /// <summary>Coalesce UIA structure-change bursts: at most one placement
     /// pass per LAYOUT_DEBOUNCE, with a trailing pass on a one-shot timer so
     /// the last request always lands.</summary>
-    private static void RequestLayout(IntPtr hwnd)
+    private static void RequestLayout()
     {
         bool due;
         var st = _state;
@@ -486,15 +778,15 @@ public static class WidgetWindow
         }
         if (due)
         {
-            PlaceWidget(hwnd);
+            PlaceWidget();
         }
         else
         {
-            SetTimer(hwnd, TimerLayout, LayoutDebounceMs, 0);
+            SetTimer(st.MsgHwnd, TimerLayout, LayoutDebounceMs, 0);
         }
     }
 
-    private static void FlushPendingLayout(IntPtr hwnd)
+    private static void FlushPendingLayout()
     {
         var st = _state;
         bool run = st.LayoutPending;
@@ -502,14 +794,23 @@ public static class WidgetWindow
         if (run)
         {
             st.LastLayoutPass.Restart();
-            PlaceWidget(hwnd);
+            PlaceWidget();
         }
     }
 
     /// <summary>Explorer (re)started: the cached taskbar HWND, UIA caches and
-    /// the notification-area icon are all stale — rebind everything.</summary>
-    private static void HandleTaskbarCreated(IntPtr hwnd)
+    /// the notification-area icon are all stale — rebind everything. In embed
+    /// mode the display window was a band child and died together with the
+    /// previous taskbar; recreate it on the new band.</summary>
+    private static void HandleTaskbarCreated()
     {
+        // Both the anchor and (in overlay mode) the display window receive
+        // the broadcast — handle it once per broadcast.
+        if (LastTaskbarRebind.ElapsedMilliseconds < 200)
+        {
+            return;
+        }
+        LastTaskbarRebind.Restart();
         Console.Error.WriteLine("razer-taskbar: TaskbarCreated — re-binding to taskbar");
         var st = _state;
         var tray = TaskbarLocator.FindShellTray();
@@ -519,20 +820,27 @@ public static class WidgetWindow
         }
         TaskbarLocator.InvalidateWidgetsCache();
         st.LastLayout = null;
-        if (AppState.Instance.ConfigSnapshot().ShowTrayIcon)
+        if (st.Embedded && (st.Hwnd == 0 || !IsWindow(st.Hwnd)) && tray != 0)
+        {
+            if (RecreateWindow(true, tray))
+            {
+                Console.Error.WriteLine("razer-taskbar: band child re-created");
+            }
+        }
+        if (AppState.Instance.ConfigSnapshot().ShowTrayIcon && st.Hwnd != 0 && IsWindow(st.Hwnd))
         {
             // A fresh taskbar wiped all tray icons: re-register (same
             // hWnd/uID → replace, never duplicate).
-            TrayIcon.EnsureCreated(hwnd);
+            TrayIcon.EnsureCreated(st.Hwnd);
         }
         UiaEvents.Rebind();
-        PlaceWidget(hwnd);
+        PlaceWidget();
     }
 
     /// <summary>Two-row battery UI: row 1 = battery glyph + percentage, row 2
     /// = status icon (E823 clock / F607 bolt) + predicted time. The
     /// device-type icon stands alone, vertically centered across the widget.
-    /// Transparent background via the black color key.</summary>
+    /// The frame is drawn over black and presented with per-pixel alpha.</summary>
     private static void Paint(IntPtr hwnd)
     {
         var st = _state;
@@ -584,15 +892,41 @@ public static class WidgetWindow
         }
         try
         {
+            var handle = device?.Handle ?? "";
             // Offscreen 32bpp DIB render, then premultiplied-alpha upload.
-            // Falls back to direct window drawing if the surface failed.
+            // Falls back to direct window drawing if the surface failed. The
+            // embedded band child presents through the same ULW pipeline —
+            // AlphaPresent pokes a band rebuild so the frame goes live.
             EnsureMemSurface(st, hwnd, w, h);
+            // Cross-fade on a displayed-device change: capture the
+            // on-screen (already premultiplied) frame BEFORE PaintBody
+            // overwrites it. Starting a new fade mid-animation blends
+            // from the current visual — MemBits holds the last blend.
+            bool fade = cfg.FadeTransition
+                && st.OnScreenHandle is not null
+                && handle != st.OnScreenHandle
+                && st.MemDc != 0 && st.MemW == w && st.MemH == h;
+            if (fade)
+            {
+                st.FadePrev = SnapshotFrame(st);
+            }
             var target = st.MemDc != 0 ? st.MemDc : hdc;
             PaintBody(hwnd, st, target, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel);
             if (st.MemDc != 0)
             {
-                AlphaPresent(st, hwnd);
+                if (fade)
+                {
+                    Premultiply(st);
+                    st.FadeNew = SnapshotFrame(st);
+                    st.FadeStart = Environment.TickCount64;
+                    SetTimer(st.MsgHwnd, TimerFade, FadeTickMs, 0);
+                }
+                else
+                {
+                    AlphaPresent(st, hwnd);
+                }
             }
+            st.OnScreenHandle = handle;
         }
         catch (Exception e)
         {
@@ -660,13 +994,13 @@ public static class WidgetWindow
         st.MemH = 0;
     }
 
-    /// <summary>Convert the GDI render into premultiplied ARGB and hand it to
-    /// DWM. The frame is drawn with solid colors over black, so each stored
-    /// pixel is color*coverage and the coverage (== premultiplied alpha) is
+    /// <summary>Convert the GDI render into premultiplied ARGB (in place):
+    /// the frame is drawn with solid colors over black, so each stored pixel
+    /// is color*coverage and the coverage (== premultiplied alpha) is
     /// max(r,g,b). White text, gray icons and the tinted battery glyph all
     /// then blend against the REAL backdrop instead of the old black key;
     /// untouched black pixels become fully transparent.</summary>
-    private static void AlphaPresent(WidgetState st, IntPtr hwnd)
+    private static void Premultiply(WidgetState st)
     {
         int bytes = st.MemW * st.MemH * 4;
         var buf = new byte[bytes];
@@ -677,6 +1011,84 @@ public static class WidgetWindow
             buf[i + 3] = Math.Max(b, Math.Max(g, r));
         }
         System.Runtime.InteropServices.Marshal.Copy(buf, 0, st.MemBits, bytes);
+    }
+
+    private static byte[] SnapshotFrame(WidgetState st)
+    {
+        int bytes = st.MemW * st.MemH * 4;
+        var buf = new byte[bytes];
+        System.Runtime.InteropServices.Marshal.Copy(st.MemBits, buf, 0, bytes);
+        return buf;
+    }
+
+    private static void WriteFrame(WidgetState st, byte[] frame)
+        => System.Runtime.InteropServices.Marshal.Copy(frame, 0, st.MemBits, frame.Length);
+
+    /// <summary>Linear per-byte blend of two premultiplied frames into the
+    /// DIB — the mathematically correct cross-fade for this representation
+    /// (lerp of premultiplied values == premultiplied lerp). AlphaPresent
+    /// re-derives the alpha channel from the blended RGB.</summary>
+    private static void WriteBlend(WidgetState st, byte[] from, byte[] to, double t)
+    {
+        int bytes = st.MemW * st.MemH * 4;
+        var buf = new byte[bytes];
+        System.Runtime.InteropServices.Marshal.Copy(st.MemBits, buf, 0, bytes);
+        for (int i = 0; i < bytes; i++)
+        {
+            buf[i] = (byte)Math.Round(from[i] + (to[i] - from[i]) * t);
+        }
+        System.Runtime.InteropServices.Marshal.Copy(buf, 0, st.MemBits, bytes);
+    }
+
+    /// <summary>Animation tick: ease-blend prev→new and re-present. Widget
+    /// thread only; a mid-fade device change simply re-arms from the current
+    /// blend (Paint snapshots MemBits as the new FadePrev).</summary>
+    private static void FadeTick()
+    {
+        var st = _state;
+        if (st.FadePrev is null || st.FadeNew is null
+            || st.MemBits == 0 || st.MemW == 0
+            || st.Hwnd == 0 || !IsWindow(st.Hwnd))
+        {
+            EndFade(st);
+            return;
+        }
+        double t = (Environment.TickCount64 - st.FadeStart) / (double)FadeMs;
+        if (t >= 1.0)
+        {
+            WriteFrame(st, st.FadeNew);
+            EndFade(st);
+        }
+        else
+        {
+            t = t * t * (3.0 - 2.0 * t); // smoothstep ease-in-out
+            WriteBlend(st, st.FadePrev, st.FadeNew, t);
+        }
+        AlphaPresent(st, st.Hwnd);
+    }
+
+    private static void EndFade(WidgetState st)
+    {
+        st.FadePrev = null;
+        st.FadeNew = null;
+        st.FadeStart = 0;
+        if (st.MsgHwnd != 0)
+        {
+            KillTimer(st.MsgHwnd, TimerFade);
+        }
+    }
+
+    /// <summary>Stop any running cross-fade (transition toggled off) keeping
+    /// the currently presented frame. Widget thread via WidgetThread.Post.</summary>
+    public static void CancelFade()
+    {
+        EndFade(_state);
+    }
+
+    /// <summary>Hand the current DIB frame to DWM via UpdateLayeredWindow.</summary>
+    private static void AlphaPresent(WidgetState st, IntPtr hwnd)
+    {
+        Premultiply(st);
 
         var dst = new POINT();
         if (TaskbarLocator.WindowRect(hwnd) is { } wr)
@@ -701,6 +1113,14 @@ public static class WidgetWindow
                 st.UlwFailedLogged = true;
                 Console.Error.WriteLine($"razer-taskbar: UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             }
+            return;
+        }
+        if (st.Embedded)
+        {
+            // Band children present through the same ULW pipeline as the
+            // overlay, but the band only re-snapshots them on band rebuilds —
+            // poke one so the fresh frame actually shows up.
+            PokeBandRebuild();
         }
     }
 
@@ -907,9 +1327,19 @@ public static class WidgetWindow
 
     private static void HandleCommand(IntPtr hwnd, ushort id)
     {
+        var st = _state;
         switch (id)
         {
             case IdExit:
+                // Real exit: leave an invisible last frame on the band (the
+                // destroy-snapshot would otherwise burn the widget in) and
+                // mark teardown so WM_DESTROY quits instead of waiting for a
+                // recreate.
+                if (st.Embedded)
+                {
+                    SilentFrame(st);
+                }
+                st.Teardown = true;
                 DestroyWindow(hwnd);
                 break;
             case IdSettings:

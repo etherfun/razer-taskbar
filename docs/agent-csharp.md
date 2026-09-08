@@ -72,7 +72,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 | Rust | C# | 说明 |
 |---|---|---|
 | main.rs | Program.cs + App.xaml.cs | 单实例 FindWindow + EnumChildWindows 兜底;Bootstrap 降级 |
-| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4/z-burst/菜单 ID 全保留 |
+| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画) |
 | taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
 | hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
 | tray.rs | Native/TrayIcon.cs | VERSION_4、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
@@ -93,6 +93,21 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 - UIA:`UIA structure listener registered` ✓(注意:.NET `SetApartmentState(MTA)` 已初始化 COM,
   `CoInitializeEx` 返回 S_FALSE=1 属成功,必须按 `<0` 判失败)
 - 菜单/悬停/两页面、亮暗切换:待人工验证(托盘右键 → Settings…/Battery history…)
+
+## 冒烟验证记录(embed v2,2026-09-08,Win11 26340.9233)
+
+- 覆盖层回归:`embed_into_taskbar=false` 启动 → `pos=(2060,1556) embed=False`,widgets-space 定位正常 ✓
+- 嵌入上屏:`embed_into_taskbar=true`(+widgets_space)重启 → band 兄弟第 0 位
+  `parent=Shell_TrayWnd`,**内容可见**且画质与覆盖层逐像素一致(ULW+重建 poke;
+  首版 GDI+colorkey 因 AA 灰边/阴影在浅色任务栏上形成暗色毛边被弃用) ✓
+- 实时重绘:启动时 device=none 画 `--`,HID 轮询发现设备后**不重建窗口**直接重绘
+  (poke 使新帧上屏);预计时间 13h54m→13h52m 自动刷新 ✓
+- explorer 重启:band 子窗口随任务栏销毁 → 锚窗口经 `TaskbarCreated` 重建重嵌,
+  重新出现在兄弟第 0 位并正常绘制 ✓
+- 优雅退出(WM_CLOSE→`ExitWidget`):隐身末帧(ULW 零帧+poke)→ 进程退出 →
+  **带内零残影** ✓
+- 设置页:新增"嵌入任务栏"开关(`SwitchEmbedTaskbar`);覆盖层↔嵌入的实时切换走
+  同一 `RecreateWindow` 路径(启动/重建已验证;开关触发的切换未单独自动化验证)
 
 ## 已知差异 / 注意
 
@@ -135,6 +150,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 - 启动竞态三处已按 Rust 语义处理:WndProc 在 `_state` 赋值前到达(WM_NCCREATE)→ DefWindowProc;
   `App.RequestExit` 在 Application.Start 构造 App 前到达 → Environment.Exit;
   UIA 线程 CoInitializeEx S_FALSE → 视为成功。
-- 移植保真关键点(勿"顺手改"):单次 SetLayeredWindowAttributes(COLORKEY only);黑 key 非洋红;
-  阴影 0x202020 非纯黑;顶层 WS_POPUP 永不 WS_CHILD(overlay 模式);embed 失败 sticky;
+- 移植保真关键点(勿"顺手改"):任何模式都**不**调用 SLWA COLORKEY(黑 key 有 AA 暗边,
+  用户实报"字体劣化";嵌入与覆盖层共用 ULW 管线,嵌入靠 `AlphaPresent` 末尾的
+  `PokeBandRebuild` 出帧);阴影 0x202020 非纯黑;覆盖层保持 WS_POPUP、嵌入保持
+  出生即 WS_CHILD——模式切换走 `RecreateWindow` 销毁重建,**永不** SetParent+样式翻转
+  (带忽略迁移窗口并冻结 ULW 帧,docs/agent-embed.md);embed 失败 sticky;
   z-burst 运行中不重排定时器;DrawTextW 空缓冲短路;V4 末行损坏不推进时间戳。

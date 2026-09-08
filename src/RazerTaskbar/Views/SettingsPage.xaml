@@ -94,6 +94,19 @@
                         <ToggleSwitch x:Name="SwitchEmbedWidgets" Grid.Column="1" VerticalAlignment="Center"
                                       Toggled="SwitchEmbedWidgets_Toggled" />
                     </Grid>
+                    <!-- Embed into the taskbar (true band child) -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblEmbedTaskbar" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescEmbedTaskbar" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchEmbedTaskbar" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchEmbedTaskbar_Toggled" />
+                    </Grid>
                     <!-- Show estimated time -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>
@@ -119,6 +132,19 @@
                         </StackPanel>
                         <ToggleSwitch x:Name="SwitchColor" Grid.Column="1" VerticalAlignment="Center"
                                       Toggled="SwitchColor_Toggled" />
+                    </Grid>
+                    <!-- Fade transition -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblFade" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescFade" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchFade" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchFade_Toggled" />
                     </Grid>
                     <!-- Show tray icon -->
                     <Grid Style="{StaticResource SettingRowStyle}">
