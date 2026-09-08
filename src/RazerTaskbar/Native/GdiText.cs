@@ -123,6 +123,35 @@ internal static class GdiText
         return 0;
     }
 
+    /// <summary>Tight ink height of `text` (union GGO_METRICS box, same
+    /// walk as <see cref="InkCenterDelta"/>): 0 when the metrics are
+    /// unavailable — callers fall back to the line-box height.</summary>
+    public static int InkHeight(IntPtr hdc, char[] text)
+    {
+        if (text.Length == 0)
+        {
+            return 0;
+        }
+        int top = int.MinValue;
+        int depth = int.MinValue;
+        var mat = new MAT2
+        {
+            eM11 = new FIXED { fract = 0, value = 1 },
+            eM12 = new FIXED { fract = 0, value = 0 },
+            eM21 = new FIXED { fract = 0, value = 0 },
+            eM22 = new FIXED { fract = 0, value = 1 },
+        };
+        foreach (var ch in text)
+        {
+            if (GetGlyphOutlineW(hdc, ch, GGO_METRICS, out var gm, 0, 0, ref mat) != GDI_ERROR)
+            {
+                top = Math.Max(top, gm.gmptGlyphOrigin.Y);
+                depth = Math.Max(depth, (int)gm.gmBlackBoxY - gm.gmptGlyphOrigin.Y);
+            }
+        }
+        return top >= int.MinValue / 2 ? top + depth : 0;
+    }
+
     /// <summary>Single-line text at `x`, vertically centered in `rect` by its
     /// INK. `inkDelta` overrides the per-text ink centering so several
     /// layers can share one alignment — e.g. the battery's status overlay

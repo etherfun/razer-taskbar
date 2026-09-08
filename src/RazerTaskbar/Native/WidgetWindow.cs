@@ -114,6 +114,15 @@ public static class WidgetWindow
         /// the alpha floor lives in the presented DIB, and Paint's signature
         /// dedupe would otherwise never re-present it.</summary>
         public bool ClickShield;
+        /// <summary>Content-measured natural window size (device pixels,
+        /// from PaintBody's ink measurements) — the window hugs the ink
+        /// instead of the nominal 144x40, which matters under the
+        /// widgets-space click shield: the whole rect swallows clicks, so
+        /// the slack around the ink would too. 0 until the first body
+        /// render; NaturalScale guards against DPI changes.</summary>
+        public int NaturalW;
+        public int NaturalH;
+        public float NaturalScale;
         // — Cross-fade transition (overlay/ULW presentation only) —
         /// <summary>Premultiplied previous / new frame; both null while idle.</summary>
         public byte[]? FadePrev;
@@ -397,6 +406,15 @@ public static class WidgetWindow
 
     private static (int W, int H) WidgetSize(IntPtr hwnd)
     {
+        var st = _state;
+        // Content-measured natural size (PaintBody's ink measurements): the
+        // window hugs the ink. Scale-guarded — a DPI change falls back to the
+        // nominal size until the next body render re-measures at the new DPI.
+        if (st.NaturalW > 0 && st.NaturalH > 0
+            && Math.Abs(st.NaturalScale - DpiScale(hwnd)) < 0.01f)
+        {
+            return (Math.Max(st.NaturalW, 32), Math.Max(st.NaturalH, 16));
+        }
         float s = DpiScale(hwnd);
         // 144px at 96 DPI fits the widest row; height 40 (taskbar is 48).
         return (
@@ -1209,6 +1227,8 @@ public static class WidgetWindow
             var measure = new RECT();
             DrawTextW(hdc, wide, wide.Length, ref measure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
             int textW = Math.Max(measure.Right - measure.Left, 1);
+            int textInk = GdiText.InkHeight(hdc, wide);
+            int textCellH = measure.Bottom - measure.Top;
             // Two-layer battery icon: layer 1 is the ACTIVE series' level
             // glyph (charging bolt E85A- / saver leaf E863-) tinted with
             // the state color; layer 2 — the same series' 0% glyph drawn on
@@ -1225,6 +1245,8 @@ public static class WidgetWindow
             SelectObject(hdc, hiconFont);
             DrawTextW(hdc, iconCh, iconCh.Length, ref iconMeasure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
             int iconW = Math.Max(iconMeasure.Right - iconMeasure.Left, 1);
+            int glyphInk = GdiText.InkHeight(hdc, iconCh);
+            int glyphCellH = iconMeasure.Bottom - iconMeasure.Top;
             SelectObject(hdc, hfont);
             // Row split: two stacked half-height rows while a prediction
             // shows, otherwise row 1 spans the full height.
@@ -1236,6 +1258,10 @@ public static class WidgetWindow
             var estWide = Array.Empty<char>();
             int estIconW = 0;
             int estW = 0;
+            int estIconInk = 0;
+            int estIconCellH = 0;
+            int estTextInk = 0;
+            int estTextCellH = 0;
             var estIconFont = DeviceIcons.IconFont(DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale)));
             var estFont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_NORMAL);
             if (bottomLabel is { } estText)
@@ -1246,10 +1272,14 @@ public static class WidgetWindow
                 var m = new RECT();
                 DrawTextW(hdc, estCh, estCh.Length, ref m, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
                 estIconW = Math.Max(m.Right - m.Left, 1);
+                estIconInk = GdiText.InkHeight(hdc, estCh);
+                estIconCellH = m.Bottom - m.Top;
                 SelectObject(hdc, estFont);
                 var m2 = new RECT();
                 DrawTextW(hdc, estWide, estWide.Length, ref m2, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
                 estW = Math.Max(m2.Right - m2.Left, 1);
+                estTextInk = GdiText.InkHeight(hdc, estWide);
+                estTextCellH = m2.Bottom - m2.Top;
                 SelectObject(hdc, hfont);
             }
 
@@ -1264,12 +1294,13 @@ public static class WidgetWindow
             int kindW = kind is { } k ? DeviceIcons.WidthFor(hdc, kindH, k) : 0;
             int kindGap = kind is not null ? gap : 0;
             int groupX, iconX, textX, estIconX, estTextX;
+            int groupW;
             if (twoRows)
             {
                 int iconColW = Math.Max(iconW, estIconW);
                 int row1W = iconColW + gap + textW;
                 int row2W = iconColW + gap + estW;
-                int groupW = kindW + kindGap + Math.Max(row1W, row2W);
+                groupW = kindW + kindGap + Math.Max(row1W, row2W);
                 int gx = (w - groupW) / 2;
                 int cx = gx + kindW + kindGap;
                 int tx = cx + iconColW + gap;
@@ -1281,7 +1312,7 @@ public static class WidgetWindow
             }
             else
             {
-                int groupW = kindW + kindGap + iconW + gap + textW;
+                groupW = kindW + kindGap + iconW + gap + textW;
                 int gx = (w - groupW) / 2;
                 int ix = gx + kindW + kindGap;
                 groupX = gx;
@@ -1325,6 +1356,29 @@ public static class WidgetWindow
                 GdiText.DrawInkText(hdc, estIconFont, estCh, estIconX, estRect, estColor);
                 GdiText.DrawInkText(hdc, estFont, estWide, estTextX, estRect, estColor);
             }
+            // Content-measured natural size: the window hugs the ink instead
+            // of the nominal 144x40 — under the widgets-space click shield
+            // the whole rect swallows clicks, so slack around the ink would
+            // swallow clicks too. Heights are ink-tight (GGO_METRICS union,
+            // line-box cell as fallback); PlaceWidget picks the size up via
+            // WidgetSize within a second, and the measurements do not depend
+            // on the current window size, so the resize converges.
+            int pad = (int)MathF.Round(2.0f * scale);
+            st.NaturalW = Math.Max(groupW + 2 * pad, 32);
+            int topInk = Math.Max(glyphInk > 0 ? glyphInk : glyphCellH,
+                textInk > 0 ? textInk : textCellH);
+            if (twoRows)
+            {
+                int bottomInk = Math.Max(estIconInk > 0 ? estIconInk : estIconCellH,
+                    estTextInk > 0 ? estTextInk : estTextCellH);
+                int rowGap = (int)MathF.Round(3.0f * scale);
+                st.NaturalH = Math.Max(topInk + rowGap + bottomInk + 2 * pad, 16);
+            }
+            else
+            {
+                st.NaturalH = Math.Max(Math.Max(kindH, topInk) + 2 * pad, 16);
+            }
+            st.NaturalScale = scale;
             st.PaintedSig = sig;
         }
         catch (Exception e)
