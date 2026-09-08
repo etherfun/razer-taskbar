@@ -131,19 +131,15 @@ public static class TaskbarLocator
                 // OS leaves the button itself empty. min_x / the board reserve
                 // deliberately do not apply — overlapping the board is the
                 // point. Without a board rect (TaskbarDa=0, UIA miss) fall
-                // back to the right anchor.
+                // back to the right anchor. No edge bias: the window hugs
+                // its ink (content-measured natural size), so exact centering
+                // fits the free area; the old overhang case traced back to a
+                // taskbar-side layout quirk, not the ink width (2026-09-09).
                 if (boardInfo is { } wb && wb.IsValid)
                 {
                     int freeLeft = wb.TextRight > wb.Rect.Left ? wb.TextRight : wb.Rect.Left;
-                    int freeWidth = wb.Rect.Right - freeLeft;
                     int freeCenter = (freeLeft + wb.Rect.Right) / 2 - barRect.Left;
-                    // The ink (centered inside the window) usually runs wider
-                    // than the free area, and exact centering collides with
-                    // the weather label on the left. Bias toward the button's
-                    // right edge: the chevron side tolerates a transparent
-                    // (click-through) overhang, the label side does not.
-                    int bias = Math.Clamp((w - freeWidth) / 4, 0, 16);
-                    x = freeCenter + bias - w / 2 + offsetLeft;
+                    x = freeCenter - w / 2 + offsetLeft;
                 }
                 else
                 {
