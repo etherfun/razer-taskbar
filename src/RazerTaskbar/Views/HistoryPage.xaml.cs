@@ -376,7 +376,9 @@ public sealed partial class HistoryPage : Page
         }
 
         // Cycle list: discharge + charge spans merged, newest first.
-        var (discharge, charge) = HistoryService.ComputeSpans(samples);
+        // Deflated like the stat cards above (ReboundFilter): a relaxation
+        // bump must not show up as a fake fast cycle.
+        var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
         var items = new List<(long EndTs, CycleItem Item)>();
         foreach (var s in discharge)
         {

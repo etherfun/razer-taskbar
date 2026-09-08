@@ -80,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
 | watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖 |
 | battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
-| history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页) |
+| history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页)+ ReboundFilter 弛豫回弹剔除(读路径包络,见"已知差异") |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
 | i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |
 | viewer.rs | MainWindow + Views/HistoryPage + Controls/BatteryChart | NavigationView 合并窗口;图表 = WinUI Shapes(网格/色带/面积/分段折线/换电点/5 刻度) |
@@ -110,6 +110,21 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
   同一 `RecreateWindow` 路径(启动/重建已验证;开关触发的切换未单独自动化验证)
 
 ## 已知差异 / 注意
+
+- **ReboundFilter(弛豫回弹剔除,2026-09-08 用户实报案例)**:无线设备静置后电芯电压弛豫
+  (端电压向 OCV 回升),电压式电量计唤醒时报高读数——实测鼠标 03:32 使用中 61% →
+  06:56 静置后 65% → 07:48 恢复使用跌回 61%(BU-903:电压式 SoC 需数小时静置才准)。
+  这组"假回升+回落"会把 levelNow 抬高、把回落当真实消耗(~4%/52min 的假速率按
+  BlendKPct 混入 `BlendedRate`,预计使用时间被拉短)、并让伪倒计时在回落中途重锚。
+  `Core/Services/ReboundFilter.cs`(读路径纯函数,单遍扫描):放电序列维持包络 env,
+  1~4 点的未充电回升立即钳到 env;回落到 ≤env 确认为弛豫伪影;抬升**在线持续 ≥2h**
+  (`ReboundAcceptSecs`,静置/断连不计时钟)才接受为真实再校准;≥5 点回升(SpikeFilter
+  写时已确认的真换电)直通并重置 env;充电样本直通并重置 env(也覆盖拔出后先跌后弹的
+  镜像伪影)。接入点:`Record` 的预测+锚点缓存(`_estimates` 存 (Estimate, Anchor),
+  锚点在 watcher 线程算好)、`CycleStatsOf`、`HealthStatsOf`、HistoryPage 周期列表。
+  **图表与显示百分比保持原始读数**,仅估计用包络。注意:必须在原始序列上恰好调用一次
+  (被接受的次阈值回升二次扫描会被重钳,非幂等);测试 `ReboundFilterTests`(15 条用例
+  含真实案例基准)。
 
 - **UIA 矩形互操作修复(避让失效根因)**:`IUIAutomationElement.GetCurrentBoundingRectangle`
   返回的是 Windows RECT(4×int32 left/top/right/bottom),最初误声明为 4×double 的 UiaRect ——

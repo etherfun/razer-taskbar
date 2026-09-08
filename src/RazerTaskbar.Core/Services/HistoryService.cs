@@ -23,6 +23,14 @@
 //   the loaded series — a suspect jump whose level fell back within 60s is
 //   deleted from battery.db and memory — healing rows recorded before the
 //   write-time guard existed or through its bugs.
+// - ReboundFilter (read time): a device that idles long enough for its cell
+//   to relax wakes reporting a HIGHER level (61% → 65% → back to 61% within
+//   the hour, seen live 2026-09-08) — the voltage-based gauge re-read the
+//   relaxed open-circuit voltage, and the fall-back under load is not real
+//   consumption. Prediction, cycle stats and the display anchor run on the
+//   deflated (envelope) series; charts and the shown percentage stay raw.
+//   A bump that survives two hours of connected time is a real gauge
+//   recalibration and is adopted.
 // - Prediction is a three-tier estimator:
 //     1. per-level transit profile: every session contributes its observed
 //        seconds-per-percent between successive high/low-water levels
@@ -137,7 +145,9 @@ public static class HistoryService
     private static Dictionary<string, string> _names = new();
     /// <summary>handle → present in the last record pass (drives disconnect detection).</summary>
     private static Dictionary<string, bool> _seen = new();
-    private static Dictionary<string, Estimate> _estimates = new();
+    /// <summary>handle → (prediction, display anchor), both computed on the
+    /// rebound-deflated series at record time (see <see cref="ReboundFilter.Deflate"/>).</summary>
+    private static Dictionary<string, (Estimate Est, long AnchorSecs)> _estimates = new();
 
     /// <summary>Open battery.db, create tables, mirror existing rows into memory.</summary>
     public static void Init()
@@ -548,6 +558,9 @@ public static class HistoryService
             }
 
             // Refresh the estimate cache for every connected device.
+            // Prediction and anchor run on the rebound-deflated series (see
+            // ReboundFilter): a relaxation bump must neither inflate levelNow
+            // nor restart the display anchor mid-bump.
             _estimates.Clear();
             foreach (var (h, hist) in _series)
             {
@@ -555,9 +568,10 @@ public static class HistoryService
                 {
                     continue;
                 }
-                if (Predict(hist, hist[^1].Level, hist[^1].Charging) is { } e)
+                var eff = ReboundFilter.Deflate(hist);
+                if (Predict(eff, eff[^1].Level, eff[^1].Charging) is { } e)
                 {
-                    _estimates[h] = e;
+                    _estimates[h] = (e, LevelAnchorSecs(eff));
                 }
             }
         }
@@ -565,26 +579,23 @@ public static class HistoryService
 
     /// <summary>Cached prediction for a device (UI threads; cheap
     /// lock-and-copy), adjusted by the pseudo countdown (see
-    /// <see cref="PseudoAdjust"/>).</summary>
+    /// <see cref="PseudoAdjust"/>). The prediction and its anchor were
+    /// computed on the rebound-deflated series at record time.</summary>
     public static Estimate? EstimateFor(string handle)
     {
         lock (Sync)
         {
-            if (!_estimates.TryGetValue(handle, out var e))
-            {
-                return null;
-            }
-            if (_series.TryGetValue(handle, out var hist) && hist.Count > 0)
-            {
-                e = PseudoAdjust(e, LevelAnchorSecs(hist), DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            }
-            return e;
+            return _estimates.TryGetValue(handle, out var cached)
+                ? PseudoAdjust(cached.Est, cached.AnchorSecs, DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                : null;
         }
     }
 
     /// <summary>Start of the trailing run of connected samples at the
     /// current level — the moment the device "updated to" its current
-    /// reading. A level change or a disconnect/reconnect restarts the run.</summary>
+    /// reading. A level change or a disconnect/reconnect restarts the run.
+    /// Pass the rebound-deflated series (see <see cref="ReboundFilter.Deflate"/>)
+    /// so a relaxation bump neither restarts nor extends the anchor.</summary>
     public static long LevelAnchorSecs(IReadOnlyList<Sample> hist)
     {
         if (hist.Count == 0)
@@ -1186,6 +1197,8 @@ public static class HistoryService
 
     /// <summary>Predict the usable time left (discharging) or time to full
     /// (charging) from the sample series plus the device's current state.
+    /// Callers pass the rebound-deflated series (see
+    /// <see cref="ReboundFilter.Deflate"/>) with its tail level as levelNow.
     /// Tier 1: per-level transit profile (nonlinear endpoint curve, partial
     /// sessions included, unobserved levels filled from tier 2). Tier 2:
     /// EWMA-weighted cycle rate blended with the current session. Tier 3:
@@ -1212,10 +1225,12 @@ public static class HistoryService
         return secs is null ? null : new Estimate((long)Math.Round(secs.Value), chargingNow);
     }
 
-    /// <summary>Cycle count + weighted rates for the history page header.</summary>
+    /// <summary>Cycle count + weighted rates for the history page header.
+    /// Computed on the rebound-deflated series: a relaxation bump's fake
+    /// consumption must not skew the pooled rates.</summary>
     public static CycleStats CycleStatsOf(IReadOnlyList<Sample> samples)
     {
-        var (discharge, charge) = ComputeSpans(samples);
+        var (discharge, charge) = ComputeSpans(ReboundFilter.Deflate(samples));
         return new CycleStats(
             discharge.Count(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs)),
             WeightedHoursPerPct(discharge),
@@ -1236,7 +1251,7 @@ public static class HistoryService
     /// to the 80% end-of-life convention.</summary>
     public static HealthStats? HealthStatsOf(IReadOnlyList<Sample> samples)
     {
-        var (_, charge) = ComputeSpans(samples);
+        var (_, charge) = ComputeSpans(ReboundFilter.Deflate(samples));
         var qualified = charge
             .Where(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs) && s.MovedPct >= HealthMinChargePct)
             .OrderBy(s => s.EndTs)
