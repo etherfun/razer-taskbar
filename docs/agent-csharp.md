@@ -1,49 +1,15 @@
-# C# + WinUI3 移植(分支 `refactor/csharp-winui3`,仓库根目录)
+# C# + WinUI3 实现总览(分支 `refactor/csharp-winui3`,仓库根目录)
 
-Rust 版的全量 C# 移植实验:挂件/托盘/悬停/日志监听/UIA 用 C# P/Invoke 重写(观感像素级对齐),
-电量历史 + 设置页合并为一个 WinUI3 NavigationView 窗口。**Rust 版已从本分支移除**;
-共享同一份 `%APPDATA%\razer-taskbar\settings.json` 与 `battery.db`(schema 兼容)。
+Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘/悬停/日志监听/UIA 用 C# P/Invoke 重写
+(观感像素级对齐),电量历史 + 设置页合并为一个 WinUI3 NavigationView 窗口。
+**Rust 版已从本分支移除**;共享同一份 `%APPDATA%\razer-taskbar\settings.json` 与 `battery.db`
+(schema 兼容,不可同时运行)。
 
 ## 构建与测试
 
-```powershell
-# 部署/探针一律用 Release x64(publish 直出仓库根 dist/,运行只认它):
-dotnet build   src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64
-dotnet publish src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64 -o dist
-dotnet test    tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
-# 常驻运行: dist/razer-taskbar.exe(publish 前先清掉旧 dist,防陈旧文件混留)
-# 或直接用根目录脚本(封装:停进程→清 dist→publish→验证 dll→可选测试→重启):
-powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
-```
-
-- **先停常驻进程再构建**:`razer-taskbar.exe` 运行时锁住 `razer-taskbar.dll`,
-  MSBuild 的复制步骤会静默失败——Core.dll 刷新了而 app 产物仍是旧版,改完"没生效"多半是它。
-- 普通构建不刷新 win-x64 RID 输出时加 `--no-incremental`。
-- exe 是 apphost 壳,判断是否部署成功要看 **razer-taskbar.dll** 的时间戳。
-- **不带 `-p:Platform=x64` 的构建会落到另一棵输出树 `bin/Release/.../win-x64/`**:
-  那里的陈旧副本与规范路径互不覆盖,从旧路径手动启动就会跑旧版
-  (2026-09-07 踩过:color-key 时代的 `bin/Release` 副本被启动,误判为渲染回退)。
-  bin 树只用于构建,运行/自启动一律指向仓库根 `dist/razer-taskbar.exe`(publish 直出,
-  `.gitignore` 已忽略 dist/)。
-- **dotnet test 不要加 `--quiet`**(MSBuild 参数解析冲突);注意 `dotnet test` 只重建测试依赖链,
-  不含 app csproj——探针参数(app 侧)改动后必须单独 build app 再跑探针。
-
-## 独立诊断探针(不进 UI,单实例守卫之前)
-
-| 命令 | 用途 |
-|---|---|
-| `razer-taskbar.exe --hid-probe` | HID 全枚举 + 电量/充电查询 + GATT 全 dump |
-| `razer-taskbar.exe --hid-scan` | get 半区只读全段扫描(分钟级) |
-| `razer-taskbar.exe --ble-vendor` | Razer BLE 厂商 GATT 通道重放(观测查询基线) |
-| `… --ble-vendor --sweep` | 厂商通道 page 01/05 × id 0x80-0xFF 只读枚举 |
-| `… --ble-vendor --raw=LEN:PAGE:ID:PARAM[:hex]` | 单发命令(LEN≠0=写,需 `--yes-i-know`;set 半区 id 拒绝) |
-| `… --ble-vendor --power` | 生产路径 `BleVendor.TryReadPower` 自检(电量/充电/回退) |
-
-- BLE 厂商通道探针要求设备在蓝牙模式;通道被驱动/服务层占用时 `--power` 报
-  `characteristics missing` → null(回退路径,属预期)。协议细节见 `docs/agent-hid.md`。
-- **STA 线程饿死 WinRT 事件泵**(探针踩坑):WinRT `ValueChanged` 回调在 STA 主线程同步阻塞时
-  会被泵调度延迟数秒,响应帧全部错位。探针核心必须跑在 MTA 线程池
-  (`Task.Run(...).GetAwaiter().GetResult()`);HidWatcher 的轮询线程本就是后台 MTA,无此问题。
+命令、部署坑（停进程/平台标志/dist 树/dll 时间戳）、测试覆盖面与**独立诊断探针**（`--hid-probe`/
+`--hid-scan`/`--ble-vendor` 及 STA 饿死 WinRT 事件泵踩坑）统一维护在 **`docs/agent-build.md`**，
+此处不再重复。
 
 ## 运行时模型(对应要求)
 

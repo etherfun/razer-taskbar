@@ -1,71 +1,90 @@
 # razer-taskbar — Agent 协作规范
 
-Razer Synapse 日志驱动的 Windows 任务栏电池挂件（Rust，无托盘依赖，无图片资源，GDI 原生绘制）。
+Windows 任务栏电池挂件（C# / WinUI 3 + Win32 P/Invoke，挂件层 GDI/ULW 原生绘制，无图片资源）。
+Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全量版。
 
-- 运行环境：Windows 10 / 11，需 Razer Synapse 3 或 4 在后台运行。
-- 构建产物：单个 `target/release/razer-taskbar.exe`，无安装程序。
-- 入口：`src/main.rs`（STA COM 初始化 → 加载配置 → 启动 watcher 线程 → 主线程消息循环）。
-- 任务栏布局事件驱动（Taskbar-Lyrics 式）：`TaskbarCreated` 广播 + UIA 结构变化事件触发去抖重排，1s 定时器兜底；详见 `docs/agent-taskbar.md`。
+- 运行环境：Windows 10 / 11；Razer Synapse 3/4 可选（回退电量源 + 蓝牙身份桥）；.NET 8 SDK 构建，
+  Windows App SDK Runtime 缺失时降级为挂件-only（Bootstrap 静默失败，不退出进程）。
+- 构建产物：`dist/razer-taskbar.exe`（`dotnet publish` 直出，无安装程序；运行/自启动只认 dist）。
+- 入口：`src/RazerTaskbar/Program.cs`（单实例检查 → Bootstrap.TryInitialize → 线程划分：主线程 STA
+  跑 WinUI、razer-widget STA 跑挂件/托盘/悬停、razer-watcher 跑日志解析+历史采样、razer-uia-events
+  MTA 跑 UIA 监听；详见 `docs/agent-csharp.md` 线程模型）。
+- 任务栏布局事件驱动（Taskbar-Lyrics 式）：`TaskbarCreated` 广播 + UIA 结构变化事件触发去抖重排，
+  1s 定时器兜底；详见 `docs/agent-taskbar.md`。
 
 ## 目录结构
 
 | 路径 | 说明 |
 |---|---|
-| `src/main.rs` | 入口，单实例检查，线程划分 |
-| `src/watcher.rs` | Synapse V3/V4 日志监听与解析 |
-| `src/battery.rs` | 设备模型、`pick_device_to_display` 选择规则、`device_kind` 类型判定、颜色/字形 |
-| `src/taskbar.rs` | 任务栏发现、Win10/Win11 定位、共存避让 |
-| `src/window.rs` | 覆盖层窗口、GDI 绘制、菜单、事件驱动布局（TaskbarCreated + 去抖） |
-| `src/uia_events.rs` | UIA 结构变化监听线程（任务栏布局变化即时重排） |
-| `src/hover.rs` | 悬停设备列表面板（光标轮询，非交互只读） |
-| `src/icons.rs` | GDI 矢量设备类型图标（鼠标/耳机/键盘/其他） |
-| `src/tray.rs` | 托盘兜底图标（菜单入口，explorer 重启后重挂） |
-| `src/i18n.rs` | 极简国际化：英文源串即 key，`tr()` 映射 zh；语言 auto（跟随系统）/en/zh，设置页/菜单热切换 |
-| `src/history.rs` | 电量历史：SQLite 采样（`battery.db`）、充放电周期切分（换电跳变/关机排除）、加权预测（剩余可用/距充满） |
-| `src/viewer.rs` | "Battery history…" 查看窗口（深色 Win11 风格：DWM 深色标题栏/圆角、卡片布局、owner-draw pill/列表、GDI 图表） |
-| `src/settings.rs` | "Settings…" 设置窗口（同 viewer 的深色风格）：整合原托盘菜单全部设置项，改动即时生效并落盘；通过 `window.rs` 的 pub 辅助函数（`modify_config`/`set_shown_device`/`reposition_widget` 等）改 UI 线程状态 |
-| `src/config.rs` | `%APPDATA%\razer-taskbar\settings.json` 读写、自启动同步 |
-| `Cargo.toml` | 依赖（`windows 0.58`、`notify 6`、`serde_json`、`rusqlite(bundled)` 等） |
+| `src/RazerTaskbar/` | WinUI3 主应用（exe，`WindowsPackageType=None` 框架依赖 unpackaged） |
+| `Program.cs` / `App.xaml(.cs)` | 入口、单实例、Bootstrap 降级、线程划分 |
+| `MainWindow.xaml(.cs)` | NavigationView 主窗口（History/Settings 两页宿主，按需惰性创建） |
+| `Native/WidgetWindow.cs` | 挂件覆盖层窗口、ULW/GDI 绘制、菜单、事件驱动布局、embed v2、交叉淡化 |
+| `Native/TaskbarLocator.cs` | 任务栏发现、Win10/11 定位、widgets 板 UIA 查询与避让 |
+| `Native/HoverPanel.cs` | 悬停设备列表面板（光标轮询，非交互只读） |
+| `Native/TrayIcon.cs` | 托盘兜底图标（菜单入口，explorer 重启后重挂） |
+| `Native/DeviceIcons.cs` / `GdiText.cs` | GDI 矢量设备类型图标 / 字体回退与墨迹测量 |
+| `Native/UiaEvents.cs` + `Native/Interop/Uia.cs` | UIA 结构变化监听（手写 COM interop） |
+| `Native/Interop/Win32.cs` | Win32 P/Invoke 声明集中地 |
+| `Native/AppState.cs` / `SingleInstance.cs` | 配置权威副本（挂件线程写+落盘）/ 单实例守卫 |
+| `Views/HistoryPage` / `Views/SettingsPage` / `Controls/BatteryChart.cs` | 历史/设置页与 WinUI Shapes 图表 |
+| `src/RazerTaskbar.Core/` | 无 UI 类库（exe 与测试共享） |
+| `Core/Hid/`（RazerReport / RazerPidTable / BleBattery / BleVendor） | USB HID 90 字节 vendor report 与 BLE 厂商 GATT 通道 |
+| `Core/Interop/HidApi.cs` | hid.dll P/Invoke |
+| `Core/Models/`（DeviceModels / DisplayMode / Glyphs / HistoryModels） | 设备模型、`DeviceSelector`+`DisplayModeResolver` 选择决策器、字形/颜色 |
+| `Core/Services/WatcherService.cs` | Synapse V3/V4 日志监听与解析（+HidWatcher 直读、身份桥接） |
+| `Core/Services/HistoryService.cs` | 电量历史：SQLite 采样、周期切分、三层预测；见 `docs/agent-history.md` |
+| `Core/Services/SpikeFilter.cs` / `ReboundFilter.cs` | 瞬时跳变剔除（写时）/ 弛豫回弹剔除（读时） |
+| `Core/Services/ConfigService.cs` | `%APPDATA%\razer-taskbar\settings.json` 读写、自启动同步 |
+| `Core/Services/I18n.cs` / `Log.cs` / `ExportService.cs` | 国际化 / 日志（文件+stderr 镜像）/ CSV 导出 |
+| `tests/RazerTaskbar.Tests/` | xUnit 测试（Rust 侧单测的移植 + C# 扩展） |
+| `build.ps1` | 停进程→清 dist→publish→验证 dll→(测试)→重启 |
+| `RazerTaskbar.sln` | 3 项目：RazerTaskbar / RazerTaskbar.Core / RazerTaskbar.Tests |
 
 ## 常用命令
 
 ```powershell
-cargo build --release   # 发布构建
-cargo run --release     # 直接运行
-cargo test --quiet      # 单元测试（battery / watcher 解析规则）
+dotnet publish src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64 -o dist   # 部署（先停常驻进程）
+dotnet test    tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj                        # 单元测试（勿加 --quiet）
+powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]               # 一键脚本
 ```
+
+- `-p:Platform=x64` 必须带，否则落另一棵输出树产生互不覆盖的陈旧副本。
+- exe 运行时锁 `razer-taskbar.dll`（MSBuild 复制静默失败）：构建前先停进程（build.ps1 已封装）。
+- 部署成功看 **razer-taskbar.dll** 时间戳（exe 只是 apphost 壳）。
 
 详情见 `docs/agent-build.md`。
 
 ## 配置速览
 
-- 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `serde(default)` 回填。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`display_mode`（fixed/drop_swap/rotate，默认 fixed；drop_swap=其他设备电量下降（如 100→99）时临时替换显示 `swap_display_secs` 秒（默认 30），rotate=全部在线设备按名称轮播、每台 `rotate_interval_secs` 秒（默认 30）；决策器 `Core/Models/DisplayMode.cs`，模式/参数变更需重置运行态）、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：优先 USB HID 直读电量；蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS）、无 HID/BLE 设备回退日志解析，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`embed_into_widgets_space`（默认 false；开启后挂件嵌入任务栏小组件按钮内部空位并忽略 widget_side，旧值 widget_side=widgets 载入时自动归一为本开关，同时整块拦截鼠标——挂件区域吞掉点击不再触发小组件面板，WM_NCHITTEST + alpha 底板双闸）、`embed_into_taskbar`（默认 false；嵌入 v2：销毁重建为任务栏带真正子窗口，GDI+colorkey 呈现、锚窗口承载线程绑定，可与 widgets_space 组合，见 `docs/agent-embed.md`）、`avoid_overlap_with_widgets`、`show_tray_icon`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，C# 双层字形渲染）、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
+- 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `ConfigService` 默认值回填，旧配置文件始终可加载。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`display_mode`（fixed/drop_swap/rotate，默认 fixed；drop_swap=其他设备电量下降（如 100→99）时临时替换显示 `swap_display_secs` 秒（默认 30），rotate=全部在线设备按名称轮播、每台 `rotate_interval_secs` 秒（默认 30）；决策器 `Core/Models/DisplayMode.cs`，模式/参数变更需重置运行态）、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：优先 USB HID 直读电量；蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS）、无 HID/BLE 设备回退日志解析，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`embed_into_widgets_space`（默认 false；开启后挂件嵌入任务栏小组件按钮内部空位并忽略 widget_side，旧值 widget_side=widgets 载入时自动归一为本开关，同时整块拦截鼠标——挂件区域吞掉点击不再触发小组件面板，WM_NCHITTEST + alpha 底板双闸）、`embed_into_taskbar`（默认 false；嵌入 v2：销毁重建为任务栏带真正子窗口，ULW+重建 poke 呈现、锚窗口承载线程绑定，可与 widgets_space 组合，见 `docs/agent-embed.md`）、`avoid_overlap_with_widgets`、`show_tray_icon`、`show_widget`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，双层字形渲染）、`fade_transition`、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
-- 自启动：`HKCU\...\Run\RazerTaskbar`，由菜单切换同步。
+- 自启动：`HKCU\...\Run\RazerTaskbar`，由设置页开关同步。
 
 ## Agent 工作守则
 
 - Windows-only 项目：不引入跨平台抽象，不假设 Linux/macOS 可编译。
-- `windows` crate 保持 0.58 API 用法；Win32 调用一律 `unsafe` 包裹，失败路径只记日志不 panic（消息循环内）。
-- 日志解析改动必须同步更新 `watcher.rs` 内对应单测；显示选择改动必须覆盖 `battery.rs` 的选择单测。
-- 任务栏定位改动先读 `docs/agent-taskbar.md`，不破坏 hold/grace/jump-cap 状态机与 OS 白名单。
-- 配置新增字段必须带 `serde(default)` 默认值，保持旧配置文件可加载。
-
-## C# + WinUI3 移植（实验，`csharp/`）
-
-分支 `refactor/csharp-winui3` 上的全量 C# 移植：挂件层为 C# P/Invoke（观感与 Rust 版对齐），
-历史+设置合并为一个 WinUI3 NavigationView 窗口；框架依赖 unpackaged（不打包 Windows App SDK
-Runtime，缺失时降级为挂件-only）。与 Rust 版共享 settings.json/battery.db，**不可同时运行**。
-构建/测试/映射表/冒烟记录见 `docs/agent-csharp.md`。改动 C# 侧日志解析或选择规则时，
-同步更新 `tests/RazerTaskbar.Tests`（对应 Rust 侧单测的移植）。
+- Win32/COM interop 集中在 `Native/Interop/`、`Core/Interop/`（手写 COM interop 的 IID/vtable 对齐官方
+  Win32 元数据）；Win32 调用失败路径只记日志（`Log`），消息循环/回调内禁止未捕获异常。
+- 日志解析改动必须同步更新 `tests/RazerTaskbar.Tests`（`WatcherV3Tests`/`WatcherV4Tests`）；显示选择改动
+  必须覆盖 `BatteryTests`/`DisplayModeTests`；协议改动同步 `HidTests`；历史/过滤改动同步
+  `HistoryTests`/`ReboundFilterTests` 等（见各 agent 文档"测试锚点"节）。
+- 任务栏定位改动先读 `docs/agent-taskbar.md`：小组件板（天气）硬保留、UIA 缓存失效路径必须维持；不重新
+  引入反应式第三方避让（设计决定见该文档）。
+- 配置新增字段必须带默认值（`ConfigService`），保持旧配置文件可加载。
+- 渲染保真红线：任何模式**不**调 `SetLayeredWindowAttributes` COLORKEY（黑 key 有 AA 暗边）；阴影
+  `0x202020` 非纯黑；覆盖层保持 `WS_POPUP`、嵌入保持出生即 `WS_CHILD`，模式切换走销毁重建**永不**
+  SetParent（`docs/agent-embed.md`）；z-burst 运行中不重排定时器；`DrawTextW` 空缓冲短路；V4 末行损坏
+  不推进时间戳。
 
 # 分文档索引
 
-- 构建/测试/调试：`docs/agent-build.md`
+- 构建/测试/调试/诊断探针：`docs/agent-build.md`
 - 编码规范与检查：`docs/agent-conventions.md`
 - 日志解析与设备选择：`docs/agent-watcher.md`
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
+- 电量历史与预测（采样/切分/三层预测/防伪过滤）：`docs/agent-history.md`
 - HID 直读电量（协议/Windows 坑/探针）：`docs/agent-hid.md`
-- C# + WinUI3 移植（csharp/，实验分支）：`docs/agent-csharp.md`
+- C# 实现总览（线程模型/模块映射/冒烟记录/已知差异）：`docs/agent-csharp.md`
 - 任务栏真嵌入设计（embed v2/26340 实测机制）：`docs/agent-embed.md`

@@ -1,6 +1,6 @@
 # 日志监听与设备选择
 
-适用：改动 `src/watcher.rs`、`src/battery.rs`、`src/config.rs` 相关逻辑。
+适用：改动 `src/RazerTaskbar.Core/Services/WatcherService.cs`、`Core/Services/HidWatcher.cs`、`Core/Models/DeviceModels.cs` 相关逻辑。
 
 ## 数据源
 
@@ -11,15 +11,15 @@
   - 文件选择：正则 `^systray_systrayv2(\d*)\.log$`，序号最大者胜（对应 TS `findLatestSynapseV4LogFile`）。
   - 行格式：`[timestamp] ... connectingDeviceData: [...]`；全文件按时间重放，缺席最新快照的设备标离线。
   - 在线集合：最新快照中所有 `serialNumber`/`deviceContainerId`；handle 取 `serialNumber` 为空则回退 `deviceContainerId`；`NOSERIALNUMBER` 在真序列号出现后去重删除。
-  - 增量 guard：`last_v4_timestamp` 未变直接返回；最新行 JSON 腐坏不推进 timestamp，下轮重试（避免全员冻结离线）。
+  - 增量 guard：`lastV4Timestamp` 未变直接返回；最新行 JSON 腐坏不推进 timestamp，下轮重试（避免全员冻结离线）。
 - 版本选择（`synapse_version`）：`v3`/`v4` 强制；`auto`（默认）有 V4 候选即用 V4。
 
-## 监听循环（`RazerWatcher::run`）
+## 监听循环（`WatcherService` watcher 线程）
 
-- 首次 `parse_once` 让挂件立即有内容；`notify` 监听 V3 文件 + V4 目录，事件驱动解析：首个事件置脏，去抖 1s（`EVENT_DEBOUNCE`，整批写入只解析一次）后立即 `parse_once`。
-- `polling_throttle_secs` 退化为无事件时的兜底轮询节奏（记录历史时取 `min(polling_throttle_secs, history_poll_interval_secs)`），每轮重读 `config::load()`：菜单改轮询间隔/显示设备即时生效；下限钳制 2s。历史采样骑在每次解析上（事件驱动后过渡点更准时）。
+- 首次 `ParseOnce` 让挂件立即有内容；`FileSystemWatcher` 监听 V3 文件 + V4 目录，事件驱动解析：首个事件置脏，去抖 1s（整批写入只解析一次）后立即 `ParseOnce`。
+- `polling_throttle_secs` 退化为无事件时的兜底轮询节奏（记录历史时取 `min(polling_throttle_secs, history_poll_interval_secs)`，ulong 域钳制防手编配置回绕），每轮重读 `ConfigService`：设置页改轮询间隔/显示设备即时生效；下限钳制 2s。历史采样骑在每次解析上（事件驱动后过渡点更准时）。
 
-## 显示选择（`battery::pick_device_to_display`）
+## 显示选择（`DeviceSelector.PickDeviceToDisplay` + `DisplayModeResolver`）
 
 - 候选：`is_connected && is_selected`（`shown_device_handle` 为空 = 全选，即 UI 中的"当前电量最低设备"自动项；菜单/切换后回写 `is_selected`）。
 - 排序：`battery * (charging ? 100 : 1)` 升序取首个 → 非充电优先，电量低优先（与 TS `tray_manager.ts` 一致）。
@@ -31,7 +31,9 @@
 - 颜色（`color_for`）：0–19 红、20–39 橙、40–59 黄、60–79 浅绿、80+ 绿；离线灰。
 - 字形（`fluent_battery_glyph`）：E850–E85A 按 10% 分档；充电且 ≥50% 用 EA93。
 
-## 单测锚点（`watcher.rs #[cfg(test)]`）
+## 单测锚点（`tests/RazerTaskbar.Tests`）
 
-- `SAMPLE` 真实 V4 形状（含 camelCase + `null`）：字段映射、`null` 回退、空序列号回退容器 id。
-- 充电四态：`Charging=true`，`NoCharge_BatteryFull`/`off`/`""=false`。改解析必须保持这三组用例全绿。
+- `WatcherV4Tests`：真实 V4 形状（含 camelCase + `null`）：字段映射、`null` 回退、空序列号回退容器 id；心跳收割。
+- `WatcherV3Tests`：V3 正则事件解析。
+- 充电四态：`Charging=true`，`NoCharge_BatteryFull`/`off`/`""=false`。改解析必须保持这些用例全绿。
+- HID 直读侧（`HidWatcher`/身份桥接）见 `docs/agent-hid.md`；历史预测见 `docs/agent-history.md`。

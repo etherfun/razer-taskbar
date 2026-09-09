@@ -1,311 +1,141 @@
 # razer-taskbar
 
-Display the battery state of Razer products as a floating widget on the
-Windows taskbar — a click-through overlay, no PNG assets (a tray icon exists
-purely as a fallback menu entry point). C# / WinUI 3 implementation; the
-original Rust version lives in the git history. The only bundled image asset
-is the small app icon (`assets/app.ico`).
+A battery widget for the Windows taskbar. razer-taskbar shows the battery level of your
+Razer mouse, keyboard or headset as a small, unobtrusive widget that lives right on the
+taskbar — always visible, never in the way.
 
-Battery data is read **directly from the hardware** (`battery_source=auto`):
-USB HID vendor feature reports on the 2.4G dongle / cable, Razer's private
-vendor GATT channel on Bluetooth — so Razer Synapse is *optional*: it is only
-the fallback data source (devices the direct queries can't reach, e.g.
-headsets) and the identity/charging bridge when the Bluetooth channel is
-busy.
+Battery data is read **directly from the hardware** over USB or Bluetooth, so Razer
+Synapse is **optional**: it is only used as a fallback for devices whose battery can't be
+queried directly (some headsets), and to bridge device identities over Bluetooth.
 
-The Synapse log watcher and device selection are ported from
-[sanraith/razer-taskbar](https://github.com/sanraith/razer-taskbar)
-(TypeScript / Electron). The widget idea was inspired by
-[Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBatteryTaskbar),
-the top-level-overlay embedding of
-[TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor)
-and the event-driven layout of
-[Taskbar-Lyrics](https://github.com/mo-jinran/Taskbar-Lyrics).
+Free and open source (GPLv3), built with C# / WinUI 3.
+
+## Features
+
+* **Taskbar widget** — battery percentage with a color-coded battery glyph and a charging
+  bolt; sits next to the tray (or on the left), and is click-through, so it never steals a
+  click.
+* **Time estimates** — predicts usable time left while discharging and time to full while
+  charging, learned from each device's own usage history.
+* **Hover device list** — rest the cursor on the widget to see every known device at a
+  glance, with the one being shown highlighted.
+* **Battery history** — optional recording to a local database, with a history window
+  (level chart, cycle stats, battery health) that explains where the estimates come from.
+* **Settings window** — every option applies live, no restart needed; the UI ships in
+  English and 中文.
+* **No images, no installer** — the widget is drawn natively and stays crisp at any DPI.
 
 ## Requirements
 
 * Windows 10 or 11
-* .NET 8 SDK (build time only)
-* Windows App SDK Runtime — optional: without it the app degrades to
-  widget-only mode (no settings/history windows)
-* Razer Synapse 3 or 4 — optional: fallback battery source and the Bluetooth
-  identity/charging bridge
+* .NET 8 SDK (only needed to build)
+* Windows App SDK Runtime (optional) — needed for the Settings and Battery history
+  windows; without it the app runs in widget-only mode
+* Razer Synapse 3 or 4 (optional) — the fallback battery source, see
+  [How it works](#how-it-works)
 
-## Run / build
+## Getting started
 
-```powershell
-dotnet build src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64
-# -> src/RazerTaskbar/bin/x64/Release/net8.0-windows10.0.22621.0/win-x64/razer-taskbar.exe
-dotnet test  tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
-```
-
-No installer: the exe (plus its DLLs) can be copied anywhere and run. Enable
-*Run at startup* in the Settings window (writes `HKCU\...\Run\RazerTaskbar`).
-
-Diagnostic probes (same exe): `--hid-probe` (HID enumeration + battery/charging
-queries + GATT dump), `--hid-scan` (read-only vendor command sweep),
-`--ble-vendor` (`--power` / `--sweep` / `--raw=…`, see `docs/agent-csharp.md`).
-
-## How it works
-
-Battery polling (`battery_source=auto`) tries, in order:
-
-1. **Direct HID** (dongle / cable) — 90-byte vendor feature reports, below.
-2. **Razer vendor GATT channel** (Bluetooth) — battery *and* charging from
-   the device itself, below.
-3. **Synapse logs** — for devices the direct queries can't reach (e.g.
-   headsets), ported from the Electron original's `src/watcher/*.ts`
-   (sanraith/razer-taskbar):
-   * `%LOCALAPPDATA%\Razer\Synapse3\Log\Razer Synapse 3.log` (V3:
-     `_OnBatteryLevelChanged` / `_OnDeviceLoaded` / `_OnDeviceRemoved`)
-   * `%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2*.log`
-     (V4: `connectingDeviceData: [...]` JSON, whole history replayed, last snapshot decides connection)
-
-The V4 log's periodic heartbeat device array doubles as the **identity
-bridge**: it logs every paired device with its canonical serial regardless of
-transport, so a device seen under the dongle PID, the cable PID and the BLE
-MAC collapses into one identity — the battery history follows the physical
-device across all three modes.
-
-Display pick: the menu-selected device first, else the lowest battery
-preferring non-charging devices.
-
-### Taskbar hook
-
-The widget is a top-level `WS_POPUP | WS_EX_LAYERED` overlay window at
-`HWND_TOPMOST`, NOT a `WS_CHILD` of the taskbar — a child would be composited
-under taskbar-wide effects like TranslucentTB acrylic, while the layered
-overlay composites above. The overlay is click-through (`WM_NCHITTEST` →
-`HTTRANSPARENT`), so it never steals taskbar clicks.
-
-Layout is event-driven (Taskbar-Lyrics approach):
-
-* The `TaskbarCreated` broadcast (explorer restart) re-binds the taskbar
-  handle, resets the hold state, re-adds the tray icon and re-anchors.
-* A background UIA `IUIAutomationStructureChangedEventHandler` on the taskbar's
-  XAML input site posts a coalesced message on every taskbar layout change
-  (tray icons appearing/disappearing, widgets board toggling, …).
-* A 1s timer stays as the fallback poll and drives the tray refresh.
-  Placement passes dedupe: nothing moves, repaints or logs while the state
-  is unchanged, and the Win11 widgets-board UIA query is cached.
-
-Anchoring: Win11 (detected via the `DesktopWindowContentBridge` child) sits at
-`TrayNotifyWnd.left - width + 2`, vertically centered; Win10/classic anchors
-on the `ReBarWindow32` band (fallback `WorkerW`).
-
-### Hover device list
-
-Resting the cursor on the widget (350ms) opens a small rounded panel above it
-listing **every** known device — type icon, battery glyph, name, charging bolt,
-level-colored percentage — with the device the widget currently shows
-highlighted. Since the overlay is click-through and receives no mouse
-input, hover is detected by polling the cursor on a 120ms timer; the panel
-itself is topmost, never takes focus and is click-through too. Toggle via
-*Show devices on hover* in the Settings window (`hover_devices` in
-settings.json, default on).
-
-### Battery history & predicted usage time
-
-Every parse pass also samples the devices into `%APPDATA%\razer-taskbar\battery.db`
-(SQLite, retained forever): a point is written when (connected, charging,
-level) changes, plus a 15-min heartbeat; the *Record interval* setting
-controls how fast the watcher polls for this (1–30s, default 5s).
-
-From that history the widget predicts per device:
-
-* **Usable time left** while discharging — the weighted mean of past
-  discharge cycles ("active hours per %", newest 10 cycles full weight,
-  next 90 half, older ignored) times the current level. Cycles span across
-  power-save shutdowns: disconnected stretches (idle auto-off) count no
-  time but do not end a cycle, and a large level jump while discharging is
-  treated as a battery swap (a fresh cycle starts at the new level).
-* **Time to full** while charging — same weighting over charge sessions,
-  tracked separately.
-
-The prediction shows in the hover panel, the tray tooltip, and optionally
-on the widget itself (*Show time remaining on widget*; the widget widens to
-fit). *Battery history…* opens a viewer window in a dark Win11 style (DWM
-rounded corners + dark title bar, WinUI palette, stat cards) with a
-level-over-time chart (green = charging, dark bands = off/unknown time
-excluded from stats), cycle stats cards and the cycle/session list with
-USE/CHARGE badges. Toggle recording via *Record battery history*
-(`record_battery_history`, default on).
-
-### Coexistence with other hook tools
-
-Every placement enumerates the taskbar's visible children, skips the OS
-whitelist (`Start`, `ReBarWindow32`, `MSTaskSwWClass`, `TrayNotifyWnd`,
-`DesktopWindowContentBridge`, …) and shifts past any remaining occupant
-(e.g. TrafficMonitor), logging `exe (class)` to stderr (only when the state
-changes). Right side shifts left, left side shifts right; position is clamped
-into the taskbar band. A hold/grace/jump-cap state machine prevents
-leapfrogging with other widgets that have their own avoidance logic, and a
-500px jump cap refuses far yields. The Win11 widgets board (weather) is
-XAML content invisible to `EnumChildWindows`, so it is avoided via a cached
-UIA rect of the `WidgetsButton`, always, regardless of the overlap switch.
-
-### Native icons
-
-The battery is drawn in `WM_PAINT` with plain GDI — rounded outline,
-proportional fill (red/orange/yellow/green by level), charging-bolt polygon,
-percentage text. No `assets/*.png`, DPI-aware via `GetDpiForWindow`.
-Each device's type (headset / mouse / keyboard / other) shows as a small
-GDI vector icon ahead of the battery glyph, both on the widget and in the
-hover panel. The type comes from the Synapse V4 log's `category` field
-(MOUSE / KEYBOARD / HEADSET / …), falling back to product-name keywords for
-V3 logs and unknown categories.
-
-### App icon
-
-The exe / title-bar icon (`assets/app.ico`, 16–256 px) is the Razer
-triple-headed snake with a battery on a dark circular badge in the
-bottom-right corner, on a transparent background — the badge separates the
-battery from the snake and keeps it readable on both light and dark shells.
-Sizes are not a plain downscale: 48 px and up use the full composition, at
-32/24 px the battery + badge grow dominant while the snake shrinks, and the
-16 px icon is the battery alone (no badge — there is no snake to separate it
-from) — small sizes stay readable as a battery. It is composed per-size by
-`assets/make_icon.py`
-(Python + Pillow) from a 1280 px transparent render of the logo
-(`assets/snake-raw.png`); tweak the geometry and regenerate with:
+Build (or run `build.ps1`, which also stops a running instance and deploys for you):
 
 ```powershell
-python assets/make_icon.py
+dotnet publish src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64 -o dist
 ```
 
-The csproj embeds it via `<ApplicationIcon>` and copies it next to the exe so
-`MainWindow` can hand it to `AppWindow.SetIcon` (unpackaged apps have no
-package manifest to take the icon from). See [Disclaimer](#disclaimer) for
-the trademark situation.
+Then start `dist\razer-taskbar.exe`. There is no installer — the folder can be copied
+anywhere. Turn on *Run at startup* in the Settings window to start it with Windows.
 
-## Menu (right-click the tray icon) & Settings window
+For development, the unit tests live in `tests/RazerTaskbar.Tests`:
 
-The overlay itself is click-through, so the tray icon carries the menu. It
-stays deliberately small — quick device switching plus entry points:
+```powershell
+dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
+```
 
-* Device list (radio: *Lowest battery device* or one connected device)
-* Settings… (opens the history + settings window on the settings tab)
-* Battery history… (same window, history tab)
-* Exit
+## Using the widget
 
-Everything else lives in the **Settings** window, organized into three
-sections:
+The widget itself is click-through, so the tray icon (if enabled) carries the right-click
+menu — kept deliberately small: the device list (*Lowest battery device* or one connected
+device), *Settings…*, *Battery history…* and *Exit*.
 
-* **Widget** — show widget (turns the taskbar overlay off entirely for a
-  tray-only setup), display mode (fixed / swap on battery drop / rotate
-  all devices) with its swap & rotate intervals, shown device, widget side
-  (left/right), embed into the widgets button's free space, embed into the
-  taskbar, show time remaining, colored battery icon, fade transition,
-  show tray icon, show devices on hover
-* **History** — poll interval (5/10/15/30/60s), record battery history,
-  record interval (1/2/5/10/30s)
-* **General** — language (Auto / English / 中文), run at startup
+Everything else lives in the **Settings** window, grouped into *Widget*, *History* and
+*General*: display mode (fixed / temporarily swap on a battery drop / rotate all devices),
+widget side, embedding options (into the taskbar itself, or into the widgets button's free
+space), time remaining, colored battery icon, fade transition, hover list, recording
+intervals, language (Auto / English / 中文) and run at startup. Every change applies and
+persists immediately — nothing needs a restart.
 
-Every change applies and persists immediately (no OK/Cancel); the watcher
-re-reads settings.json each cycle, so nothing needs a restart.
+Settings live in `%APPDATA%\razer-taskbar\settings.json`; battery history is recorded to a
+`battery.db` database next to it. Both stay on your machine.
 
-The UI ships in English and Chinese; **Auto** (default) follows the Windows
-UI language, switches apply live (`language` in settings.json). Compact
-durations (`3h25m`) stay locale-neutral.
+### Battery history & predictions
 
-Config lives in `%APPDATA%\razer-taskbar\settings.json`.
+With *Record battery history* enabled, every connected device is sampled into the local
+database — whenever its level, charging state or connection changes, plus a periodic
+heartbeat. From that history the widget learns each device's habits and predicts:
+
+* **Usable time left** while discharging, and **time to full** while charging. Predictions
+  account for real-world quirks: battery swaps (a fresh cycle starts at the new level),
+  idle periods that cost no time, and the slowing charge tail near 100%.
+* **Battery health** in the history window — how today's charge speed compares with the
+  device's earliest recorded sessions, and where the wear trend is heading.
+
+The *Battery history…* window shows the level-over-time chart (green while charging, dark
+bands for off/unknown stretches that are excluded from the stats), cycle stats and the
+cycle/session list.
 
 ## Supported hardware
 
 * Potentially any wireless Razer device compatible with Razer Synapse 3 or 4.
-* Tested with Razer Blackshark V2 Pro (2023), Razer Joro (keyboard, all three
-  connection modes) and Razer Viper V3 HyperSpeed (mouse, dongle + cable).
+* Tested with: Razer BlackShark V2 Pro (2023) headset (via Synapse logs), Razer Joro
+  keyboard (dongle, cable and Bluetooth) and Razer Viper V3 HyperSpeed mouse (dongle and
+  cable).
 
-### What each connection mode provides
+What each connection mode provides — plain-language version; the full protocol notes live
+in [docs/agent-hid.md](docs/agent-hid.md):
 
-Battery data comes from direct device queries (`battery_source=auto`, no
-Synapse needed) with Synapse logs as fallback. Verified on the Joro keyboard
-and Viper V3 HyperSpeed mouse; the raw protocol notes live in
-`docs/agent-hid.md`.
-
-| Data | 2.4G dongle | Wired (cable mode) | Bluetooth (BLE) |
+| | 2.4G dongle | USB cable | Bluetooth |
 |---|---|---|---|
-| **Battery level** | ✅ HID `0x07/0x80` → raw byte in `args[1]`, Scaled255 ×100/255 or direct 0..100 per firmware generation (Viper: `156` = 61%) | ✅ same | ✅ vendor GATT `05/81` Scaled255 (Joro: `0xF7` = 97%) → GATT Battery Service `0x180F/0x2A19` (0..100) |
-| **Status: normal (discharging)** | ✅ HID `0x07/0x84` → `0` | ✅ HID `0x07/0x84` → `0` | ✅ vendor GATT `05/85` → `0` |
-| **Status: charging** | ❌ not reported over the dongle link — `0x07/0x84` stays `0` even docked and charging (level still updates live, `247`→`255`); the Synapse heartbeat (`"Charging"`) is the only dongle-mode source | ✅ HID `0x07/0x84` → `1` while charging; at full charge the flag drops but the device still runs off USB power, so cable + 100% is displayed as charging | ✅ vendor GATT `05/85` → `1` (cable in/out flipped it twice; level rose `F7`→`F9` while plugged) |
-| **Status: power saving** | ❌ not reportable | ❌ not reportable | ⚠️ live state is firmware-local (FN+ESC is host-invisible — toggling changes nothing on the wire); only the *configuration* is readable: vendor GATT `05/8A` → `[enabled][idle s][sleep min]` = `[01][300][20]` |
-| **Status: off / asleep** | ⚠️ query NoResponse → retry, then absence counter | n/a (cable keeps it alive) | ⚠️ GATT unreachable → absence counter; Synapse heartbeat enum `"off"` |
-| **Serial identity** | ✅ HID `0x00/0x82` → 22-byte ASCII, per slot: mouse tx `0x1F` → mouse serial, keyboard tx `0x9F` → keyboard serial (`SI2522F18701637`) | ✅ same serial as dongle | ✅ vendor GATT `01/83` (22-byte ASCII) → Synapse heartbeat → `BLE:<MAC>` |
-| **Device name & type** | ✅ product string — names the dongle's primary device; the combo keyboard slot takes its name/type from the Synapse log (its serial is read directly) | ✅ product string | ✅ GAP name + heartbeat `category` |
-| **Works without Synapse running** | ✅ | ✅ | ✅ — only when Razer's device loader (`razerwdl.exe`) actively holds the vendor channel do level/serial fall back as above |
-| **Predicted usable / time-to-full (history)** | ✅ | ✅ | ✅ |
+| Battery level | ✅ | ✅ | ✅ |
+| Charging status | via Synapse only | ✅ | ✅ (when Razer's own tools aren't holding the channel) |
+| Device identity (serial) | ✅ | ✅ | ✅ via the vendor channel or Synapse (else a MAC-based id) |
+| Works without Synapse running | ✅ | ✅ | ✅ |
 
-Synapse's own heartbeat reports a `powerStatus.chargingStatus` enum —
-`"Charging"` / `"NoCharge_BatteryFull"` / `"off"`. Note the middle value is
-the *generic* not-charging state (it appears even at 61% unplugged), and BLE
-heartbeat entries carry no `powerStatus` at all — so over Bluetooth the
-charging flag really only comes from the vendor channel above.
+All three modes share one device identity, so the widget and its history follow the
+physical device, not how it happens to be connected. Devices the direct queries can't
+reach (headsets) fall back to Synapse logs; a power-saving state is not reportable by the
+hardware.
 
-The three modes share one device identity (the same serial across dongle,
-cable and Bluetooth), so the battery history follows the physical device, not
-the transport.
+## How it works
 
-#### USB HID (dongle / cable) — 90-byte vendor feature report
+A few notes for the curious — full design notes live in [docs/](docs):
 
-Ported from the reverse-engineered OpenRazer kernel driver (`razer_report`,
-`static_assert(sizeof == 90)`; hid.dll feature buffers carry a leading
-report-ID byte, so wire buffers are 91 bytes):
+* **Battery source** (`battery_source=auto`): direct USB HID queries on the dongle/cable,
+  Razer's private vendor channel on Bluetooth, and Synapse log parsing as the fallback.
+* **The widget is an overlay**: a small always-on-top, click-through window above the
+  taskbar — not a child of it — so it stays visible even with TranslucentTB-style taskbar
+  mods and never intercepts a click. It re-anchors itself whenever the taskbar changes
+  (tray icons appearing/disappearing, an explorer restart) and always keeps clear of the
+  Win11 widgets (weather) button. See [docs/agent-taskbar.md](docs/agent-taskbar.md).
+* **Predictions** are learned per device from its recorded history (recency-weighted
+  cycles plus per-level charge/discharge profiles), with reporting glitches, battery
+  swaps and idle stretches filtered out along the way. See
+  [docs/agent-history.md](docs/agent-history.md).
+* **Everything is drawn natively** — the battery, the device type icons, all of it — no
+  bitmap assets, DPI-aware.
 
-* request `[status=00][tx][remaining=0,2B][protocol=0][data_size][class][id][args…][crc][00]`
-  — battery = class `0x07` id `0x80`, charging = `0x07` `0x84`, serial =
-  `0x00` `0x82` (22-byte ASCII argument)
-* response validated in order: status (`0x02` success; `0x01` busy /
-  `0x04` no-response → retry, the wireless link sleeps and the first query
-  after idle usually no-responses; `0x03`/`0x05` final), echo of
-  tx+class+id, CRC = XOR of payload bytes 2..87 (no constant). The value is
-  `arguments[1]`
-* the transaction id is per PID (`RazerPidTable.cs`: mice `0x1F`, keyboards
-  `0x9F`, unknown PIDs probe `0x1F/0x9F/0x3F/0xFF`); combo dongles host
-  several sub-devices behind one receiver, each with its own slot ids
-* battery scale per firmware generation (`BatteryScale`): legacy `0..255`
-  (Scaled255, ×100/255) vs direct `0..100`, with an above-100-means-255
-  heuristic for unknown PIDs
+## Inspired by & acknowledgments
 
-#### Bluetooth LE — Razer's private vendor GATT channel
-
-Service `52401523-f97c-7f90-0e7f-6c6f4e36db1c` (undocumented; reverse
-engineered from HCI captures of Synapse 4 — method and full command table in
-`docs/agent-hid.md`):
-
-* `52401524` (Write) = command channel: 8-byte frame
-  `[seq][payload_len]00 00[page][id][param:2]`; writes append `payload_len`
-  bytes in a second Write Request
-* `52401525` (Read+Notify) = response: 20-byte register snapshots, header
-  `[echo_seq][len]00 00 00 00 00[tag]` with tag `0x02` = ok / `0x05` =
-  unknown command; `len` payload bytes follow in further snapshots and every
-  byte past the declared length is stale register content — never
-  interpreted
-* verified commands: battery = page `05` id `81` (Scaled255), charging =
-  `05`/`85` (`0`/`1`), serial = `01`/`83` (22-byte ASCII)
-* when Razer's services actively hold the channel (characteristics enumerate
-  but fail to open until their session ends) the app degrades: level from
-  the standard Battery Service `0x180F`/`0x2A19` (no charging flag), serial
-  from the Synapse heartbeat, else `BLE:<MAC>`
-* keyboard-local shortcuts (e.g. FN+ESC power saving) are firmware-internal
-  and invisible to the host
-
-#### Synapse log fallback
-
-V3 regex events carry level + charging state directly. V4 replays the
-`connectingDeviceData` JSON arrays and harvests the ~1/min heartbeat device
-array (canonical serial, category, `chargingStatus`); a heartbeat older than
-10 minutes no longer supplies the charging flag.
-
-## Attributions
-
-* sanraith/razer-taskbar — direct upstream: the Synapse log watcher and
-  device selection are ported from its TypeScript sources:
-  <https://github.com/sanraith/razer-taskbar>
-* OpenRazer — the USB HID vendor protocol is ported from its kernel driver:
-  <https://github.com/openrazer/openrazer>
-* RazerBatteryTaskbar: <https://github.com/Tekk-Know/RazerBatteryTaskbar>
-* TrafficMonitor taskbar embedding: <https://github.com/zhongyang219/TrafficMonitor>
-* Taskbar-Lyrics overlay + event-driven layout: <https://github.com/mo-jinran/Taskbar-Lyrics>
+* [sanraith/razer-taskbar](https://github.com/sanraith/razer-taskbar) — the direct
+  upstream: this project started as a port of its Synapse log watcher and device
+  selection (TypeScript / Electron).
+* [OpenRazer](https://github.com/openrazer/openrazer) — the USB HID vendor protocol is
+  ported from its kernel driver.
+* [Tekk-Know/RazerBatteryTaskbar](https://github.com/Tekk-Know/RazerBatteryTaskbar) —
+  the original widget idea.
+* [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) — the approach to
+  embedding into the taskbar.
+* [Taskbar-Lyrics](https://github.com/mo-jinran/Taskbar-Lyrics) — the event-driven
+  taskbar layout.
 
 ## License
 

@@ -23,8 +23,9 @@
 
 - 响应校验：status=0x02 成功（先于 echo 校验，忙/无响应的应答头可能是旧命令的）；
   echo（tx/class/id）+ CRC；`arguments[1]`（整包 byte 10）= 电量原始值 / 充电标志。
-- 电量缩放：**鼠标 = raw × 100 / 255**（0..255；已在 Viper V3 HyperSpeed 真机确认：raw 161 = 63%，
-  与 Synapse 一致；新旧世代均如此）。键盘未实测，`BatteryScale.Auto` 启发式（≤100 视为直读百分比）。
+- 电量缩放：按 PID 显式表项（`RazerPidTable`，`BatteryScale` 枚举）：**鼠标世代 = Scaled255，raw × 100 / 255**
+  （0..255；已在 Viper V3 HyperSpeed 真机确认：raw 161 = 63%，与 Synapse 一致）；直读百分比机型 = Direct100；
+  未知 PID 用 `BatteryScale.Auto` 启发式（≤100 视为直读百分比，>100 按 0..255 缩放）。
 - status：0x01 忙 / 0x04 无响应 → 重发；0x03 失败 / 0x05 不支持 → 放弃。
 - 无线链路空闲会休眠：空闲后第一次查询往往 NoResponse，靠重发唤醒（重试间隔递增 100/200/350/500ms，
   最多 5 次；xzeldon 用 10×500ms）。
@@ -52,7 +53,7 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
 - 键盘槽的显示名：产品字符串是鼠标名，且**厂商协议没有名称命令**（INFO 类 0x00 实测只有
   0x81 固件 / 0x82 串号 / 0x84 模式；OpenRazer 的设备名也是内核驱动按 PID 硬编码的
   `device_type` switch，daemon 只读 sysfs）。名称来源：优先从 Synapse V4 日志收割
-  `serialNumber → name.en`（`RazerWatcher.HarvestSerialNames`，Synapse 曾运行过即可，
+  `serialNumber → name.en`（`WatcherService.HarvestSerialNames`，Synapse 曾运行过即可，
   10 分钟重试一次），兜底 "Razer Keyboard"；Kind=Keyboard 由槽位角色保证。
   键盘自有 dongle（产品名即键盘名）保留产品名；Joro 有线见下节。
 
@@ -99,7 +100,7 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - **身份分裂已由日志桥解决（2026-09-07 二期）**：0x180A 没有 0x2A25 串号特征，蓝牙上拿不到
   厂商串号。但 **Synapse 心跳设备数组**（V4 日志 `info: Device  [{…}, …]` 行，约 1 分钟一条）
   给所有配对设备记录**规范串号**而不分传输——`useBle:true` 标记 BLE 设备（真机验证：蓝牙 Joro
-  仍记 `serialNumber SI2522F18701637` + USB productId 717）。`RazerWatcher.HarvestBleIdentities`
+  仍记 `serialNumber SI2522F18701637` + USB productId 717）。`WatcherService.HarvestBleIdentities`
   读日志尾部最后一条心跳（256KB tail），解析 BLE 电量设备（串号/名称/类别/充电状态，
   心跳 >10 分钟旧则充电位不采信），`MatchBleIdentity` 按设备类别匹配（唯一候选即使类别
   不符也接受——蓝牙名可能很简短；两个同类别候选保持歧义→回退 MAC）。命中后蓝牙身份
@@ -248,7 +249,7 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 
 ## 设备身份 / 数据流
 
-- `HidWatcher.Poll` 由 `RazerWatcher.ParseOnce` 在 watcher 线程调用（单写者），
+- `HidWatcher.Poll` 由 `WatcherService.ParseOnce` 在 watcher 线程调用（单写者），
   写入 `DeviceStore` 的条目与日志源同构（`IsSelected` 盖章、`DeviceClassifier` 分类），
   下游挂件/hover/托盘/历史零改动。历史采样仍由 `Tick` 统一挂载。
 - 身份：优先厂商序列号查询，其次 HID 序列号字符串，最后 `HID:{pid:X4}`（见第 6 点）。
