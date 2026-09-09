@@ -194,10 +194,11 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
   (UIA 矩形 2007-2159,紧邻 TrayNotifyWnd)内部天气文字(最右 Text 子元素右缘 x≈2075)到按钮右缘
   之间有一段 OS 留空的内部区域(用户截图红框)。widgets 模式把挂件**居中**在该空位上:
   UIA 查询除按钮矩形外还做按钮子树的有界 DFS(`ScanInnerTextRight`,ControlType==Text,
-  深度≤3/每层兄弟≤12)取天气文字右缘,`x = (textRight + boardRight)/2 - w/2`,
-  精确居中,无额外偏置(旧版曾向按钮右缘偏 `clamp((w-freeWidth)/4, 0, 16)` 防墨迹压住
-  "多云"文字;窗口贴墨迹后用不上,且复查确认当年悬出源于任务栏侧布局而非墨迹宽度,
-  2026-09-09 移除);文字扫描失败回退
+  深度≤3/每层兄弟≤12)取天气文字右缘,`x = (textRight + boardRight)/2 - w/2 + bias`,
+  居中 + 自适应右偏 `clamp((w-freeWidth)/4, 0, 16)`:墨迹放得下时 bias=0 精确居中;
+  预计时间较长(如 "156h59m")时墨迹超过空位宽度,向按钮右缘偏移(留白/箭头侧容忍透明
+  悬出,"多云"文字侧不容许遮挡;2026-09-09 恢复——同日早些时候曾因窗口贴墨迹后空位
+  通常够宽而移除,但长时间文本会让墨迹重新超出空位);文字扫描失败回退
   按钮整体居中,板矩形缺失(TaskbarDa=0/UIA miss)回退右锚。挂件仍是 TOPMOST 覆盖层,
   不改 Windows 小组件本身。开关关闭时回到普通左/右锚点(小组件板恢复为禁区)。曾短暂以
   `widget_side=widgets` 形式存在,Load() 时自动归一为本开关。板信息与避让共用同一 30s 缓存
