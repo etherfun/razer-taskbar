@@ -102,6 +102,38 @@ public sealed class BatteryTests
     }
 
     [Fact]
+    public void SelectionWithoutEligibleDeviceReturnsNull()
+    {
+        // Empty roster, all disconnected, all unselected — the widget draws
+        // "--" rather than crashing or resurrecting a stale device.
+        Assert.Null(DeviceSelector.PickDeviceToDisplay(new Dictionary<string, RazerDevice>()));
+        var gone = new Dictionary<string, RazerDevice>
+        {
+            ["a"] = Dev("a", 50, false, true) with { IsConnected = false },
+        };
+        Assert.Null(DeviceSelector.PickDeviceToDisplay(gone));
+        var unselected = new Dictionary<string, RazerDevice>
+        {
+            ["a"] = Dev("a", 50, false, selected: false),
+        };
+        Assert.Null(DeviceSelector.PickDeviceToDisplay(unselected));
+    }
+
+    [Fact]
+    public void SelectionTieKeepsFirstEntry()
+    {
+        // Equal sort keys (both 50% discharging): the strict < comparison
+        // keeps the first-enumerated entry, so the pick is stable across
+        // passes instead of flickering between two devices.
+        var m = new Dictionary<string, RazerDevice>
+        {
+            ["a"] = Dev("a", 50, false, true),
+            ["b"] = Dev("b", 50, false, true),
+        };
+        Assert.Equal("a", DeviceSelector.PickDeviceToDisplay(m)!.Handle);
+    }
+
+    [Fact]
     public void KindFromV4CategoryBeatsName()
     {
         // A device named like a mouse but categorized as keyboard stays keyboard.

@@ -7,6 +7,7 @@
 //! Fonts live until process exit; GDI font handles are process-wide.
 
 using System.Runtime.InteropServices;
+using RazerTaskbar.Core;
 using static RazerTaskbar.Native.Interop.Gdi32;
 using RazerTaskbar.Native.Interop;
 using static RazerTaskbar.Native.Interop.User32;
@@ -50,19 +51,27 @@ internal static class GdiText
         var f = CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0,
             DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, "Segoe UI Variable Text");
-        if (!string.Equals(ActualFace(f), "Segoe UI Variable Text", StringComparison.OrdinalIgnoreCase))
+        if (!FaceResolved(f, "Segoe UI Variable Text"))
         {
             DeleteObject(f);
             f = CreateFontW(-height, 0, 0, 0, weight, 0, 0, 0,
                 DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-            if (!string.Equals(ActualFace(f), "Segoe UI", StringComparison.OrdinalIgnoreCase))
+            if (!FaceResolved(f, "Segoe UI"))
             {
-                Console.Error.WriteLine("razer-taskbar: text font fell back to " + ActualFace(f));
+                Log.Info("razer-taskbar: text font fell back to " + ActualFace(f));
             }
         }
         return f;
     }
+
+    /// <summary>True when `font` is a live handle whose GDI-resolved face is
+    /// `face`. The verification is the point: CreateFontW accepts any face
+    /// name and silently substitutes (see <see cref="CreateTextFont"/>), so
+    /// a nonzero handle proves nothing — a `font == 0` fallback never fires
+    /// and glyphs render in whatever the substitute turned out to be.</summary>
+    internal static bool FaceResolved(IntPtr font, string face)
+        => string.Equals(ActualFace(font), face, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Face name GDI resolved for `font` ("" when unknowable).
     /// Requires a screen DC to select the font into; one-shot per font.</summary>

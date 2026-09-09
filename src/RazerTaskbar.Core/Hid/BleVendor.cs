@@ -244,10 +244,10 @@ public static class BleVendor
         {
             return services.Services[0];
         }
-        // Another stack component may hold the service — try the shared open.
-        var retry = device.GetGattServicesForUuidAsync(ServiceUuid, BluetoothCacheMode.Uncached)
-            .AsTask().GetAwaiter().GetResult();
-        foreach (var s in retry.Services)
+        // Another stack component may hold the service: open the already
+        // enumerated results with shared access instead of re-enumerating
+        // (a same-arguments retry just pays a second GATT round trip).
+        foreach (var s in services.Services)
         {
             var open = s.OpenAsync(GattSharingMode.SharedReadAndWrite).AsTask().GetAwaiter().GetResult();
             if (open == GattOpenStatus.Success)

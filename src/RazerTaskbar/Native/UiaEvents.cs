@@ -8,6 +8,7 @@
 //! self-detected by the 30s idle check).
 
 using System.Runtime.InteropServices;
+using RazerTaskbar.Core;
 using static RazerTaskbar.Native.Interop.User32;
 using static RazerTaskbar.Native.Interop.Win32Consts;
 
@@ -91,7 +92,7 @@ public static class UiaEvents
         {
             // S_OK/S_FALSE (0/1) are both success: .NET's SetApartmentState
             // already initialized the MTA, which lands here as S_FALSE.
-            Console.Error.WriteLine($"razer-taskbar: UIA listener CoInitializeEx failed: 0x{hr:X8}");
+            Log.Error($"razer-taskbar: UIA listener CoInitializeEx failed: 0x{hr:X8}");
             return;
         }
         try
@@ -138,7 +139,7 @@ public static class UiaEvents
             var uia = Interop.UiaInterop.Create();
             if (uia is null)
             {
-                Console.Error.WriteLine("razer-taskbar: UIA CoCreateInstance failed");
+                Log.Error("razer-taskbar: UIA CoCreateInstance failed");
                 return null;
             }
             uia.ElementFromHandle(tray, out var root);
@@ -149,12 +150,12 @@ public static class UiaEvents
             var element = FindInputSite(uia, root) ?? root;
             var handler = new StructureChangedHandler(target, msg);
             uia.AddStructureChangedEventHandler(element, TREE_SCOPE_DESCENDANTS, 0, handler);
-            Console.Error.WriteLine("razer-taskbar: UIA structure listener registered");
+            Log.Info("razer-taskbar: UIA structure listener registered");
             return new Registration { Tray = tray, Target = target, Uia = uia, Element = element, Handler = handler };
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"razer-taskbar: UIA registration failed: {e.Message}");
+            Log.Error($"razer-taskbar: UIA registration failed: {e.Message}");
             return null;
         }
     }

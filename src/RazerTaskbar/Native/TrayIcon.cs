@@ -43,9 +43,11 @@ public static class TrayIcon
             hIcon = BuildIcon(null),
         };
         Shell_NotifyIconW(NIM_ADD, ref nid);
-        // Vista+: ask for the callback version we use.
-        nid.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, ref nid);
+        // Deliberately NOT NOTIFYICON_VERSION_4: v4 suppresses the standard
+        // szTip tooltip (unless NIF_SHOWTIP is also set) and delivers
+        // WM_CONTEXTMENU/NIN_SELECT instead of the mouse messages the WM_TRAY
+        // dispatch in WidgetWindow handles. Legacy keeps tooltip + events
+        // working with zero extra plumbing.
         Refresh();
     }
 
@@ -116,9 +118,10 @@ public static class TrayIcon
     {
         if (enabled)
         {
-            if (_hwnd == 0 && WidgetWindow.DisplayHwnd != 0)
+            var host = WidgetWindow.TrayHostHwnd();
+            if (_hwnd == 0 && host != 0)
             {
-                EnsureCreated(WidgetWindow.DisplayHwnd);
+                EnsureCreated(host);
             }
             else
             {
@@ -133,12 +136,24 @@ public static class TrayIcon
 
     /// <summary>16x16 tray icon (32bpp, per-pixel alpha): battery outline +
     /// level fill + charging bolt, drawn at 2x and downsampled for smooth
-    /// edges. Alpha comes from drawn-pixel coverage.</summary>
+    /// edges. Alpha comes from drawn-pixel coverage. Returns 0 on GDI
+    /// failure (handle exhaustion): the caller's NIM_ADD/NIM_MODIFY then
+    /// degrades to an icon-less registration, same silent-failure rule as
+    /// the other DIB sites (GdiText/DeviceIcons/WidgetWindow/HoverPanel).</summary>
     private static IntPtr BuildIcon((int Level, bool Charging)? state)
     {
         const int src = 32; // 2x supersample of the 16x16 target
         var hdc = GetDC(0);
+        if (hdc == 0)
+        {
+            return 0;
+        }
         var mem = CreateCompatibleDC(hdc);
+        if (mem == 0)
+        {
+            ReleaseDC(0, hdc);
+            return 0;
+        }
         var bmi = new BITMAPINFO
         {
             bmiHeader = new BITMAPINFOHEADER
@@ -152,7 +167,13 @@ public static class TrayIcon
             },
         };
         var hbmp = CreateDIBSection(mem, ref bmi, DIB_RGB_COLORS, out var bits, 0, 0);
-        var old = SelectObject(mem, hbmp);
+        if (hbmp == 0 || bits == 0)
+        {
+            DeleteDC(mem);
+            ReleaseDC(0, hdc);
+            return 0;
+        }
+        var oldBmp = SelectObject(mem, hbmp);
         unsafe
         {
             new Span<byte>((void*)bits, src * src * 4).Clear();
@@ -165,11 +186,11 @@ public static class TrayIcon
         var white = CreateSolidBrush(0x00FF_FFFF);
         var fill = CreateSolidBrush(GdiText.ColorRef(fr.R, fr.G, fr.B));
         var pen = CreatePen(PS_SOLID, 2, 0x00FF_FFFF);
-        SelectObject(mem, pen);
+        var oldPen = SelectObject(mem, pen);
         SelectObject(mem, GetStockObject(NULL_BRUSH));
         // Outline: 1,3 - 12,12; cap at 13,6 - 14,9.
         RoundRect(mem, S(1), S(3), S(12), S(12), 4, 4);
-        SelectObject(mem, white);
+        var oldBrush = SelectObject(mem, white);
         Rectangle(mem, S(13), S(6), S(15), S(10));
         if (state is not null)
         {
@@ -182,7 +203,7 @@ public static class TrayIcon
             if (charging)
             {
                 var bolt = CreateSolidBrush(0x00FF_FFFF);
-                SelectObject(mem, bolt);
+                var oldBolt = SelectObject(mem, bolt);
                 POINT[] pts =
                 [
                     new(S(7), S(3)),
@@ -193,10 +214,16 @@ public static class TrayIcon
                     new(S(6), S(7)),
                 ];
                 Polygon(mem, pts);
+                SelectObject(mem, oldBolt);
                 DeleteObject(bolt);
             }
         }
-        SelectObject(mem, old);
+        // GDI refuses DeleteObject while an object is still selected into a
+        // DC (the handle silently leaks): restore every slot — bitmap, pen,
+        // brush — before the deletes.
+        SelectObject(mem, oldBmp);
+        SelectObject(mem, oldPen);
+        SelectObject(mem, oldBrush);
         DeleteObject(pen);
         DeleteObject(white);
         DeleteObject(fill);
@@ -235,9 +262,11 @@ public static class TrayIcon
         }
         DeleteObject(hbmp);
         DeleteDC(mem);
-        ReleaseDC(0, hdc);
 
-        // 16x16 32bpp color bitmap with the computed alpha.
+        // 16x16 32bpp color bitmap with the computed alpha. hdc is still
+        // live here: the template DC must not be released before this
+        // CreateCompatibleDC (the old code released it two lines early and
+        // only GDI handle-reuse luck kept the icon rendering).
         var outBmi = new BITMAPINFO
         {
             bmiHeader = new BITMAPINFOHEADER
@@ -251,7 +280,18 @@ public static class TrayIcon
             },
         };
         var mem2 = CreateCompatibleDC(hdc);
+        if (mem2 == 0)
+        {
+            ReleaseDC(0, hdc);
+            return 0;
+        }
         var outBmp = CreateDIBSection(mem2, ref outBmi, DIB_RGB_COLORS, out var outBits, 0, 0);
+        if (outBmp == 0 || outBits == 0)
+        {
+            DeleteDC(mem2);
+            ReleaseDC(0, hdc);
+            return 0;
+        }
         unsafe
         {
             output.AsSpan().CopyTo(new Span<uint>((void*)outBits, 256));
@@ -262,10 +302,11 @@ public static class TrayIcon
         var maskBits = new byte[32];
         var mask = CreateBitmap(16, 16, 1, 1, maskBits);
         var ii = new ICONINFO { fIcon = 1, hbmMask = mask, hbmColor = outBmp };
-        var icon = CreateIconIndirect(ref ii);
+        var icon = mask != 0 ? CreateIconIndirect(ref ii) : 0;
         DeleteObject(mask);
         DeleteObject(outBmp);
         DeleteDC(mem2);
+        ReleaseDC(0, hdc);
         return icon;
     }
 }

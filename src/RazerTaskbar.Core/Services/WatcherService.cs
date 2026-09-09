@@ -520,13 +520,7 @@ public sealed class RazerWatcher
                 Log.Error("watcher tick failed", e);
                 lastParse = Environment.TickCount64;
                 dirtyAt = null;
-                try
-                {
-                    Drain(signal);
-                }
-                catch (Exception)
-                {
-                }
+                Drain(signal);
                 Thread.Sleep(1000);
             }
         }
@@ -542,18 +536,20 @@ public sealed class RazerWatcher
         {
             // Re-resolve the V4 log in case Synapse rotated to a new file.
             ParseOnce();
+            // One read drives both the record gate and the throttle. Record
+            // runs unconditionally: its disabled path is what retires the
+            // frozen prediction cache (gating here left stale estimates on
+            // the tray/hover after "record battery history" was turned off).
             var cfg = ConfigService.Load();
-            if (cfg.RecordBatteryHistory)
-            {
-                HistoryService.Record(_devices);
-            }
+            HistoryService.Record(_devices, cfg.RecordBatteryHistory);
             // Long-lived loop: re-read the throttle (edits apply live).
-            // While recording, the tighter record interval wins.
-            long poll = (long)Math.Clamp((long)cfg.PollingThrottleSecs, 0, long.MaxValue >> 1);
-            long hist = (long)Math.Clamp((long)cfg.HistoryPollIntervalSecs, 0, long.MaxValue >> 1);
+            // While recording, the tighter record interval wins. Rust used
+            // Duration::from_secs — the seconds→ms conversion happens here.
+            long poll = IntervalSecs(cfg.PollingThrottleSecs);
+            long hist = IntervalSecs(cfg.HistoryPollIntervalSecs);
             intervalMs = cfg.RecordBatteryHistory && HistoryService.Ready()
-                ? Math.Max(1, Math.Min(poll, hist))
-                : Math.Max(2, poll);
+                ? Math.Max(1, Math.Min(poll, hist)) * 1000L
+                : Math.Max(2, poll) * 1000L;
             lastParse = Environment.TickCount64;
             dirtyAt = null;
             Drain(signal);
@@ -576,6 +572,14 @@ public sealed class RazerWatcher
             }
         }
     }
+
+    /// <summary>Config seconds, capped inside the ulong domain before any
+    /// long cast: a hand-edited settings.json value near ulong.MaxValue
+    /// would wrap negative through (long) and collapse to the interval
+    /// floor (busy loop). Ceiling ≈ 24.8 days, far past any real throttle;
+    /// 0 never reaches here (Load() normalizes it to the default).</summary>
+    private static long IntervalSecs(ulong secs)
+        => (long)Math.Min(secs, (ulong)(int.MaxValue / 1000));
 
     private void ParseOnce()
     {
@@ -638,7 +642,27 @@ public sealed class RazerWatcher
         {
             return;
         }
+        var snapshot = ParseV3Snapshot(log);
+        var shown = ConfigService.Load().ShownDeviceHandle;
+        _devices.Mutate(devices =>
+        {
+            foreach (var (handle, name, level, charging, connected) in snapshot)
+            {
+                devices[handle] = new RazerDevice(
+                    name, handle, level, charging,
+                    BatterySaver: false,
+                    IsConnected: connected,
+                    IsSelected: shown.Length == 0 || shown == handle,
+                    Kind: DeviceClassifier.FromCategoryAndName("", name));
+            }
+        });
+    }
 
+    /// <summary>V3 log text → last-battery-event-per-handle snapshot.
+    /// Internal for tests: the three regexes must keep matching the real
+    /// Synapse 3 log shapes (docs/agent-csharp.md "V3/V4 正则逐字保留").</summary>
+    internal static List<(string Handle, string Name, int Level, bool Charging, bool Connected)> ParseV3Snapshot(string log)
+    {
         // Last match per handle wins; connection = loaded after removed (by offset).
         static Dictionary<string, (int Index, Match Match)> LastByHandle(Regex re, string log)
         {
@@ -654,29 +678,21 @@ public sealed class RazerWatcher
         var loaded = LastByHandle(V3LoadedRegex, log);
         var removed = LastByHandle(V3RemovedRegex, log);
 
-        var shown = ConfigService.Load().ShownDeviceHandle;
-        _devices.Mutate(devices =>
+        var result = new List<(string, string, int, bool, bool)>();
+        foreach (var (handle, (_, m)) in battery)
         {
-            foreach (var (handle, (_, m)) in battery)
-            {
-                var name = m.Groups["name"].Value;
-                int level = Math.Min(int.TryParse(m.Groups["level"].Value, out var l) ? l : 0, 100);
-                bool charging = m.Groups["isCharging"].Value != "0";
-                // TS parity: missing events count as index -1, so a
-                // battery-only device with no load/remove info stays
-                // disconnected instead of showing stale state.
-                long loadedIdx = loaded.TryGetValue(handle, out var lo) ? lo.Index : -1;
-                long removedIdx = removed.TryGetValue(handle, out var re) ? re.Index : -1;
-                bool connected = loadedIdx > removedIdx;
-                // V3 has no category: classify by product-name keywords.
-                devices[handle] = new RazerDevice(
-                    name, handle, level, charging,
-                    BatterySaver: false,
-                    IsConnected: connected,
-                    IsSelected: shown.Length == 0 || shown == handle,
-                    Kind: DeviceClassifier.FromCategoryAndName("", name));
-            }
-        });
+            var name = m.Groups["name"].Value;
+            int level = Math.Min(int.TryParse(m.Groups["level"].Value, out var l) ? l : 0, 100);
+            bool charging = m.Groups["isCharging"].Value != "0";
+            // TS parity: missing events count as index -1, so a
+            // battery-only device with no load/remove info stays
+            // disconnected instead of showing stale state.
+            long loadedIdx = loaded.TryGetValue(handle, out var lo) ? lo.Index : -1;
+            long removedIdx = removed.TryGetValue(handle, out var re) ? re.Index : -1;
+            bool connected = loadedIdx > removedIdx;
+            result.Add((handle, name, level, charging, connected));
+        }
+        return result;
     }
 
     private void ParseV4()

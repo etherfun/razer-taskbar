@@ -68,6 +68,9 @@ public sealed class SpikeFilter
         if (!_holds.TryGetValue(handle, out var hold))
         {
             int delta = s.Level - lastWrittenLevel;
+            // Suspect-jump predicate — keep in sync with CommittedGlitchTs
+            // in HistoryService: write-time hold here, same rule again for
+            // the startup scrub of committed rows.
             bool suspect = Math.Abs(delta) >= JumpPct
                 || (!s.Charging && delta >= RiseSuspectPct);
             if (!suspect)

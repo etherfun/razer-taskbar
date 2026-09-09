@@ -29,13 +29,19 @@ public sealed class HistoryTests
         // the i18n test via the I18nSequential collection — the language is
         // global state).
         I18n.SetSetting(LanguageSetting.En);
-        var e = new Estimate(3 * 3600 + 25 * 60, Charging: false);
-        Assert.Equal("~3h25m", HistoryService.FormatEstimateCompact(e));
-        Assert.Equal("~3h25m left", HistoryService.FormatEstimateVerbose(e));
-        var c = new Estimate(70 * 60, Charging: true);
-        Assert.Equal("+1h10m", HistoryService.FormatEstimateCompact(c));
-        Assert.Equal("full in 1h10m", HistoryService.FormatEstimateVerbose(c));
-        I18n.SetSetting(LanguageSetting.Auto);
+        try
+        {
+            var e = new Estimate(3 * 3600 + 25 * 60, Charging: false);
+            Assert.Equal("~3h25m", HistoryService.FormatEstimateCompact(e));
+            Assert.Equal("~3h25m left", HistoryService.FormatEstimateVerbose(e));
+            var c = new Estimate(70 * 60, Charging: true);
+            Assert.Equal("+1h10m", HistoryService.FormatEstimateCompact(c));
+            Assert.Equal("full in 1h10m", HistoryService.FormatEstimateVerbose(c));
+        }
+        finally
+        {
+            I18n.SetSetting(LanguageSetting.Auto);
+        }
     }
 
     [Fact]

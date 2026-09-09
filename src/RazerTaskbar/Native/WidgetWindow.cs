@@ -109,6 +109,10 @@ public static class WidgetWindow
         public Stopwatch? LastCoveredLog;
         public bool Embedded;
         public bool EmbedFailed;
+        /// <summary>show_widget gate: the widget thread always runs (tray,
+        /// config marshaling, exit), but the display window only exists while
+        /// this is set.</summary>
+        public bool WidgetOn;
         /// <summary>Click shield currently applied to the presented frame
         /// (embed_into_widgets_space). Tracked so a flip forces a repaint:
         /// the alpha floor lives in the presented DIB, and Paint's signature
@@ -150,6 +154,19 @@ public static class WidgetWindow
     /// is WidgetThread.Hwnd; the tray icon, hover panel and painting bind to
     /// this one.</summary>
     public static IntPtr DisplayHwnd => _state?.Hwnd ?? 0;
+
+    /// <summary>Window that should carry the tray icon callbacks: the display
+    /// window when it exists, the anchor otherwise (show_widget off) — the
+    /// anchor lives as long as the thread.</summary>
+    public static IntPtr TrayHostHwnd()
+    {
+        var st = _state;
+        if (st != null && st.Hwnd != 0 && IsWindow(st.Hwnd))
+        {
+            return st.Hwnd;
+        }
+        return st?.MsgHwnd ?? 0;
+    }
 
     /// <summary>Invalidate the display window (content changed without a
     /// move — the paint path dedupes by signature).</summary>
@@ -196,7 +213,7 @@ public static class WidgetWindow
         var tray = TaskbarLocator.FindShellTray();
         if (tray == 0)
         {
-            Console.Error.WriteLine("razer-taskbar: Shell_TrayWnd not found");
+            Log.Info("razer-taskbar: Shell_TrayWnd not found");
             App.RequestExit();
             return;
         }
@@ -214,7 +231,7 @@ public static class WidgetWindow
         ushort atom = RegisterClassW(ref wc);
         if (atom == 0)
         {
-            Console.Error.WriteLine($"razer-taskbar: RegisterClassW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            Log.Error($"razer-taskbar: RegisterClassW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
         }
 
         // The anchor window is never shown; it only hosts the message
@@ -229,7 +246,7 @@ public static class WidgetWindow
             0, 0, instance, 0);
         if (st.MsgHwnd == 0)
         {
-            Console.Error.WriteLine($"razer-taskbar: anchor CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            Log.Error($"razer-taskbar: anchor CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             App.RequestExit();
             return;
         }
@@ -237,38 +254,43 @@ public static class WidgetWindow
         // 144x48: full taskbar height, wide enough for icon + "100%" text.
         // Embed mode births the window straight into the band (a migrated
         // window would never composite — docs/agent-embed.md).
-        bool embed = config.EmbedIntoTaskbar && TaskbarLocator.DetectKind(tray) == TaskbarKind.Win11;
-        var hwnd = CreateWidgetHwnd(embed, embed ? tray : 0);
-        if (hwnd == 0)
-        {
-            Console.Error.WriteLine($"razer-taskbar: CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
-            App.RequestExit();
-            return;
-        }
-        st.Hwnd = hwnd;
-        st.Embedded = embed;
+        st.WidgetOn = config.ShowWidget;
         st.WidgetW = 144;
         st.WidgetH = 48;
         _state = st;
         WidgetThread.Init(st.MsgHwnd);
 
-        // Per-pixel-alpha layered presentation (UpdateLayeredWindow): text AA
-        // blends against the REAL taskbar like the native widgets' DirectWrite
-        // text. A layered window paints nothing until its first ULW call —
-        // push one fully transparent frame now (AlphaPresent pokes the band
-        // to capture it in embed mode).
-        EnsureMemSurface(st, hwnd, st.WidgetW, st.WidgetH);
-        if (st.MemDc != 0)
+        if (st.WidgetOn)
         {
-            AlphaPresent(st, hwnd);
-        }
+            bool embed = config.EmbedIntoTaskbar && TaskbarLocator.DetectKind(tray) == TaskbarKind.Win11;
+            var hwnd = CreateWidgetHwnd(embed, embed ? tray : 0);
+            if (hwnd == 0)
+            {
+                Log.Error($"razer-taskbar: CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+                App.RequestExit();
+                return;
+            }
+            st.Hwnd = hwnd;
+            st.Embedded = embed;
 
-        // First call anchors directly: the window still sits at its 0,0
-        // creation rect, which is not a position worth defending.
-        PlaceWidget();
+            // Per-pixel-alpha layered presentation (UpdateLayeredWindow): text AA
+            // blends against the REAL taskbar like the native widgets' DirectWrite
+            // text. A layered window paints nothing until its first ULW call —
+            // push one fully transparent frame now (AlphaPresent pokes the band
+            // to capture it in embed mode).
+            EnsureMemSurface(st, hwnd, st.WidgetW, st.WidgetH);
+            if (st.MemDc != 0)
+            {
+                AlphaPresent(st, hwnd);
+            }
+
+            // First call anchors directly: the window still sits at its 0,0
+            // creation rect, which is not a position worth defending.
+            PlaceWidget();
+        }
         if (config.ShowTrayIcon)
         {
-            TrayIcon.EnsureCreated(hwnd);
+            TrayIcon.EnsureCreated(TrayHostHwnd());
         }
         SetTimer(st.MsgHwnd, TimerId, 1000, 0);
         SetTimer(st.MsgHwnd, TimerHover, HoverPollMs, 0);
@@ -277,6 +299,10 @@ public static class WidgetWindow
         UiaEvents.Spawn(st.MsgHwnd, WmAppLayout);
 
         var msg = new MSG();
+        // != 0 on purpose (Rust used BOOL::as_bool, the same semantics):
+        // GetMessageW's -1 error return has no realistic trigger with a NULL
+        // hwnd filter, and treating it as "bail" would end the whole widget
+        // thread on a phantom.
         while (GetMessageW(out msg, 0, 0, 0) != 0)
         {
             TranslateMessage(ref msg);
@@ -352,7 +378,7 @@ public static class WidgetWindow
         var hwnd = CreateWidgetHwnd(embedded, parent);
         if (hwnd == 0)
         {
-            Console.Error.WriteLine($"razer-taskbar: widget CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+            Log.Error($"razer-taskbar: widget CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             st.Hwnd = 0;
             return false;
         }
@@ -378,6 +404,48 @@ public static class WidgetWindow
             TrayIcon.EnsureCreated(hwnd);
         }
         return true;
+    }
+
+    /// <summary>show_widget toggle applied at runtime: only the display
+    /// window comes and goes. The anchor with its timers, WmInvoke, UIA
+    /// events, the tray icon and the exit path stay live either way — the
+    /// 1s tick keeps TrayIcon.Refresh running so the tooltip stays current.
+    /// Runs on the widget thread.</summary>
+    public static void SetWidgetEnabled(bool enabled)
+    {
+        var st = _state;
+        if (st is null || st.WidgetOn == enabled)
+        {
+            return;
+        }
+        st.WidgetOn = enabled;
+        if (enabled)
+        {
+            // st.Hwnd == 0 sends PlaceWidgetCore down its recreate branch,
+            // which rebuilds + presents the window and re-targets the tray.
+            PlaceWidget();
+            return;
+        }
+        HoverPanel.Hide();
+        var hwnd = st.Hwnd;
+        if (hwnd != 0 && IsWindow(hwnd))
+        {
+            if (st.Embedded)
+            {
+                // Ghost protocol: leave a fully transparent frame in the
+                // band's snapshot instead of the widget (docs/agent-embed.md).
+                // Must run before st.Hwnd is cleared — SilentFrame reads it.
+                SilentFrame(st);
+            }
+            // Clear before DestroyWindow so WM_DESTROY takes the lightweight
+            // (recreate-style) path instead of the full teardown.
+            st.Hwnd = 0;
+            DestroyWindow(hwnd);
+        }
+        else
+        {
+            st.Hwnd = 0;
+        }
     }
 
     /// <summary>Paint one invisible frame on the embedded band child and poke
@@ -430,7 +498,9 @@ public static class WidgetWindow
     private static void PlaceWidgetCore(bool allowRetry)
     {
         var st = _state;
-        if (st.MsgHwnd == 0)
+        // show_widget off: every placement driver (1s poll, UIA events,
+        // Z-burst, reposition posts) must leave the destroyed window alone.
+        if (st.MsgHwnd == 0 || !st.WidgetOn)
         {
             return;
         }
@@ -475,7 +545,7 @@ public static class WidgetWindow
                 // Band-child creation refused: stick to the overlay for this
                 // session and retry the switch once, as an overlay.
                 st.EmbedFailed = true;
-                Console.Error.WriteLine("razer-taskbar: embed rejected, staying as overlay");
+                Log.Info("razer-taskbar: embed rejected, staying as overlay");
                 if (!allowRetry || !RecreateWindow(false, 0))
                 {
                     return;
@@ -483,7 +553,7 @@ public static class WidgetWindow
             }
             else
             {
-                Console.Error.WriteLine($"razer-taskbar: embed={wantEmbed} applied");
+                Log.Info($"razer-taskbar: embed={wantEmbed} applied");
             }
             st.LastLayout = null;
             if (allowRetry)
@@ -500,7 +570,7 @@ public static class WidgetWindow
             if (RecreateWindow(true, placement.Parent))
             {
                 st.LastLayout = null;
-                Console.Error.WriteLine("razer-taskbar: re-embedded after parent change");
+                Log.Info("razer-taskbar: re-embedded after parent change");
                 if (allowRetry)
                 {
                     PlaceWidgetCore(false);
@@ -510,7 +580,7 @@ public static class WidgetWindow
             else
             {
                 st.EmbedFailed = true;
-                Console.Error.WriteLine("razer-taskbar: re-embed failed, falling back to overlay");
+                Log.Info("razer-taskbar: re-embed failed, falling back to overlay");
                 if (!RecreateWindow(false, 0) || !allowRetry)
                 {
                     return;
@@ -542,7 +612,7 @@ public static class WidgetWindow
         string line = $"overlay kind={placement.Kind} pos=({sx},{sy}) size={st.WidgetW}x{st.WidgetH} embed={st.Embedded}";
         if (st.LastLog != line)
         {
-            Console.Error.WriteLine($"razer-taskbar: {line}");
+            Log.Info($"razer-taskbar: {line}");
             st.LastLog = line;
         }
 
@@ -796,7 +866,7 @@ public static class WidgetWindow
         var st = _state;
         if (st.LastCoveredLog is not { } last || last.Elapsed >= CoveredLogEvery)
         {
-            Console.Error.WriteLine("razer-taskbar: taskbar covers the widget — re-asserting topmost");
+            Log.Info("razer-taskbar: taskbar covers the widget — re-asserting topmost");
             st.LastCoveredLog = Stopwatch.StartNew();
         }
         if (st.ZBurstLeft == 0)
@@ -858,7 +928,7 @@ public static class WidgetWindow
             return;
         }
         LastTaskbarRebind.Restart();
-        Console.Error.WriteLine("razer-taskbar: TaskbarCreated — re-binding to taskbar");
+        Log.Info("razer-taskbar: TaskbarCreated — re-binding to taskbar");
         var st = _state;
         var tray = TaskbarLocator.FindShellTray();
         if (tray != 0)
@@ -871,14 +941,16 @@ public static class WidgetWindow
         {
             if (RecreateWindow(true, tray))
             {
-                Console.Error.WriteLine("razer-taskbar: band child re-created");
+                Log.Info("razer-taskbar: band child re-created");
             }
         }
-        if (AppState.Instance.ConfigSnapshot().ShowTrayIcon && st.Hwnd != 0 && IsWindow(st.Hwnd))
+        var host = TrayHostHwnd();
+        if (AppState.Instance.ConfigSnapshot().ShowTrayIcon && host != 0)
         {
             // A fresh taskbar wiped all tray icons: re-register (same
-            // hWnd/uID → replace, never duplicate).
-            TrayIcon.EnsureCreated(st.Hwnd);
+            // hWnd/uID → replace, never duplicate). The anchor hosts the
+            // callbacks while the display window is gated off.
+            TrayIcon.EnsureCreated(host);
         }
         UiaEvents.Rebind();
         PlaceWidget();
@@ -1111,9 +1183,15 @@ public static class WidgetWindow
     private static void FadeTick()
     {
         var st = _state;
+        int bytes = st.MemW * st.MemH * 4;
         if (st.FadePrev is null || st.FadeNew is null
             || st.MemBits == 0 || st.MemW == 0
-            || st.Hwnd == 0 || !IsWindow(st.Hwnd))
+            || st.Hwnd == 0 || !IsWindow(st.Hwnd)
+            // A surface resize mid-fade (placement settled after the device
+            // switch armed the blend) invalidates the snapshots — drop the
+            // animation instead of indexing past the arrays; the resize path
+            // invalidates and repaints anyway.
+            || st.FadePrev.Length != bytes || st.FadeNew.Length != bytes)
         {
             EndFade(st);
             return;
@@ -1178,7 +1256,7 @@ public static class WidgetWindow
             if (!st.UlwFailedLogged)
             {
                 st.UlwFailedLogged = true;
-                Console.Error.WriteLine($"razer-taskbar: UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+                Log.Error($"razer-taskbar: UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             }
             return;
         }

@@ -53,13 +53,19 @@ internal static class DeviceIcons
         }
     }
 
+    /// <summary>Create (caller owns/deletes) the icon font at pixel height
+    /// `h`. Face-verified: CreateFontW never fails for an unknown face — it
+    /// silently substitutes, and on zh-CN the substitute is SimSun — so the
+    /// Win10 fallback (no Segoe Fluent Icons) must check the resolved face,
+    /// not the handle (see GdiText.CreateTextFont).</summary>
     private static IntPtr CreateIconFont(int h)
     {
         var font = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, "Segoe Fluent Icons");
-        if (font == 0)
+        if (!GdiText.FaceResolved(font, "Segoe Fluent Icons"))
         {
+            DeleteObject(font);
             font = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, "Segoe MDL2 Assets");
@@ -94,7 +100,7 @@ internal static class DeviceIcons
         else if (!_inkScanFailureLogged)
         {
             _inkScanFailureLogged = true;
-            Console.Error.WriteLine("razer-taskbar: icon ink scan failed, falling back to ABC widths");
+            Log.Info("razer-taskbar: icon ink scan failed, falling back to ABC widths");
         }
         return scanned;
     }

@@ -160,7 +160,9 @@ public static class DisplayModeResolver
             st.RotateIndex++;
             st.LastRotateMs = nowMs;
         }
-        st.RotateIndex = ((st.RotateIndex % list.Count) + list.Count) % list.Count;
+        // RotateIndex only increments or resets — never negative, so a
+        // single modulo keeps it in range.
+        st.RotateIndex %= list.Count;
         return list[st.RotateIndex];
     }
 }

@@ -53,11 +53,14 @@ public static class BleBattery
                     serial = ReadString(device, GattServiceUuids.DeviceInformation,
                         GattCharacteristicUuids.SerialNumberString);
                     serial = serial is { Length: >= 6 } ? serial : null;
-                    Serials[address] = serial;
                     if (serial is not null)
                     {
+                        Serials[address] = serial;
                         Log.Info($"ble {address:X12}: serial {serial}");
                     }
+                    // else: leave uncached — a transient DIS read failure
+                    // must not root the BLE:{mac} fallback identity for the
+                    // device's lifetime (same policy as HidWatcher.SerialFor).
                 }
                 if (!Names.TryGetValue(address, out var name))
                 {

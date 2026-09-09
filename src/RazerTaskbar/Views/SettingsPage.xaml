@@ -16,6 +16,19 @@
             <TextBlock x:Name="HeaderWidget" Style="{StaticResource SettingsSectionStyle}" />
             <Border Style="{StaticResource CardStyle}">
                 <StackPanel Spacing="2">
+                    <!-- Show widget -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblWidget" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescWidget" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchWidget" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchWidget_Toggled" />
+                    </Grid>
                     <!-- Display mode -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>

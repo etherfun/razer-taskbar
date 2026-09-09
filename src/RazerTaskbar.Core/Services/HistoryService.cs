@@ -159,7 +159,7 @@ public static class HistoryService
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"razer-taskbar: battery.db open failed: {e.Message}");
+            Log.Error($"razer-taskbar: battery.db open failed: {e.Message}");
             return;
         }
         try
@@ -168,7 +168,7 @@ public static class HistoryService
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"razer-taskbar: battery.db load failed: {e.Message}");
+            Log.Error($"razer-taskbar: battery.db load failed: {e.Message}");
             return;
         }
         lock (DbLock)
@@ -355,6 +355,8 @@ public static class HistoryService
             var a = hist[i];
             var b = hist[i + 1];
             int rise = b.Level - a.Level;
+            // Same suspect-jump predicate as SpikeFilter.Admit — keep the
+            // two in sync (write-time hold vs startup scrub).
             bool suspect = Math.Abs(rise) >= SpikeFilter.JumpPct
                 || (!b.Charging && rise >= SpikeFilter.RiseSuspectPct);
             if (!suspect)
@@ -450,10 +452,13 @@ public static class HistoryService
         }
     }
 
-    /// <summary>Called on the watcher thread after every parse pass.</summary>
-    public static void Record(DeviceStore devices)
+    /// <summary>Called on the watcher thread after every parse pass. The
+    /// caller passes its single config read; the disabled path must still
+    /// run — it is what retires the prediction cache, so tray/hover/eta
+    /// stop showing stale estimates once recording is off.</summary>
+    public static void Record(DeviceStore devices, bool recordEnabled)
     {
-        if (!ConfigService.Load().RecordBatteryHistory)
+        if (!recordEnabled)
         {
             lock (Sync)
             {
@@ -541,15 +546,19 @@ public static class HistoryService
                 // disconnect from the last written sample (the pre-jump
                 // level), never from the bogus value.
                 _spikes.Reset(h);
-                int level = _series.TryGetValue(h, out var hist) && hist.Count > 0 ? hist[^1].Level : 0;
-                var s = new Sample(now, level, false, false);
-                InsertSample(conn, h, s);
-                if (!_series.TryGetValue(h, out var hist2))
+                if (!_series.TryGetValue(h, out var hist) || hist.Count == 0)
                 {
-                    hist2 = new List<Sample>();
-                    _series[h] = hist2;
+                    // _seen without a series: MergeAlias folded this handle
+                    // away mid-flight. Skip rather than fabricate a 0%
+                    // disconnect row — the merged (serial-keyed) series
+                    // carries the device state now.
+                    Log.Info($"razer-taskbar: {h}: disconnect skipped, series merged away");
+                    _seen[h] = false;
+                    continue;
                 }
-                hist2.Add(s);
+                var s = new Sample(now, hist[^1].Level, false, false);
+                InsertSample(conn, h, s);
+                hist.Add(s);
                 _seen[h] = false;
             }
             foreach (var h in present)
@@ -569,7 +578,7 @@ public static class HistoryService
                     continue;
                 }
                 var eff = ReboundFilter.Deflate(hist);
-                if (Predict(eff, eff[^1].Level, eff[^1].Charging) is { } e)
+                if (PredictDeflated(eff, eff[^1].Level, eff[^1].Charging) is { } e)
                 {
                     _estimates[h] = (e, LevelAnchorSecs(eff));
                 }
@@ -668,9 +677,11 @@ public static class HistoryService
                     reader.GetInt64(3) != 0));
             }
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // Read failure: return what we have (Rust swallows too).
+            // Read failure: return what we have (Rust swallows too) — but a
+            // corrupt db must not pass for "no data yet" without a trace.
+            Log.Error("battery.db range read failed", e);
         }
         return outList;
     }
@@ -1196,14 +1207,23 @@ public static class HistoryService
     }
 
     /// <summary>Predict the usable time left (discharging) or time to full
-    /// (charging) from the sample series plus the device's current state.
-    /// Callers pass the rebound-deflated series (see
-    /// <see cref="ReboundFilter.Deflate"/>) with its tail level as levelNow.
-    /// Tier 1: per-level transit profile (nonlinear endpoint curve, partial
-    /// sessions included, unobserved levels filled from tier 2). Tier 2:
-    /// EWMA-weighted cycle rate blended with the current session. Tier 3:
-    /// trailing-window instant rate (fresh installs).</summary>
+    /// (charging) from the RAW sample series (the same shape
+    /// <see cref="CycleStatsOf"/>/`<see cref="HealthStatsOf"/> take — the
+    /// rebound deflation happens here, exactly once; Deflate is NOT
+    /// idempotent and a double pass would re-clamp accepted
+    /// recalibrations). Tier 1: per-level transit profile (nonlinear
+    /// endpoint curve, partial sessions included, unobserved levels filled
+    /// from tier 2). Tier 2: EWMA-weighted cycle rate blended with the
+    /// current session. Tier 3: trailing-window instant rate (fresh
+    /// installs).</summary>
     public static Estimate? Predict(IReadOnlyList<Sample> samples, int levelNow, bool chargingNow)
+        => PredictDeflated(ReboundFilter.Deflate(samples), levelNow, chargingNow);
+
+    /// <summary>Prediction core on the already-deflated series
+    /// (`levelNow`/`chargingNow` read from that series' tail by the
+    /// record path). Not a public entry — raw series must go through
+    /// <see cref="Predict"/> so deflation runs exactly once.</summary>
+    private static Estimate? PredictDeflated(IReadOnlyList<Sample> samples, int levelNow, bool chargingNow)
     {
         var (discharge, charge) = ComputeSpans(samples);
         double? secs;

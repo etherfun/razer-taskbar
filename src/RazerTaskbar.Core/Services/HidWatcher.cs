@@ -375,10 +375,9 @@ public sealed class HidWatcher
         public required IntPtr Handle;
         public required string Path;
         public required HidInterface Iface;
-        /// <summary>Serial reported by the vendor command (class 0x00/0x82) —
-        /// the identity Synapse logs use. Empty when the device refuses.</summary>
         /// <summary>Vendor serials per transaction id (multi-device dongles
-        /// host several sub-devices on one collection).</summary>
+        /// host several sub-devices on one collection). Empty when the
+        /// device refuses the vendor command.</summary>
         public readonly Dictionary<byte, string> SerialByTx = new();
     }
 
@@ -455,8 +454,11 @@ public sealed class HidWatcher
                 Marshal.FreeHGlobal(buffer);
             }
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            // The HID source quietly disappears without this path (auto mode
+            // falls back to log parsing) — keep the null contract, add the trace.
+            Log.Error("HID interface detail path enumeration failed", e);
             return null;
         }
     }

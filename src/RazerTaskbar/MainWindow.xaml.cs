@@ -56,7 +56,7 @@ public sealed partial class MainWindow : Window
     /// <summary>Open the window on the given tab; no-op when already there.</summary>
     public void OpenTab(bool selectSettings)
     {
-        var target = selectSettings ? (NavigationViewItem)NavSettings : (NavigationViewItem)NavHistory;
+        NavigationViewItem target = selectSettings ? NavSettings : NavHistory;
         if (!ReferenceEquals(Nav.SelectedItem, target))
         {
             Nav.SelectedItem = target;
@@ -82,6 +82,7 @@ public sealed partial class MainWindow : Window
         {
             settings.Localize();
         }
+        UpdateWindowTitle();
     }
 
     private void Nav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -109,5 +110,16 @@ public sealed partial class MainWindow : Window
                 ContentFrame.Navigate(typeof(Views.SettingsPage));
             }
         }
+        UpdateWindowTitle();
     }
+
+    /// <summary>Alt-tab / taskbar caption follows the open tab: the tray and
+    /// widget menus open this one window as either "Battery history…" or
+    /// "Settings…", and the caption is invisible in-app anyway
+    /// (ExtendsContentIntoTitleBar) — the zh map carries the composed
+    /// strings.</summary>
+    private void UpdateWindowTitle()
+        => Title = ContentFrame.Content is Views.SettingsPage
+            ? I18n.Tr("Settings — Razer Taskbar")
+            : I18n.Tr("Battery history — Razer Taskbar");
 }

@@ -78,7 +78,8 @@ public static class TaskbarLocator
 
         if (kind == TaskbarKind.Win11)
         {
-            var notify = FindChild(tray, "TrayNotifyWnd") is { } nh && nh != 0 ? WindowRect(nh) : null;
+            var nh = FindChild(tray, "TrayNotifyWnd");
+            RECT? notify = nh != 0 ? WindowRect(nh) : null;
             // The legacy `Start` HWND is hidden (zero-size or invisible) on
             // Win11 — ignore it and fall back to the taskbar band.
             RECT? start = null;

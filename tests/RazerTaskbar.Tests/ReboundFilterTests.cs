@@ -89,9 +89,11 @@ public sealed class ReboundFilterTests
     public void ReboundNoLongerShortensPredictedRemaining()
     {
         // End to end: nine slow background percent (15min each), overnight
-        // sleep, the wake bump falling back fast, then real drain. The raw
-        // series blends the bump's fake drain into the rate and the transit
-        // fill, predicting far less remaining time than the deflated one.
+        // sleep, the wake bump falling back fast, then real drain. Predict
+        // takes the RAW series and deflates exactly once internally, so the
+        // bump must not blend its fake drain into the prediction — and raw
+        // and pre-deflated spellings must agree (a double deflation would
+        // re-clamp an accepted recalibration; see ReboundFilter's contract).
         var raw = new List<Sample>();
         for (int i = 0; i <= 9; i++)
         {
@@ -112,8 +114,11 @@ public sealed class ReboundFilterTests
         var effEst = HistoryService.Predict(ReboundFilter.Deflate(raw), 59, false);
         Assert.NotNull(rawEst);
         Assert.NotNull(effEst);
-        Assert.True(effEst!.Value.Secs > rawEst!.Value.Secs,
-            $"deflated {effEst.Value.Secs}s should exceed raw {rawEst.Value.Secs}s");
+        // The entry point deflates; both spellings must land on ONE
+        // prediction. (If Predict ever stopped deflating, the raw input
+        // would again predict strictly less and diverge from the
+        // pre-deflated spelling — that divergence is the old bug.)
+        Assert.Equal(rawEst!.Value, effEst!.Value);
     }
 
     [Fact]

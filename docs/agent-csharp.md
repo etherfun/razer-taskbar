@@ -72,13 +72,13 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 | Rust | C# | 说明 |
 |---|---|---|
 | main.rs | Program.cs + App.xaml.cs | 单实例 FindWindow + EnumChildWindows 兜底;Bootstrap 降级 |
-| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画) |
+| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画)、show_widget 门控(2026-09-09:`SetWidgetEnabled` 只销毁/重建显示窗口,锚窗口/定时器/UIA/托盘常驻,`TrayHostHwnd()` 在挂件关闭时让锚窗口承载托盘回调,`PlaceWidgetCore` 对 !WidgetOn 短路防 1s 轮询/UIA 复活窗口) |
 | taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
 | hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
-| tray.rs | Native/TrayIcon.cs | VERSION_4、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
+| tray.rs | Native/TrayIcon.cs | legacy 回调(2026-09-09 移除 VERSION_4:V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,与 WM_TRAY 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘右键/双击一并失效)、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
 | icons.rs | Native/DeviceIcons.cs | 字形墨迹扫描 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
-| watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖 |
+| watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖;V3 解析单测 WatcherV3Tests |
 | battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
 | history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页)+ ReboundFilter 弛豫回弹剔除(读路径包络,见"已知差异") |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
@@ -109,7 +109,42 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
 - 设置页:新增"嵌入任务栏"开关(`SwitchEmbedTaskbar`);覆盖层↔嵌入的实时切换走
   同一 `RecreateWindow` 路径(启动/重建已验证;开关触发的切换未单独自动化验证)
 
+## 冒烟验证记录(show_widget + 托盘 tooltip,2026-09-09,Win11 26340)
+
+- **托盘 tooltip 修复**:移除 `EnsureCreated` 的 `NIM_SETVERSION`/`NOTIFYICON_VERSION_4`
+  (V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,
+  与 `WM_TRAY` 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘
+  右键/双击一并失效,Rust 版同样带病)。恢复 legacy 后 tooltip/右键菜单/双击历史
+  共用一条已验证路径;悬停人工复核。
+- **show_widget=false 启动**:停进程 → settings.json 置 false → 启动 → 日志只有
+  bootstrap/watcher,**无 first paint / placement**(显示窗口未创建),进程稳定 ✓;
+  恢复 true 重启 → first paint/placement 回归 ✓(配置键随后持久化)。
+- **WriteBlend 尺寸竞态修复**(启动实报,非本次功能引入):设备在布局收敛期
+  (w=41→70)连上时 fade 已武装,表面 resize 后 `FadeTick` 用旧尺寸快照越界
+  (WndProc 保护拦住,6 条 ERROR/次)。`FadeTick` 增加快照长度守卫后,同场景
+  (首绘 none→设备连上→两次 resize)连续两轮启动零 ERROR ✓。
+- 设置页运行时开关(SwitchWidget)与悬停 tooltip 为人工复核项。
+
 ## 已知差异 / 注意
+
+- **移植补漏(2026-09-09 全项目审查)**:① watcher 轮询间隔把秒值直接当毫秒
+  用(Rust `Duration::from_secs` 的 ×1000 在移植时丢失),实际 15ms/5ms 空转
+  约 3000 倍——已修正并在 ulong 域钳制,防手编 settings.json 的
+  ulong→long 回绕把间隔塌到 2ms 忙循环;② ReboundFilter 三个公共入口
+  (Predict/CycleStatsOf/HealthStatsOf)统一收**原始**序列,Predict 拆出已
+  Deflate 内核 `PredictDeflated` 供 Record 复用,消除"Predict 收已
+  Deflate / 其余收原始"的相反契约(双重 Deflate 会重钳已接受的再校准);
+  ③ RecordBatteryHistory 判定收敛到 `HistoryService.Record`(Tick 无条件
+  调用、一次读盘),修复关闭记录后挂件/托盘/悬停残留冻结预测的 bug;
+  ④ TrayIcon.BuildIcon 补齐 GDI 判零(全库唯一不设防点)与选中态
+  DeleteObject 泄漏,顺修 hdc 提前 ReleaseDC 的 use-after-release;
+  ⑤ 字体回退改 `GetTextFaceW` 验证式(GdiText.FaceResolved;DeviceIcons/
+  HoverPanel 的 `font == 0` 是永假分支,Win10 上字形会落 SimSun 替换);
+  ⑥ Native 层 24 处诊断日志从 Console.Error 双轨统一进 Log(WinExe 下
+  stderr 无去处,Log 落文件且镜像 stderr);⑦ I18n 表 switch 转 Dictionary
+  并新增 I18nTests 调用点↔映射表双向对照;⑧ WatcherService.Record 空
+  catch 删除、BLE 序列号失败不再永久缓存、HistoryService 断连样本不再用
+  0% 兜底伪造。
 
 - **墨迹居中/测量走渲染实况(2026-09-09,用户实报"换字形后竖向居中不可用")**:图标字体的
   声明度量(GGO_METRICS)与实际光栅不符——E850 电池字形声明 8px、实际渲染 10px@20px
@@ -132,7 +167,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
   镜像伪影)。接入点:`Record` 的预测+锚点缓存(`_estimates` 存 (Estimate, Anchor),
   锚点在 watcher 线程算好)、`CycleStatsOf`、`HealthStatsOf`、HistoryPage 周期列表。
   **图表与显示百分比保持原始读数**,仅估计用包络。注意:必须在原始序列上恰好调用一次
-  (被接受的次阈值回升二次扫描会被重钳,非幂等);测试 `ReboundFilterTests`(15 条用例
+  (被接受的次阈值回升二次扫描会被重钳,非幂等);测试 `ReboundFilterTests`(11 条用例
   含真实案例基准)。
 
 - **UIA 矩形互操作修复(避让失效根因)**:`IUIAutomationElement.GetCurrentBoundingRectangle`

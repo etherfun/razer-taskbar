@@ -172,9 +172,12 @@ public static class HoverPanel
         var f = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, "Segoe Fluent Icons");
-        // Fallback for Win10 (no Fluent Icons font).
-        if (f == 0)
+        // Face-verified fallback for Win10 (no Fluent Icons font): a
+        // nonzero handle proves nothing — CreateFontW silently substitutes
+        // unknown faces (see GdiText.CreateTextFont).
+        if (!GdiText.FaceResolved(f, "Segoe Fluent Icons"))
         {
+            DeleteObject(f);
             f = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, "Segoe MDL2 Assets");
@@ -187,8 +190,9 @@ public static class HoverPanel
         var f = CreateFontW(h, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, "Segoe UI Variable Text");
-        if (f == 0)
+        if (!GdiText.FaceResolved(f, "Segoe UI Variable Text"))
         {
+            DeleteObject(f);
             f = CreateFontW(h, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
@@ -280,7 +284,7 @@ public static class HoverPanel
             0, 0, 10, 10, 0, 0, instance, 0);
         if (hwnd == 0)
         {
-            Console.Error.WriteLine("razer-taskbar: hover panel CreateWindowExW failed");
+            Log.Error("razer-taskbar: hover panel CreateWindowExW failed");
             return;
         }
         // Per-pixel-alpha layered presentation: SetLayeredWindowAttributes is
@@ -374,6 +378,11 @@ public static class HoverPanel
 
     private static void PaintBody(IntPtr hdc, List<Row> rows, int w, int h)
     {
+        // Hoisted so the finally can free them on every path: a mid-paint
+        // exception used to leak both per-frame fonts (hover repaints run
+        // constantly while the panel is visible).
+        IntPtr iconFont = 0;
+        IntPtr textFont = 0;
         try
         {
             // Card base: opaque dark fill. The presenter turns bare-card
@@ -400,8 +409,8 @@ public static class HoverPanel
             int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
             int rowH = Math.Max(iconH, textH);
             int rowGap = (int)MathF.Round(3.0f * scale);
-            var iconFont = CreateIconFont(iconH);
-            var textFont = CreateTextFont(textH);
+            iconFont = CreateIconFont(iconH);
+            textFont = CreateTextFont(textH);
             var old = SelectObject(hdc, textFont);
 
             int pctW = 0, etaW = 0;
@@ -512,12 +521,15 @@ public static class HoverPanel
                 y += rowH + rowGap;
             }
             SelectObject(hdc, old);
-            DeleteObject(iconFont);
-            DeleteObject(textFont);
         }
         catch (Exception e)
         {
             Log.Error("hover panel paint body failed", e);
+        }
+        finally
+        {
+            DeleteObject(iconFont);
+            DeleteObject(textFont);
         }
     }
 
@@ -661,7 +673,7 @@ public static class HoverPanel
             if (!_ulwFailLogged)
             {
                 _ulwFailLogged = true;
-                Console.Error.WriteLine($"razer-taskbar: hover UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+                Log.Error($"razer-taskbar: hover UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             }
         }
     }

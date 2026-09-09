@@ -5,7 +5,8 @@
 // re-renders on ActualThemeChanged with a light/dark palette.
 //
 // P2 additions: an optional second (compare) series drawn in accent on the
-// same absolute-time axis, and a hover readout (vertical line + nearest-point
+// same absolute-time axis (shutdown stretches bridged by a dim dashed
+// connector), and a hover readout (vertical line + nearest-point
 // dot + stamp/level label) over the main series.
 
 using Microsoft.UI.Xaml;
@@ -51,9 +52,6 @@ public sealed class BatteryChart : Canvas
         PointerMoved += OnPointerMoved;
         PointerExited += (_, _) => ClearHover();
     }
-
-    public void Render(IReadOnlyList<Sample> samples)
-        => Render(samples, null, null);
 
     /// <summary>Render the main series (full treatment) plus an optional
     /// compare series (accent lines only) on the same absolute-time axis.
@@ -113,7 +111,7 @@ public sealed class BatteryChart : Canvas
         // width), so the level line reads as one continuous curve.
         BuildAxis(main, showOffBands);
         double X(long ts) => XOf(ts);
-        double Y(int level) => _y0 + _plotH - (Math.Clamp(level, 0, 100) / 100.0 * _plotH);
+        double Y(int level) => LevelY(level);
 
         // Grid: dotted horizontal lines at 0/50/100 with right-aligned labels.
         foreach (var (lvl, label) in new[] { (100, "100"), (50, "50"), (0, "0") })
@@ -253,10 +251,13 @@ public sealed class BatteryChart : Canvas
             }
         }
 
-        // Compare series: accent lines over the same absolute-time axis.
+        // Compare series: accent lines over the same absolute-time axis, with
+        // shutdown/off stretches bridged by a dashed connector so the series
+        // stays traceable across its gaps.
         if (_compare.Count >= 2)
         {
             var run = new List<Windows.Foundation.Point>();
+            var runs = new List<(Windows.Foundation.Point First, Windows.Foundation.Point Last)>();
             void FlushCompare()
             {
                 if (run.Count >= 2)
@@ -268,6 +269,10 @@ public sealed class BatteryChart : Canvas
                         StrokeLineJoin = PenLineJoin.Round,
                         Points = PointCollectionOf(run),
                     });
+                }
+                if (run.Count > 0)
+                {
+                    runs.Add((run[0], run[^1]));
                 }
                 run.Clear();
             }
@@ -294,6 +299,29 @@ public sealed class BatteryChart : Canvas
                 run.Add(new Windows.Foundation.Point(X(cur.Ts), Y(cur.Level)));
             }
             FlushCompare();
+
+            // Dashed bridges across shutdown stretches: half-transparent so
+            // they read as "unmeasured" rather than real samples. Zero-length
+            // when the gap also collapses on the axis — harmless.
+            if (runs.Count >= 2)
+            {
+                var accentDim = Solid(dark ? 0x60CDFF : 0x0078D4, 0x77);
+                for (int k = 1; k < runs.Count; k++)
+                {
+                    var a = runs[k - 1].Last;
+                    var b = runs[k].First;
+                    Children.Add(new Line
+                    {
+                        X1 = a.X,
+                        Y1 = a.Y,
+                        X2 = b.X,
+                        Y2 = b.Y,
+                        Stroke = accentDim,
+                        StrokeThickness = 1.5,
+                        StrokeDashArray = new DoubleCollection { 3, 3 },
+                    });
+                }
+            }
         }
 
         // Time axis: 5 evenly spaced local-time ticks (first left-aligned,
@@ -307,25 +335,25 @@ public sealed class BatteryChart : Canvas
         {
             for (int k = 0; k <= 4; k++)
             {
-            var tb = new TextBlock
-            {
-                Text = FormatStamp(TsAtX(_x0 + (_plotW * k / 4))),
-                Foreground = labelBrush,
-                FontSize = 11,
-            };
-            Children.Add(tb);
-            double x = _x0 + (_plotW * k / 4);
-            // Right-align the last tick (plus a reserve for the page's
-            // overlay scrollbar), center the middle ones, and nudge the
-            // first right so it clears the y-axis "0" label below-left.
-            double tw = MeasuredWidth(tb);
-            double tx = k switch
-            {
-                0 => x + 8,
-                4 => x - tw - 14,
-                _ => x - (tw / 2),
-            };
-            Canvas.SetLeft(tb, Math.Clamp(tx, 0, Math.Max(ActualWidth - tw - 14, 0)));
+                double x = _x0 + (_plotW * k / 4);
+                var tb = new TextBlock
+                {
+                    Text = FormatStamp(TsAtX(x)),
+                    Foreground = labelBrush,
+                    FontSize = 11,
+                };
+                Children.Add(tb);
+                // Right-align the last tick (plus a reserve for the page's
+                // overlay scrollbar), center the middle ones, and nudge the
+                // first right so it clears the y-axis "0" label below-left.
+                double tw = MeasuredWidth(tb);
+                double tx = k switch
+                {
+                    0 => x + 8,
+                    4 => x - tw - 14,
+                    _ => x - (tw / 2),
+                };
+                Canvas.SetLeft(tb, Math.Clamp(tx, 0, Math.Max(ActualWidth - tw - 14, 0)));
                 Canvas.SetTop(tb, _y0 + _plotH + 10);
             }
         }
@@ -366,9 +394,11 @@ public sealed class BatteryChart : Canvas
 
     private double XOf(long ts)
     {
-        if (_axis.Count == 0 || ts <= _axis[0].Ts)
+        // _axis is filled by BuildAxis with one breakpoint per sample and
+        // every caller is gated on main.Count >= 2, so it is never empty here.
+        if (ts <= _axis[0].Ts)
         {
-            return _axis.Count > 0 ? _axis[0].X : _x0;
+            return _axis[0].X;
         }
         for (int i = 1; i < _axis.Count; i++)
         {
@@ -381,13 +411,14 @@ public sealed class BatteryChart : Canvas
         return _axis[^1].X;
     }
 
+    /// <summary>Chart-y pixel for a battery level. Single source shared by
+    /// the render path and the hover readout.</summary>
+    private double LevelY(int level)
+        => _y0 + _plotH - (Math.Clamp(level, 0, 100) / 100.0 * _plotH);
+
     /// <summary>Inverse of XOf for ticks and the hover readout.</summary>
     private long TsAtX(double px)
     {
-        if (_axis.Count == 0)
-        {
-            return 0;
-        }
         if (px <= _axis[0].X)
         {
             return _axis[0].Ts;
@@ -445,7 +476,7 @@ public sealed class BatteryChart : Canvas
         }
         var nearest = _main[lo];
         double x = XOf(nearest.Ts);
-        double y = _y0 + _plotH - (Math.Clamp(nearest.Level, 0, 100) / 100.0 * _plotH);
+        double y = LevelY(nearest.Level);
 
         bool dark = ActualTheme == ElementTheme.Dark;
         var accent = Solid(dark ? 0x60CDFF : 0x0078D4);

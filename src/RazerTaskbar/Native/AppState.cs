@@ -146,6 +146,10 @@ public sealed class AppState
 
     public static void PostTraySetEnabled(bool enabled) => WidgetThread.Post(() => TrayIcon.SetEnabled(enabled));
 
+    /// <summary>show_widget toggle: create/destroy the taskbar display window
+    /// while the widget thread (tray, config marshaling) stays up.</summary>
+    public static void PostWidgetSetEnabled(bool enabled) => WidgetThread.Post(() => WidgetWindow.SetWidgetEnabled(enabled));
+
     public static void PostHoverHide() => WidgetThread.Post(HoverPanel.Hide);
 
     public static void PostTrayRefresh() => WidgetThread.Post(TrayIcon.Refresh);
@@ -173,6 +177,7 @@ public static class ConfigExt
         TaskbarRightSpaceWin11 = c.TaskbarRightSpaceWin11,
         WindowOffsetLeft = c.WindowOffsetLeft,
         WindowOffsetTop = c.WindowOffsetTop,
+        ShowWidget = c.ShowWidget,
         ShowTrayIcon = c.ShowTrayIcon,
         HoverDevices = c.HoverDevices,
         RecordBatteryHistory = c.RecordBatteryHistory,

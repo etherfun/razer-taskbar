@@ -183,16 +183,20 @@ the trademark situation.
 The overlay itself is click-through, so the tray icon carries the menu. It
 stays deliberately small — quick device switching plus entry points:
 
-* Device list (radio, incl. *All devices*)
-* Settings… (opens the settings window)
-* Battery history… (viewer window)
+* Device list (radio: *Lowest battery device* or one connected device)
+* Settings… (opens the history + settings window on the settings tab)
+* Battery history… (same window, history tab)
 * Exit
 
-Everything else lives in the **Settings** window (dark Win11-style page,
-same chrome as the history viewer), organized into three sections:
+Everything else lives in the **Settings** window, organized into three
+sections:
 
-* **Widget** — shown device, widget side (left/right), show time remaining,
-  avoid overlap, show tray icon, show devices on hover
+* **Widget** — show widget (turns the taskbar overlay off entirely for a
+  tray-only setup), display mode (fixed / swap on battery drop / rotate
+  all devices) with its swap & rotate intervals, shown device, widget side
+  (left/right), embed into the widgets button's free space, embed into the
+  taskbar, show time remaining, colored battery icon, fade transition,
+  show tray icon, show devices on hover
 * **History** — poll interval (5/10/15/30/60s), record battery history,
   record interval (1/2/5/10/30s)
 * **General** — language (Auto / English / 中文), run at startup

@@ -45,6 +45,8 @@ public sealed partial class SettingsPage : Page
             HeaderWidget.Text = I18n.Tr("Widget");
             HeaderHistory.Text = I18n.Tr("History");
             HeaderGeneral.Text = I18n.Tr("General");
+            LblWidget.Text = I18n.Tr("Show widget");
+            DescWidget.Text = I18n.Tr("Show the battery widget on the taskbar. Off leaves the tray icon only.");
             LblShownDevice.Text = I18n.Tr("Shown device");
             DescShownDevice.Text = I18n.Tr("Which device's battery the widget displays.");
             LblDisplayMode.Text = I18n.Tr("Display mode");
@@ -89,6 +91,7 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(ComboSwapDur, LblSwapDur.Text);
             AutomationProperties.SetName(ComboRotI, LblRotI.Text);
             AutomationProperties.SetName(ComboSide, LblSide.Text);
+            AutomationProperties.SetName(SwitchWidget, LblWidget.Text);
             AutomationProperties.SetName(SwitchEst, LblEst.Text);
             AutomationProperties.SetName(SwitchEmbedWidgets, LblEmbedWidgets.Text);
             AutomationProperties.SetName(SwitchEmbedTaskbar, LblEmbedTaskbar.Text);
@@ -149,6 +152,7 @@ public sealed partial class SettingsPage : Page
             ComboSide.SelectedIndex = cfg.WidgetSide == "left" ? 0 : 1;
 
             // Toggles.
+            SwitchWidget.IsOn = cfg.ShowWidget;
             SwitchEst.IsOn = cfg.ShowEstimatedTime;
             SwitchEmbedWidgets.IsOn = cfg.EmbedIntoWidgetsSpace;
             SwitchEmbedTaskbar.IsOn = cfg.EmbedIntoTaskbar;
@@ -327,6 +331,21 @@ public sealed partial class SettingsPage : Page
         if (!on)
         {
             AppState.PostResetFade();
+        }
+    }
+
+    private void SwitchWidget_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress)
+        {
+            return;
+        }
+        bool on = SwitchWidget.IsOn;
+        AppState.PostModifyConfig(c => c.ShowWidget = on);
+        AppState.PostWidgetSetEnabled(on);
+        if (!on)
+        {
+            AppState.PostHoverHide();
         }
     }
 

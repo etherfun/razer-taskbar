@@ -73,6 +73,11 @@ public sealed class Config
     [JsonPropertyName("window_offset_top")]
     public int WindowOffsetTop { get; set; }
 
+    /// <summary>Show the battery widget on the taskbar. Off leaves a
+    /// tray-only app (icon, tooltip, menu, history keep running).</summary>
+    [JsonPropertyName("show_widget")]
+    public bool ShowWidget { get; set; } = true;
+
     [JsonPropertyName("show_tray_icon")]
     public bool ShowTrayIcon { get; set; } = true;
 
@@ -142,8 +147,12 @@ public static class ConfigService
         {
             text = File.ReadAllText(ConfigPath);
         }
-        catch (Exception)
+        catch (Exception e)
         {
+            // Same all-defaults fallback as config.rs — but leave a trace:
+            // a startup-time failure here makes the next Save() write the
+            // defaults over the user's file.
+            Log.Error("settings.json unreadable, using defaults", e);
             return new Config();
         }
 
@@ -152,8 +161,9 @@ public static class ConfigService
         {
             cfg = JsonSerializer.Deserialize<Config>(text) ?? new Config();
         }
-        catch (JsonException)
+        catch (JsonException e)
         {
+            Log.Error($"settings.json parse failed, using defaults: {e.Message}");
             cfg = new Config();
         }
 
@@ -191,9 +201,11 @@ public static class ConfigService
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
             File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts));
         }
-        catch (Exception)
+        catch (Exception e)
         {
-            // Best effort, like config.rs save().
+            // Best effort, like config.rs save() — but diagnosable: every
+            // settings-page change is silently lost per failure.
+            Log.Error("settings.json save failed", e);
         }
     }
 
