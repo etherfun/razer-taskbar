@@ -466,7 +466,7 @@ public sealed class RazerWatcher
     private void RunLoop(int initialPollSeconds)
     {
         // Initial parse so the widget shows something immediately.
-        ParseOnce();
+        ParseOnce(ConfigService.Load());
         var initialDevices = _devices.Snapshot();
         var v4Path = V4LogDir() is { } d0 ? LatestV4Log(d0) : null;
         Log.Info(
@@ -534,13 +534,15 @@ public sealed class RazerWatcher
         long waitMs = due - now;
         if (waitMs <= 0)
         {
-            // Re-resolve the V4 log in case Synapse rotated to a new file.
-            ParseOnce();
-            // One read drives both the record gate and the throttle. Record
-            // runs unconditionally: its disabled path is what retires the
-            // frozen prediction cache (gating here left stale estimates on
-            // the tray/hover after "record battery history" was turned off).
+            // One config read drives the parse, the record gate and the
+            // throttle (a pass used to re-read settings.json 2-3 times).
             var cfg = ConfigService.Load();
+            // Re-resolve the V4 log in case Synapse rotated to a new file.
+            ParseOnce(cfg);
+            // Record runs unconditionally: its disabled path is what retires
+            // the frozen prediction cache (gating here left stale estimates
+            // on the tray/hover after "record battery history" was turned
+            // off).
             HistoryService.Record(_devices, cfg.RecordBatteryHistory);
             // Long-lived loop: re-read the throttle (edits apply live).
             // While recording, the tighter record interval wins. Rust used
@@ -581,11 +583,9 @@ public sealed class RazerWatcher
     private static long IntervalSecs(ulong secs)
         => (long)Math.Min(secs, (ulong)(int.MaxValue / 1000));
 
-    private void ParseOnce()
+    private void ParseOnce(Config cfg)
     {
-        // Re-read settings every pass: a startup copy would clobber edits to
-        // the shown device.
-        var cfg = ConfigService.Load();
+        // `cfg` was read once for this pass (edits apply live next pass).
         switch (cfg.BatterySource)
         {
             case "hid":
@@ -613,24 +613,24 @@ public sealed class RazerWatcher
     {
         switch (cfg.SynapseVersion)
         {
-            case "v3": ParseV3(); break;
-            case "v4": ParseV4(); break;
+            case "v3": ParseV3(cfg); break;
+            case "v4": ParseV4(cfg); break;
             default:
                 // auto: V4 wins when its log dir has candidates (mirrors TS `auto`).
                 var hasV4 = V4LogDir() is { } d && LatestV4Log(d) is not null;
                 if (hasV4)
                 {
-                    ParseV4();
+                    ParseV4(cfg);
                 }
                 else
                 {
-                    ParseV3();
+                    ParseV3(cfg);
                 }
                 break;
         }
     }
 
-    private void ParseV3()
+    private void ParseV3(Config cfg)
     {
         var path = V3LogPath();
         if (path is null)
@@ -643,7 +643,7 @@ public sealed class RazerWatcher
             return;
         }
         var snapshot = ParseV3Snapshot(log);
-        var shown = ConfigService.Load().ShownDeviceHandle;
+        var shown = cfg.ShownDeviceHandle;
         _devices.Mutate(devices =>
         {
             foreach (var (handle, name, level, charging, connected) in snapshot)
@@ -695,7 +695,7 @@ public sealed class RazerWatcher
         return result;
     }
 
-    private void ParseV4()
+    private void ParseV4(Config cfg)
     {
         var dir = V4LogDir();
         if (dir is null)
@@ -776,7 +776,7 @@ public sealed class RazerWatcher
             }
         }
 
-        var shown = ConfigService.Load().ShownDeviceHandle;
+        var shown = cfg.ShownDeviceHandle;
         _devices.Mutate(devices =>
         {
             foreach (var (_, json) in snapshots)

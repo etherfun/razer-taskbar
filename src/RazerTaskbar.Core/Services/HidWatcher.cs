@@ -294,6 +294,9 @@ public sealed class HidWatcher
     internal void Commit(DeviceStore devices, List<HidDeviceReading> readings, string shown)
     {
         readings = DedupRound(readings);
+        // Alias merges touch SQLite; collect them and run after Mutate so
+        // the DeviceStore lock never spans DB IO (Snapshot blocks on it).
+        var aliases = new List<(string Src, string Dst)>();
         devices.Mutate(map =>
         {
             var seen = new HashSet<string>();
@@ -331,7 +334,7 @@ public sealed class HidWatcher
                         map.Remove(rooted);
                         _misses.Remove(rooted);
                         Log.Info($"hid: serial resolved, retiring rooted fallback {rooted} -> {handle}");
-                        HistoryService.MergeAlias(rooted, handle);
+                        aliases.Add((rooted, handle));
                     }
                 }
             }
@@ -359,6 +362,10 @@ public sealed class HidWatcher
             }
             _owned = seen;
         });
+        foreach (var (src, dst) in aliases)
+        {
+            HistoryService.MergeAlias(src, dst);
+        }
     }
 
     // — device discovery —

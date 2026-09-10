@@ -437,8 +437,26 @@ public static class TaskbarLocator
     /// edge (~150px at 96 DPI for icon + temperature).</summary>
     private static int WidgetsZoneWidth() => WidgetsShown() ? 160 : 0;
 
+    /// <summary>TaskbarDa TTL: ComputePlacement consults the widgets toggle
+    /// twice per pass (board info + zone width), and placement runs on every
+    /// UIA burst plus the 1s fallback timer — each miss cost two registry
+    /// reads. A short cache keeps settings changes near-immediate.</summary>
+    private static readonly TimeSpan TaskbarDaTtl = TimeSpan.FromSeconds(5);
+    private static long _taskbarDaAt = long.MinValue;
+    private static int _taskbarDa;
+
     public static bool WidgetsShown()
-        => (ReadDword(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarDa") ?? 1) != 0;
+    {
+        long now = Environment.TickCount64;
+        if (_taskbarDaAt != long.MinValue && now - _taskbarDaAt < TaskbarDaTtl.TotalMilliseconds)
+        {
+            return _taskbarDa != 0;
+        }
+        bool shown = (ReadDword(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarDa") ?? 1) != 0;
+        _taskbarDaAt = now;
+        _taskbarDa = shown ? 1 : 0;
+        return shown;
+    }
 
     private static uint? ReadDword(string subkey, string value)
     {
