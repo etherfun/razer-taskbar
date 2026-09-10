@@ -182,7 +182,9 @@ public sealed partial class HistoryPage : Page
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
         ExportInfoBar.IsOpen = false;
-        if (_currentSamples.Count == 0)
+        // Capture: a background Reload may swap _currentSamples mid-export.
+        var samples = _currentSamples;
+        if (samples.Count == 0)
         {
             ShowExportInfo(InfoBarSeverity.Warning, I18n.Tr("No data to export"));
             return;
@@ -207,8 +209,10 @@ public sealed partial class HistoryPage : Page
             {
                 return; // user cancelled
             }
-            File.WriteAllText(file.Path, ExportService.ToCsv(_currentSamples));
-            ShowExportInfo(InfoBarSeverity.Success, I18n.Tr("CSV exported ({})").Replace("{}", $"{_currentSamples.Count}"));
+            // "All" ranges can be megabytes: build + write off the UI thread.
+            var csv = await Task.Run(() => ExportService.ToCsv(samples));
+            await File.WriteAllTextAsync(file.Path, csv);
+            ShowExportInfo(InfoBarSeverity.Success, I18n.Tr("CSV exported ({})").Replace("{}", $"{samples.Count}"));
         }
         catch (Exception ex)
         {

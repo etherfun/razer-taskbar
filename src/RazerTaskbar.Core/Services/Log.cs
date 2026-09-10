@@ -75,6 +75,14 @@ public static class Log
                 // Log sink failures must never take the app down.
             }
         }
-        Console.Error.WriteLine(stamped);
+        try
+        {
+            // Mirrored to stderr for console runs; a GUI process has no
+            // console — writes must never throw into a message loop.
+            Console.Error.WriteLine(stamped);
+        }
+        catch (Exception)
+        {
+        }
     }
 }
