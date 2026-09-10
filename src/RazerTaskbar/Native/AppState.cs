@@ -55,6 +55,12 @@ public sealed class AppState
 
     private readonly object _configLock = new();
     private Config _config = new();
+    /// <summary>Shared read-only view of <see cref="_config"/>, rebuilt after
+    /// every mutation. Readers run on hot paths (per-mouse-move WM_NCHITTEST,
+    /// per-second paints, the 120ms hover tick) and now take a lock-free
+    /// reference instead of cloning 26 fields under the lock per call.
+    /// Treat the returned instance as immutable — never write through it.</summary>
+    private volatile Config _published = new();
 
     public DeviceStore Devices { get; } = new();
 
@@ -64,13 +70,12 @@ public sealed class AppState
 
     private AppState() { }
 
-    /// <summary>Thread-safe config snapshot (UI thread init/refresh use).</summary>
-    public Config ConfigSnapshot()
+    /// <summary>Thread-safe config snapshot (shared immutable instance).</summary>
+    public Config ConfigSnapshot() => _published;
+
+    private void Publish()
     {
-        lock (_configLock)
-        {
-            return _config.Clone();
-        }
+        _published = _config.Clone();
     }
 
     /// <summary>Load the authoritative config copy at startup (widget thread).</summary>
@@ -79,6 +84,7 @@ public sealed class AppState
         lock (_configLock)
         {
             _config = ConfigService.Load();
+            Publish();
         }
     }
 
@@ -90,6 +96,7 @@ public sealed class AppState
         {
             f(_config);
             ConfigService.Save(_config);
+            Publish();
         }
     }
 
@@ -114,6 +121,7 @@ public sealed class AppState
         {
             _config.ShownDeviceHandle = handle;
             ConfigService.Save(_config);
+            Publish();
         }
         var shown = handle;
         Devices.Mutate(devices =>
