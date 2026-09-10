@@ -146,6 +146,19 @@ public sealed class RazerWatcher
     private readonly HidWatcher _hid = new();
     private readonly object _lastV4TimestampLock = new();
     private string _lastV4Timestamp = "";
+    // V4 incremental read state (watcher thread only): the logs rotate at
+    // ~5 MiB and a full re-read + regex of the newest file ran on every
+    // parse pass. Path change or shrink (rotation/truncate) resets.
+    private string? _v4Path;
+    private long _v4Offset;
+    /// <summary>Trailing bytes of the last read that hold an incomplete
+    /// line (no newline yet) — decoded and parsed once the rest arrives.
+    /// Bytes, not text: a UTF-8 character must not be split at the slice
+    /// boundary.</summary>
+    private byte[] _v4Pending = Array.Empty<byte>();
+    /// <summary>Handles the V4 source has written (drives the disconnect
+    /// rule: a handle missing from the latest snapshot reads offline).</summary>
+    private readonly HashSet<string> _v4Known = new();
 
     public RazerWatcher(DeviceStore devices)
     {
@@ -707,17 +720,68 @@ public sealed class RazerWatcher
         {
             return;
         }
-        var log = ReadShared(path);
-        if (log is null)
+        long length;
+        try
+        {
+            length = new FileInfo(path).Length;
+        }
+        catch (Exception)
         {
             return;
         }
+        bool fresh = path != _v4Path || length < _v4Offset;
+        if (fresh)
+        {
+            // Rotated to a new file (or truncated): replay from the start.
+            _v4Path = path;
+            _v4Offset = 0;
+            _v4Pending = Array.Empty<byte>();
+        }
+        if (length == _v4Offset)
+        {
+            return; // nothing written since the last pass
+        }
 
-        // Every snapshot in the file, oldest first (TS replays the whole
-        // history so devices missing from the latest snapshot stay known,
-        // marked disconnected).
+        // Read only the bytes appended since the last pass, and parse only
+        // newline-terminated lines: a line caught mid-write stays in the
+        // pending buffer until its rest arrives (the old full replay simply
+        // re-read the file until the line completed). Bytes, not text — a
+        // UTF-8 character must not be split at the slice boundary.
+        byte[] slice;
+        if (_v4Offset == 0)
+        {
+            var whole = ReadShared(path);
+            if (whole is null)
+            {
+                return;
+            }
+            slice = System.Text.Encoding.UTF8.GetBytes(whole);
+        }
+        else
+        {
+            slice = ReadSliceBytes(path, _v4Offset, length - _v4Offset);
+            if (slice is null)
+            {
+                return; // read failed: retry the same region on the next pass
+            }
+        }
+        _v4Offset = length;
+        var buf = new byte[_v4Pending.Length + slice.Length];
+        _v4Pending.CopyTo(buf, 0);
+        slice.CopyTo(buf, _v4Pending.Length);
+        int lastNl = Array.LastIndexOf(buf, (byte)'\n');
+        if (lastNl < 0)
+        {
+            _v4Pending = buf;
+            return;
+        }
+        _v4Pending = buf[(lastNl + 1)..];
+        var text = System.Text.Encoding.UTF8.GetString(buf, 0, lastNl + 1);
+
+        // Snapshot lines in the newly read region, oldest first (the batch
+        // replays like the whole-file replay did, just smaller).
         var snapshots = new List<(string Ts, string Json)>();
-        foreach (Match m in V4LineRegex.Matches(log))
+        foreach (Match m in V4LineRegex.Matches(text))
         {
             snapshots.Add((m.Groups["timestamp"].Value, m.Groups["json"].Value));
         }
@@ -734,8 +798,9 @@ public sealed class RazerWatcher
             }
         }
 
-        // A corrupt latest line must NOT advance the timestamp: retry it on
-        // the next pass instead of freezing every device as disconnected.
+        // A corrupt latest line never heals (Synapse does not rewrite log
+        // lines): skip it and keep the previous timestamp so the next real
+        // snapshot still applies.
         List<JsonElement> lastVals;
         try
         {
@@ -777,6 +842,7 @@ public sealed class RazerWatcher
         }
 
         var shown = cfg.ShownDeviceHandle;
+        var batchHandles = new HashSet<string>();
         _devices.Mutate(devices =>
         {
             foreach (var (_, json) in snapshots)
@@ -810,6 +876,7 @@ public sealed class RazerWatcher
                         V4Rules.IsConnected(connectedIds, offIds, handle),
                         shown.Length == 0 || shown == handle,
                         DeviceClassifier.FromCategoryAndName(d.Category, d.Name.En));
+                    batchHandles.Add(handle);
                 }
             }
             // Drop the NOSERIALNUMBER duplicate once the real serial resolves (TS parity).
@@ -817,11 +884,60 @@ public sealed class RazerWatcher
                 && devices.Values.Any(d => d.Handle != "NOSERIALNUMBER" && d.Name == noSerial.Name))
             {
                 devices.Remove("NOSERIALNUMBER");
+                batchHandles.Remove("NOSERIALNUMBER");
+            }
+            // Disconnect rule for the incremental pass: the whole-file
+            // replay recomputed every entry against the latest snapshot's
+            // id set, so a device that dropped out of the snapshots read
+            // offline. Apply the same rule to the handles this source owns.
+            foreach (var handle in _v4Known)
+            {
+                if (connectedIds.Contains(handle)
+                    || !devices.TryGetValue(handle, out var d)
+                    || !d.IsConnected)
+                {
+                    continue;
+                }
+                devices[handle] = d with { IsConnected = false };
             }
         });
+        _v4Known.UnionWith(batchHandles);
         lock (_lastV4TimestampLock)
         {
             _lastV4Timestamp = lastTs;
+        }
+    }
+
+    /// <summary>Exactly `bytes` from `offset`, share-read (see ReadShared);
+    /// returns fewer when the file is shorter than expected (shrunk between
+    /// the stat and the open).</summary>
+    private static byte[]? ReadSliceBytes(string path, long offset, long bytes)
+    {
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            fs.Seek(offset, SeekOrigin.Begin);
+            var buf = new byte[Math.Min(bytes, int.MaxValue)];
+            int n = 0;
+            while (n < buf.Length)
+            {
+                int r = fs.Read(buf, n, buf.Length - n);
+                if (r <= 0)
+                {
+                    break;
+                }
+                n += r;
+            }
+            if (n < buf.Length)
+            {
+                Array.Resize(ref buf, n);
+            }
+            return buf;
+        }
+        catch (Exception e)
+        {
+            Log.Info($"slice read failed ({Path.GetFileName(path)}): {e.Message}");
+            return null;
         }
     }
 
