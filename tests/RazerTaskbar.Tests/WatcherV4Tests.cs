@@ -136,4 +136,71 @@ public sealed class WatcherV4Tests
         Assert.Equal("Razer Joro Pro", names["SI2522F18701637"]); // last snapshot wins
         Assert.Equal("Razer Viper V3 HyperSpeed", names["632516H31000044"]);
     }
+
+    // — Incremental batch application (ApplyV4Batch) —
+
+    private const string BatchA60 = """[{"serialNumber":"A","hasBattery":true,"deviceContainerId":"CA","powerStatus":{"chargingStatus":"Discharging","level":60},"name":{"en":"Mouse A"},"category":"MOUSE"}]""";
+    private const string BatchB40 = """[{"serialNumber":"B","hasBattery":true,"deviceContainerId":"CB","powerStatus":{"chargingStatus":"Discharging","level":40},"name":{"en":"Keyboard B"},"category":"KEYBOARD"}]""";
+    private const string BatchA59C70 = """[{"serialNumber":"A","hasBattery":true,"deviceContainerId":"CA","powerStatus":{"chargingStatus":"Discharging","level":59},"name":{"en":"Mouse A"},"category":"MOUSE"},{"serialNumber":"C","hasBattery":true,"deviceContainerId":"CC","powerStatus":{"chargingStatus":"Charging","level":70},"name":{"en":"Headset C"},"category":"HEADSET"}]""";
+
+    [Fact]
+    public void V4BatchAppliesInOrderAndRetiresHandlesMissingFromLatestSnapshot()
+    {
+        // The incremental pass replays each batch in order (last write per
+        // handle wins within the batch), then the disconnect rule: a handle
+        // the source owns that the latest snapshot no longer lists reads
+        // offline — the whole-file replay's net effect.
+        var store = new DeviceStore();
+        var known = new HashSet<string>();
+        var conn = new HashSet<string> { "A", "B" };
+        RazerWatcher.ApplyV4Batch(store,
+            new List<(string, string)> { ("t1", BatchA60), ("t2", BatchB40) },
+            conn, new HashSet<string>(), "", known);
+
+        var snap = store.Snapshot();
+        Assert.Equal(2, snap.Count);
+        Assert.True(snap["A"].IsConnected);
+        Assert.Equal(60, snap["A"].BatteryPercentage);
+        Assert.True(snap["B"].IsConnected);
+
+        // Batch 2: B drops out of the latest snapshot, C appears. B reads
+        // offline keeping its last-known level and name.
+        RazerWatcher.ApplyV4Batch(store, new List<(string, string)> { ("t3", BatchA59C70) },
+            new HashSet<string> { "A", "C" }, new HashSet<string>(), "A", known);
+
+        snap = store.Snapshot();
+        Assert.Equal(3, snap.Count);
+        Assert.True(snap["A"].IsConnected);
+        Assert.Equal(59, snap["A"].BatteryPercentage);
+        Assert.True(snap["A"].IsSelected); // shown=A marks the selection
+        Assert.False(snap["C"].IsSelected);
+        Assert.False(snap["B"].IsConnected);
+        Assert.Equal(40, snap["B"].BatteryPercentage);
+        Assert.Equal("Keyboard B", snap["B"].Name);
+        Assert.Equal(3, known.Count);
+    }
+
+    [Fact]
+    public void V4BatchSkipsCorruptLinesAndRetiresNoSerialDuplicate()
+    {
+        var store = new DeviceStore();
+        var known = new HashSet<string>();
+        // The id set always mirrors the batch's last snapshot (the parse
+        // path derives it from that snapshot).
+        var conn = new HashSet<string> { "A" };
+        // A corrupt line between good ones must not abort the batch.
+        RazerWatcher.ApplyV4Batch(store,
+            new List<(string, string)> { ("t1", BatchA60), ("t2", "{not json") },
+            conn, new HashSet<string>(), "", known);
+        Assert.True(store.Snapshot()["A"].IsConnected);
+
+        // The literal NOSERIALNUMBER handle retires once the real serial
+        // resolves under the same name (TS parity dedup).
+        RazerWatcher.ApplyV4Batch(store, new List<(string, string)> { ("t3", BatchA60) },
+            conn, new HashSet<string>(), "", known);
+        store.Mutate(m => m["NOSERIALNUMBER"] = m["A"] with { Handle = "NOSERIALNUMBER" });
+        RazerWatcher.ApplyV4Batch(store, new List<(string, string)> { ("t4", BatchA60) },
+            conn, new HashSet<string>(), "", known);
+        Assert.False(store.Snapshot().ContainsKey("NOSERIALNUMBER"));
+    }
 }

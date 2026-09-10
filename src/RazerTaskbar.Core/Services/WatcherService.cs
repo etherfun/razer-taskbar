@@ -841,9 +841,28 @@ public sealed class RazerWatcher
             }
         }
 
-        var shown = cfg.ShownDeviceHandle;
+        ApplyV4Batch(_devices, snapshots, connectedIds, offIds, cfg.ShownDeviceHandle, _v4Known);
+        lock (_lastV4TimestampLock)
+        {
+            _lastV4Timestamp = lastTs;
+        }
+    }
+
+    /// <summary>Apply a batch of snapshot lines to the device store: entries
+    /// are written in order (the batch's last snapshot wins per handle), the
+    /// NOSERIALNUMBER duplicate retires once the real serial resolves, then
+    /// handles this source owns that the latest snapshot no longer lists
+    /// read as offline (the whole-file replay recomputed every entry against
+    /// the latest snapshot's id set — this is the incremental pass's
+    /// equivalent). `knownHandles` is the caller's persistent owned-handle
+    /// set; it gains this batch's handles. Internal for tests.</summary>
+    internal static void ApplyV4Batch(DeviceStore store,
+        List<(string Ts, string Json)> snapshots,
+        HashSet<string> connectedIds, HashSet<string> offIds,
+        string shown, HashSet<string> knownHandles)
+    {
         var batchHandles = new HashSet<string>();
-        _devices.Mutate(devices =>
+        store.Mutate(devices =>
         {
             foreach (var (_, json) in snapshots)
             {
@@ -886,11 +905,7 @@ public sealed class RazerWatcher
                 devices.Remove("NOSERIALNUMBER");
                 batchHandles.Remove("NOSERIALNUMBER");
             }
-            // Disconnect rule for the incremental pass: the whole-file
-            // replay recomputed every entry against the latest snapshot's
-            // id set, so a device that dropped out of the snapshots read
-            // offline. Apply the same rule to the handles this source owns.
-            foreach (var handle in _v4Known)
+            foreach (var handle in knownHandles)
             {
                 if (connectedIds.Contains(handle)
                     || !devices.TryGetValue(handle, out var d)
@@ -901,11 +916,7 @@ public sealed class RazerWatcher
                 devices[handle] = d with { IsConnected = false };
             }
         });
-        _v4Known.UnionWith(batchHandles);
-        lock (_lastV4TimestampLock)
-        {
-            _lastV4Timestamp = lastTs;
-        }
+        knownHandles.UnionWith(batchHandles);
     }
 
     /// <summary>Exactly `bytes` from `offset`, share-read (see ReadShared);
