@@ -9,6 +9,13 @@ namespace RazerTaskbar.Core;
 public static class Log
 {
     private static readonly object Lock = new();
+
+    /// <summary>Rollover threshold: the log records periodic TTL notes
+    /// (taskbar cache refreshes, per-poll reads) and would grow without
+    /// bound otherwise. Past this size the file becomes .old (one deep
+    /// history kept) and a fresh file starts.</summary>
+    private const long MaxBytes = 5 * 1024 * 1024;
+
     private static bool _installed;
 
     public static string FilePath
@@ -57,6 +64,10 @@ public static class Log
             {
                 var path = FilePath;
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                if (new FileInfo(path) is { Exists: true, Length: >= MaxBytes })
+                {
+                    File.Move(path, path + ".old", overwrite: true);
+                }
                 File.AppendAllText(path, stamped + Environment.NewLine);
             }
             catch (Exception)

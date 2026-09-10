@@ -702,4 +702,81 @@ public sealed class HistoryTests
             ChargeSession(3 * month, 90, 100, 900));
         Assert.Null(HistoryService.HealthStatsOf(tops));
     }
+
+    [Fact]
+    public void RecordEstimateLifecycle()
+    {
+        // Record's estimate cache must track the series tail through
+        // fill / update / disconnect / reconnect. The widget, tray and
+        // hover panel read it every second, so an unchanged pass must keep
+        // the cached prediction and a vanished device must retire it.
+        var oldAppData = Environment.GetEnvironmentVariable("APPDATA");
+        var scratch = Path.Combine(Path.GetTempPath(), "razer-taskbar-hist-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(scratch);
+        Environment.SetEnvironmentVariable("APPDATA", scratch);
+        try
+        {
+            // Seed a usable discharge history against real wall-clock time:
+            // 60% → 50% over the trailing 30 connected minutes (the instant
+            // rate needs ≥5 active minutes and ≥1 point to trust).
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigService.DbPath)!);
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                $"Data Source={ConfigService.DbPath}"))
+            {
+                conn.Open();
+                HistoryService.EnsureTables(conn);
+                for (int i = 0; i <= 10; i++)
+                {
+                    Exec(conn,
+                        $"INSERT INTO samples VALUES('h', {now - (10 - i) * 180L}, {60 - i}, 0, 1)");
+                }
+                Exec(conn, $"INSERT INTO devices VALUES('h', 'Test Mouse', {now}, {now})");
+            }
+            HistoryService.Init();
+            Assert.True(HistoryService.Ready());
+
+            var store = new DeviceStore();
+            static RazerDevice Dev(int level, bool connected) =>
+                new("Test Mouse", "h", level, false, false, connected, true, DeviceKind.Mouse);
+
+            store.Mutate(m => m["h"] = Dev(50, true));
+            HistoryService.Record(store, true);
+            var first = HistoryService.EstimateFor("h");
+            Assert.NotNull(first); // seeded history predicts remaining time
+
+            // Unchanged pass: the cache holds (±1s of pseudo-countdown drift).
+            var second = HistoryService.EstimateFor("h");
+            Assert.NotNull(second);
+            Assert.InRange(second.Value.Secs, first.Value.Secs - 2, first.Value.Secs);
+
+            // Level update: re-anchored, slightly less remaining.
+            store.Mutate(m => m["h"] = Dev(49, true));
+            HistoryService.Record(store, true);
+            var updated = HistoryService.EstimateFor("h");
+            Assert.NotNull(updated);
+            Assert.True(updated.Value.Secs < first.Value.Secs);
+
+            // Disconnect retires the estimate; reconnect brings it back.
+            store.Mutate(m => m["h"] = Dev(49, false));
+            HistoryService.Record(store, true);
+            Assert.Null(HistoryService.EstimateFor("h"));
+            store.Mutate(m => m["h"] = Dev(49, true));
+            HistoryService.Record(store, true);
+            Assert.NotNull(HistoryService.EstimateFor("h"));
+        }
+        finally
+        {
+            HistoryService.Close();
+            Environment.SetEnvironmentVariable("APPDATA", oldAppData);
+            try { Directory.Delete(scratch, true); } catch (IOException) { }
+        }
+    }
+
+    private static void Exec(Microsoft.Data.Sqlite.SqliteConnection conn, string sql)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
 }

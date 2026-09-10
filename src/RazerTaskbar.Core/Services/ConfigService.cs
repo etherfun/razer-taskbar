@@ -199,7 +199,21 @@ public static class ConfigService
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(cfg, JsonOpts));
+            // Atomic write: a crash mid-write must never leave a half file
+            // that loads as defaults — the next Save() would then persist
+            // the defaults over the user's configuration.
+            var tmp = ConfigPath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(cfg, JsonOpts));
+            try
+            {
+                File.Replace(tmp, ConfigPath, destinationBackupFileName: null);
+            }
+            catch (IOException)
+            {
+                // First save ever (no destination to replace) — or a
+                // filesystem without Replace support.
+                File.Move(tmp, ConfigPath, overwrite: true);
+            }
         }
         catch (Exception e)
         {

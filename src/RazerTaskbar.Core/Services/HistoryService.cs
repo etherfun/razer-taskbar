@@ -265,7 +265,16 @@ public static class HistoryService
         {
             return;
         }
-        MergeAlias(conn, src, dst);
+        lock (DbLock)
+        {
+            // One connection serves every thread; commands must serialize on it.
+            MergeAlias(conn, src, dst);
+        }
+        lock (Sync)
+        {
+            // The merged series changed shape: its cached prediction is stale.
+            RecomputeEstimateLocked(dst);
+        }
     }
 
     /// <summary>DB half of <see cref="MergeAlias"/> on an explicit connection
@@ -320,9 +329,12 @@ public static class HistoryService
         int removed = 0;
         if (conn is not null)
         {
-            foreach (var (h, ts) in doomed)
+            lock (DbLock)
             {
-                removed += DeleteSamples(conn, h, ts);
+                foreach (var (h, ts) in doomed)
+                {
+                    removed += DeleteSamples(conn, h, ts);
+                }
             }
         }
         lock (Sync)
@@ -482,108 +494,147 @@ public static class HistoryService
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var map = devices.Snapshot();
+        var dirty = new HashSet<string>();
 
         lock (Sync)
         {
-            var present = new HashSet<string>();
-            foreach (var d in map.Values)
+            // The single connection is shared with UI-thread reads: all
+            // commands serialize on DbLock (Microsoft.Data.Sqlite allows one
+            // open command per connection).
+            lock (DbLock)
             {
-                present.Add(d.Handle);
-                if (!_series.TryGetValue(d.Handle, out var hist))
+                var present = new HashSet<string>();
+                foreach (var d in map.Values)
                 {
-                    hist = new List<Sample>();
-                    _series[d.Handle] = hist;
-                }
-                bool need = hist.Count == 0;
-                if (!need)
-                {
-                    var last = hist[^1];
-                    need = last.Charging != d.IsCharging
-                        || last.Connected != d.IsConnected
-                        || last.Level != d.BatteryPercentage
-                        || now - last.Ts >= HeartbeatSecs;
-                }
-                if (need)
-                {
-                    var s = new Sample(now, d.BatteryPercentage, d.IsCharging, d.IsConnected);
-                    // Spike guard: a suspicious jump is held out of the DB
-                    // for 60s (see SpikeFilter) — a fall-back within the
-                    // window drops the segment as a reporting glitch,
-                    // expiry commits it as a real battery swap/reconnect.
-                    foreach (var w in _spikes.Admit(d.Handle, s,
-                        hist.Count > 0 ? hist[^1].Level : s.Level))
+                    present.Add(d.Handle);
+                    if (!_series.TryGetValue(d.Handle, out var hist))
                     {
-                        InsertSample(conn, d.Handle, w);
-                        hist.Add(w);
+                        hist = new List<Sample>();
+                        _series[d.Handle] = hist;
+                    }
+                    bool need = hist.Count == 0;
+                    if (!need)
+                    {
+                        var last = hist[^1];
+                        need = last.Charging != d.IsCharging
+                            || last.Connected != d.IsConnected
+                            || last.Level != d.BatteryPercentage
+                            || now - last.Ts >= HeartbeatSecs;
+                    }
+                    if (need)
+                    {
+                        dirty.Add(d.Handle);
+                        var s = new Sample(now, d.BatteryPercentage, d.IsCharging, d.IsConnected);
+                        // Spike guard: a suspicious jump is held out of the DB
+                        // for 60s (see SpikeFilter) — a fall-back within the
+                        // window drops the segment as a reporting glitch,
+                        // expiry commits it as a real battery swap/reconnect.
+                        foreach (var w in _spikes.Admit(d.Handle, s,
+                            hist.Count > 0 ? hist[^1].Level : s.Level))
+                        {
+                            InsertSample(conn, d.Handle, w);
+                            hist.Add(w);
+                        }
+                    }
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText =
+                            "INSERT INTO devices(handle, name, first_seen, last_seen) VALUES($h, $n, $t, $t) " +
+                            "ON CONFLICT(handle) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen";
+                        cmd.Parameters.AddWithValue("$h", d.Handle);
+                        cmd.Parameters.AddWithValue("$n", d.Name);
+                        cmd.Parameters.AddWithValue("$t", now);
+                        cmd.ExecuteNonQuery();
+                    }
+                    _names[d.Handle] = d.Name;
+                }
+
+                // Devices that vanished since the last pass: record the disconnect
+                // once, so a power-save shutdown shows up as a gap, never as usage.
+                List<string> gone = new();
+                foreach (var (h, was) in _seen)
+                {
+                    if (was && !present.Contains(h))
+                    {
+                        gone.Add(h);
                     }
                 }
-                using (var cmd = conn.CreateCommand())
+                foreach (var h in gone)
                 {
-                    cmd.CommandText =
-                        "INSERT INTO devices(handle, name, first_seen, last_seen) VALUES($h, $n, $t, $t) " +
-                        "ON CONFLICT(handle) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen";
-                    cmd.Parameters.AddWithValue("$h", d.Handle);
-                    cmd.Parameters.AddWithValue("$n", d.Name);
-                    cmd.Parameters.AddWithValue("$t", now);
-                    cmd.ExecuteNonQuery();
-                }
-                _names[d.Handle] = d.Name;
-            }
-
-            // Devices that vanished since the last pass: record the disconnect
-            // once, so a power-save shutdown shows up as a gap, never as usage.
-            List<string> gone = new();
-            foreach (var (h, was) in _seen)
-            {
-                if (was && !present.Contains(h))
-                {
-                    gone.Add(h);
-                }
-            }
-            foreach (var h in gone)
-            {
-                // An unconfirmed spike hold dies with the device: record the
-                // disconnect from the last written sample (the pre-jump
-                // level), never from the bogus value.
-                _spikes.Reset(h);
-                if (!_series.TryGetValue(h, out var hist) || hist.Count == 0)
-                {
-                    // _seen without a series: MergeAlias folded this handle
-                    // away mid-flight. Skip rather than fabricate a 0%
-                    // disconnect row — the merged (serial-keyed) series
-                    // carries the device state now.
-                    Log.Info($"razer-taskbar: {h}: disconnect skipped, series merged away");
+                    // An unconfirmed spike hold dies with the device: record the
+                    // disconnect from the last written sample (the pre-jump
+                    // level), never from the bogus value.
+                    _spikes.Reset(h);
+                    if (!_series.TryGetValue(h, out var hist) || hist.Count == 0)
+                    {
+                        // _seen without a series: MergeAlias folded this handle
+                        // away mid-flight. Skip rather than fabricate a 0%
+                        // disconnect row — the merged (serial-keyed) series
+                        // carries the device state now.
+                        Log.Info($"razer-taskbar: {h}: disconnect skipped, series merged away");
+                        _seen[h] = false;
+                        continue;
+                    }
+                    var s = new Sample(now, hist[^1].Level, false, false);
+                    InsertSample(conn, h, s);
+                    hist.Add(s);
                     _seen[h] = false;
-                    continue;
                 }
-                var s = new Sample(now, hist[^1].Level, false, false);
-                InsertSample(conn, h, s);
-                hist.Add(s);
-                _seen[h] = false;
-            }
-            foreach (var h in present)
-            {
-                _seen[h] = true;
+                foreach (var h in present)
+                {
+                    _seen[h] = true;
+                }
             }
 
-            // Refresh the estimate cache for every connected device.
+            // Refresh the estimate cache incrementally: only series that grew
+            // this pass recompute (prediction is a pure function of the
+            // series); connected tails without an entry fill on first sight.
+            // The old full clear-and-recompute made every EstimateFor — the
+            // per-second widget/tray paints and the 120ms hover tick — wait
+            // behind an O(all-history) recompute for ALL devices, each pass.
             // Prediction and anchor run on the rebound-deflated series (see
             // ReboundFilter): a relaxation bump must neither inflate levelNow
             // nor restart the display anchor mid-bump.
-            _estimates.Clear();
+            foreach (var h in dirty)
+            {
+                RecomputeEstimateLocked(h);
+            }
+            foreach (var h in _estimates.Keys.ToList())
+            {
+                if (!_series.TryGetValue(h, out var hist) || hist.Count == 0 || !hist[^1].Connected)
+                {
+                    _estimates.Remove(h);
+                }
+            }
             foreach (var (h, hist) in _series)
             {
-                if (hist.Count == 0 || !hist[^1].Connected)
+                if (!_estimates.ContainsKey(h) && hist.Count > 0 && hist[^1].Connected)
                 {
-                    continue;
-                }
-                var eff = ReboundFilter.Deflate(hist);
-                if (PredictDeflated(eff, eff[^1].Level, eff[^1].Charging) is { } e)
-                {
-                    _estimates[h] = (e, LevelAnchorSecs(eff));
+                    RecomputeEstimateLocked(h);
                 }
             }
         }
+    }
+
+    /// <summary>Recompute (or retire) one device's cached estimate from its
+    /// current series. Caller holds <see cref="Sync"/>. The estimate exists
+    /// exactly while the series tail is connected and the model yields one.</summary>
+    private static void RecomputeEstimateLocked(string handle)
+    {
+        if (!_series.TryGetValue(handle, out var hist)
+            || hist.Count == 0
+            || !hist[^1].Connected)
+        {
+            _estimates.Remove(handle);
+            return;
+        }
+        var eff = ReboundFilter.Deflate(hist);
+        if (PredictDeflated(eff, eff[^1].Level, eff[^1].Charging) is not { } e)
+        {
+            _estimates.Remove(handle);
+            return;
+        }
+        _estimates[handle] = (e, LevelAnchorSecs(eff));
     }
 
     /// <summary>Cached prediction for a device (UI threads; cheap
@@ -663,18 +714,23 @@ public static class HistoryService
         }
         try
         {
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT ts, level, charging, connected FROM samples WHERE handle = $h AND ts >= $t ORDER BY ts";
-            cmd.Parameters.AddWithValue("$h", handle);
-            cmd.Parameters.AddWithValue("$t", sinceTs);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            // The connection is shared with the watcher thread's writes:
+            // commands serialize on DbLock (one open command per connection).
+            lock (DbLock)
             {
-                outList.Add(new Sample(
-                    reader.GetInt64(0),
-                    (int)Math.Clamp(reader.GetInt64(1), 0L, 100L),
-                    reader.GetInt64(2) != 0,
-                    reader.GetInt64(3) != 0));
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT ts, level, charging, connected FROM samples WHERE handle = $h AND ts >= $t ORDER BY ts";
+                cmd.Parameters.AddWithValue("$h", handle);
+                cmd.Parameters.AddWithValue("$t", sinceTs);
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    outList.Add(new Sample(
+                        reader.GetInt64(0),
+                        (int)Math.Clamp(reader.GetInt64(1), 0L, 100L),
+                        reader.GetInt64(2) != 0,
+                        reader.GetInt64(3) != 0));
+                }
             }
         }
         catch (Exception e)
