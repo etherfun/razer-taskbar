@@ -189,7 +189,7 @@ public static class UiaEvents
                     }
                     walker.GetFirstChildElement(el, out var child);
                     int n = 0;
-                    while (n < 30)
+                    while (n < 30 && child is not null)
                     {
                         stack.Add(child);
                         walker.GetNextSiblingElement(child, out child);

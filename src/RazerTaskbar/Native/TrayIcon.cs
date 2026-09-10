@@ -22,6 +22,24 @@ public static class TrayIcon
     /// <summary>Last displayed (tooltip, battery state): refresh() runs every
     /// second and a NIM_MODIFY is only worth doing when something changed.</summary>
     private static (string Tip, (int Level, bool Charging)? State)? _last;
+    /// <summary>Per-state HICON cache. The tooltip carries a minute-resolution
+    /// countdown, so Refresh() swaps the icon about every minute — building a
+    /// fresh HICON per swap leaked ~1400 handles a day (each two DIBs). The
+    /// cache bounds it to one icon per (level, charging) pair; entries stay
+    /// alive while shown and are all destroyed in Destroy().</summary>
+    private static readonly Dictionary<(int Level, bool Charging), IntPtr> Icons = new();
+
+    /// <summary>Cached icon for a display state; 0 on GDI failure (not cached,
+    /// retried next refresh).</summary>
+    private static IntPtr CachedIcon((int Level, bool Charging)? state)
+    {
+        var key = state is { } s ? (s.Level, s.Charging) : (-1, false);
+        if (!Icons.TryGetValue(key, out var icon) && (icon = BuildIcon(state)) != 0)
+        {
+            Icons[key] = icon;
+        }
+        return icon;
+    }
 
     /// <summary>Create the tray icon (idempotent). `hwnd` receives WM_TRAY.
     /// Also the re-add path after an explorer restart: NIM_ADD with the same
@@ -40,7 +58,7 @@ public static class TrayIcon
             uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON,
             uCallbackMessage = WmTray,
             szTip = "Razer Taskbar",
-            hIcon = BuildIcon(null),
+            hIcon = CachedIcon(null),
         };
         Shell_NotifyIconW(NIM_ADD, ref nid);
         // Deliberately NOT NOTIFYICON_VERSION_4: v4 suppresses the standard
@@ -90,7 +108,7 @@ public static class TrayIcon
             uID = TrayUid,
             uFlags = NIF_TIP | NIF_ICON,
             szTip = tip,
-            hIcon = BuildIcon(state),
+            hIcon = CachedIcon(state),
         };
         Shell_NotifyIconW(NIM_MODIFY, ref nid);
         _last = (tip, state);
@@ -111,6 +129,11 @@ public static class TrayIcon
         Shell_NotifyIconW(NIM_DELETE, ref nid);
         _hwnd = 0;
         _last = null;
+        foreach (var icon in Icons.Values)
+        {
+            DestroyIcon(icon);
+        }
+        Icons.Clear();
     }
 
     /// <summary>Settings-page toggle: create or remove the icon.</summary>
@@ -139,7 +162,10 @@ public static class TrayIcon
     /// edges. Alpha comes from drawn-pixel coverage. Returns 0 on GDI
     /// failure (handle exhaustion): the caller's NIM_ADD/NIM_MODIFY then
     /// degrades to an icon-less registration, same silent-failure rule as
-    /// the other DIB sites (GdiText/DeviceIcons/WidgetWindow/HoverPanel).</summary>
+    /// the other DIB sites (GdiText/DeviceIcons/WidgetWindow/HoverPanel).
+    /// A nonzero result is owned by the <see cref="Icons"/> cache (the shell
+    /// copies the image at NIM_ADD/NIM_MODIFY time) and lives until
+    /// Destroy().</summary>
     private static IntPtr BuildIcon((int Level, bool Charging)? state)
     {
         const int src = 32; // 2x supersample of the 16x16 target

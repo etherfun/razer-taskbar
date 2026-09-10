@@ -413,7 +413,7 @@ public static class TaskbarLocator
                 {
                     walker.GetFirstChildElement(el, out var child);
                     int n2 = 0;
-                    while (n2 < 30)
+                    while (n2 < 30 && child is not null)
                     {
                         stack.Add(child);
                         walker.GetNextSiblingElement(child, out child);
