@@ -182,7 +182,9 @@ public sealed class BatteryChart : Canvas
         FlushBand();
 
         // Area fill under contiguous connected runs, then the level line in
-        // per-mode segments (broken across off/gap stretches).
+        // per-mode segments (broken across off/gap stretches). Points are
+        // decimated at flush: sub-pixel wiggles are invisible but a long
+        // history put tens of thousands of points into XAML collections.
         var areaPoints = new List<Windows.Foundation.Point>();
         var discharge = new List<Windows.Foundation.Point>();
         var charge = new List<Windows.Foundation.Point>();
@@ -194,7 +196,7 @@ public sealed class BatteryChart : Canvas
                 Children.Add(new Polygon
                 {
                     Fill = areaBrush,
-                    Points = PointCollectionOf(areaPoints),
+                    Points = PointCollectionOf(Decimate(areaPoints)),
                 });
             }
             areaPoints.Clear();
@@ -209,7 +211,7 @@ public sealed class BatteryChart : Canvas
                     Stroke = lineBrush,
                     StrokeThickness = 2,
                     StrokeLineJoin = PenLineJoin.Round,
-                    Points = PointCollectionOf(discharge),
+                    Points = PointCollectionOf(Decimate(discharge)),
                 });
             }
             if (charge.Count >= 2)
@@ -219,7 +221,7 @@ public sealed class BatteryChart : Canvas
                     Stroke = greenBrush,
                     StrokeThickness = 2,
                     StrokeLineJoin = PenLineJoin.Round,
-                    Points = PointCollectionOf(charge),
+                    Points = PointCollectionOf(Decimate(charge)),
                 });
             }
             discharge.Clear();
@@ -291,7 +293,7 @@ public sealed class BatteryChart : Canvas
                         Stroke = accentBrush,
                         StrokeThickness = 1.5,
                         StrokeLineJoin = PenLineJoin.Round,
-                        Points = PointCollectionOf(run),
+                        Points = PointCollectionOf(Decimate(run)),
                     });
                 }
                 if (run.Count > 0)
@@ -606,6 +608,30 @@ public sealed class BatteryChart : Canvas
     /// and the hover readout share this).</summary>
     public static string FormatStamp(long ts)
         => DateTimeOffset.FromUnixTimeSeconds(ts).LocalDateTime.ToString("MM-dd HH:mm");
+
+    /// <summary>Drop run points that moved less than a pixel in BOTH axes
+    /// from the last kept point: invisible detail, but a long history built
+    /// XAML point collections with one entry per sample. Run endpoints always
+    /// survive, so lines and areas still begin/end exactly at run bounds.</summary>
+    private static List<Windows.Foundation.Point> Decimate(List<Windows.Foundation.Point> pts)
+    {
+        if (pts.Count <= 2)
+        {
+            return pts;
+        }
+        var outPts = new List<Windows.Foundation.Point>(pts.Count) { pts[0] };
+        for (int i = 1; i < pts.Count - 1; i++)
+        {
+            var last = outPts[^1];
+            var p = pts[i];
+            if (Math.Abs(p.X - last.X) >= 1 || Math.Abs(p.Y - last.Y) >= 1)
+            {
+                outPts.Add(p);
+            }
+        }
+        outPts.Add(pts[^1]);
+        return outPts;
+    }
 
     private static PointCollection PointCollectionOf(List<Windows.Foundation.Point> points)
     {
