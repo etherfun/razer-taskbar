@@ -9,15 +9,16 @@
   - 规则：同 handle 取最后一次匹配；`connected = loaded_idx > removed_idx`；缺事件记 `-1`（纯电池记录视为离线，与 TS 一致）。
 - V4：`%LOCALAPPDATA%\Razer\RazerAppEngine\User Data\Logs\systray_systrayv2*.log`
   - 文件选择：正则 `^systray_systrayv2(\d*)\.log$`，序号最大者胜（对应 TS `findLatestSynapseV4LogFile`）。
-  - 行格式：`[timestamp] ... connectingDeviceData: [...]`；全文件按时间重放，缺席最新快照的设备标离线。
+  - 行格式：`[timestamp] ... connectingDeviceData: [...]`；批次内按时间顺序重放，缺席最新快照的本源设备标离线（`_v4Known` 驱动的断连规则，等价旧全文件重放对每条记录重算在线的净效果）。
+  - **增量读取（2026-09-11）**：日志 ~5MiB 轮转，每轮只读上次 offset 之后的新增字节；字节级 pending 缓冲持有未换行的残行（UTF-8 字符不被切片边界劈开），到齐才解析。路径变化/长度收缩（轮转/截断）→ 全量重放复位；读取失败不推进 offset，下轮重试同区域。
   - 在线集合：最新快照中所有 `serialNumber`/`deviceContainerId`；handle 取 `serialNumber` 为空则回退 `deviceContainerId`；`NOSERIALNUMBER` 在真序列号出现后去重删除。
-  - 增量 guard：`lastV4Timestamp` 未变直接返回；最新行 JSON 腐坏不推进 timestamp，下轮重试（避免全员冻结离线）。
+  - 增量 guard：`lastV4Timestamp` 未变直接返回；末快照行 JSON 腐坏不推进 timestamp（完整但腐坏的行永不自愈，直接跳过等下一真实快照）。
 - 版本选择（`synapse_version`）：`v3`/`v4` 强制；`auto`（默认）有 V4 候选即用 V4。
 
 ## 监听循环（`WatcherService` watcher 线程）
 
 - 首次 `ParseOnce` 让挂件立即有内容；`FileSystemWatcher` 监听 V3 文件 + V4 目录，事件驱动解析：首个事件置脏，去抖 1s（整批写入只解析一次）后立即 `ParseOnce`。
-- `polling_throttle_secs` 退化为无事件时的兜底轮询节奏（记录历史时取 `min(polling_throttle_secs, history_poll_interval_secs)`，ulong 域钳制防手编配置回绕），每轮重读 `ConfigService`：设置页改轮询间隔/显示设备即时生效；下限钳制 2s。历史采样骑在每次解析上（事件驱动后过渡点更准时）。
+- `polling_throttle_secs` 退化为无事件时的兜底轮询节奏（记录历史时取 `min(polling_throttle_secs, history_poll_interval_secs)`，ulong 域钳制防手编配置回绕），每轮**读一次** `ConfigService` 并贯穿 ParseOnce/ParseV3/ParseV4（2026-09-11 起不再一轮 2-3 次整读 settings.json；改动仍下轮生效）：设置页改轮询间隔/显示设备即时生效；下限钳制 2s。历史采样骑在每次解析上（事件驱动后过渡点更准时）。
 
 ## 显示选择（`DeviceSelector.PickDeviceToDisplay` + `DisplayModeResolver`）
 

@@ -188,3 +188,22 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   出生即 WS_CHILD——模式切换走 `RecreateWindow` 销毁重建,**永不** SetParent+样式翻转
   (带忽略迁移窗口并冻结 ULW 帧,docs/agent-embed.md);embed 失败 sticky;
   z-burst 运行中不重排定时器;DrawTextW 空缓冲短路;V4 末行损坏不推进时间戳。
+
+## 冒烟验证记录(性能/正确性迭代,2026-09-11,Win11 26340)
+
+无人值守自我迭代 8 个提交(ea42a93..bf23435),构建 0 警告 0 错误,单测 156/156:
+
+- **Core**:HistoryService 单连接全 SQL 收敛 `DbLock`(原 Record 写与 SamplesInRange 读跨线程
+  裸并发,Microsoft.Data.Sqlite 一连接一命令);估计缓存增量重算(原每轮全量清空重算阻塞
+  EstimateFor);ConfigService 原子写;Log 5MiB 轮转。
+- **Native**:TrayIcon HICON 按 (level,charging) 缓存(原 tooltip 每分钟一换、每天漏 ~1400 句柄);
+  UIA 遍历 null 子元素判空(InputSite 预算不再耗在异常上);TaskbarDa 注册表读 5s TTL;
+  AppState 配置快照改"变更时发布、读取免锁"(原 WM_NCHITTEST 每条鼠标消息 Clone 26 字段)。
+- **Watcher**:每轮一次配置读贯穿传递;HidWatcher 的 MergeAlias(SQLite)移出 DeviceStore 锁;
+  V4 日志改增量尾读(~5MiB 文件原每 5s 整读+全正则),字节级残行缓冲,轮转复位,
+  断连规则复现全文件重放净效果。
+- **UI**:HistoryPage 取数/统计后台化(代次守卫),一次 Deflate+ComputeSpans 喂统计/健康/列表
+  (原 UI 线程 3 次全量重算);BatteryChart 色带合并相邻同类区间、轴查找二分、折线/面积
+  亚像素抽稀;HoverPanel 字体按高度缓存+行集不变跳过重测。
+- 实机:重启后 bootstrap/首绘/UIA 注册/放置/V4 解析(devices=2, connected=1)全部正常,
+  日志零 ERROR,进程稳定(~150MB)。

@@ -8,6 +8,12 @@
 - 采样挂在 watcher 线程每次解析之后（`Record`）：`(connected, charging, level)` 任一变化即写点，静止时 15 分钟心跳（`HeartbeatSecs`，必须远小于 `GapBreakSecs`，否则长静默会被误判为离线）。
 - `record_battery_history` 的判定收敛在 `Record` 一处（`Tick` 无条件调用、一次读盘）：关闭时挂件/托盘/悬停不残留冻结预测（历史 bug，2026-09-09 修复）。记录间隔设置只影响 watcher 的轮询节奏；事件驱动下过渡点即时入库。
 
+## 并发模型（2026-09-11 定稿）
+
+- 单一 `SqliteConnection` 被多线程共用（watcher 写、UI 读），而 Microsoft.Data.Sqlite 每连接只允许一条打开的命令：**所有 SQL 必须在 `DbLock` 内执行**（`Record` 写入、`SamplesInRange` 读取、`MergeAlias`/Scrub 的 DB 半边）。锁序恒为 `Sync → DbLock`（`Sync` 护内存结构，`DbLock` 护连接），任何路径不得反序或嵌套反转。
+- 估计缓存**增量刷新**：预测是序列的纯函数，`Record` 每轮只重算本轮长出了样本的序列（`dirty`），尾部断连的条目剪除，首次出现的在线尾部补算；全量清空重算会让每秒绘制/托盘刷新与 120ms 悬停 tick 的 `EstimateFor` 每轮都等一次 O(全历史) 计算。`MergeAlias` 合并后重算 dst（序列形状变了）。
+- `ConfigService.Save` 原子落盘（tmp + `File.Replace`）：写一半崩溃不再产生半文件被 `Load` 回落为默认值、再被下次 Save 固化覆盖用户配置的链路。`Log` 按 5MiB 轮转到 `.old`。
+
 ## 周期切分（`ComputeSpans`）
 
 - 放电/充电会话按 `(level, charging, connected)` 切分；**跨省电关机延续**：断连静默 >30 分钟（`GapBreakSecs`）不计活跃时间但**不结束**周期（图表用同一阈值画暗带，排除出统计）。
