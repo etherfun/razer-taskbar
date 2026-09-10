@@ -52,6 +52,9 @@ public sealed partial class HistoryPage : Page
     private List<Sample> _currentSamples = new();
     /// <summary>Compare-series device ("" = none) for the chart overlay.</summary>
     private string _compareHandle = "";
+    /// <summary>Reload generation: a slow background load finishing after a
+    /// newer selection change must not render stale data.</summary>
+    private int _reloadGen;
 
     public HistoryPage()
     {
@@ -262,8 +265,10 @@ public sealed partial class HistoryPage : Page
         return _devices.Count > 0 ? _devices[0].Handle : "";
     }
 
-    private void Reload()
+    private async void Reload()
     {
+        int gen = ++_reloadGen;
+
         // Device roster from the recorded history (viewer.rs device picker).
         var roster = HistoryService.ListDevices();
         // Same-name devices (two units, or a split HID/log identity) get a
@@ -295,29 +300,55 @@ public sealed partial class HistoryPage : Page
         var handle = SelectedHandle();
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long since = _rangeDays > 0 ? now - (_rangeDays * 86400) : 0;
-        _currentSamples = handle.Length > 0 ? HistoryService.SamplesInRange(handle, since) : new List<Sample>();
-        var samples = _currentSamples;
+        var requestedCompare = _compareHandle;
+
+        // Reads and statistics off the UI thread: an "All" range pulls the
+        // whole series and one Deflate+ComputeSpans pass feeds the stat
+        // cards, health card and cycle list (three full recomputes used to
+        // run here, all on the UI thread).
+        var data = await Task.Run(() =>
+        {
+            var samples = handle.Length > 0
+                ? HistoryService.SamplesInRange(handle, since)
+                : new List<Sample>();
+            var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
+            var stats = HistoryService.CycleStatsOfSpans(discharge, charge);
+            var health = HistoryService.HealthStatsOfSpans(charge);
+            List<Sample>? compareSamples = null;
+            if (requestedCompare.Length > 0 && requestedCompare != handle)
+            {
+                compareSamples = HistoryService.SamplesInRange(requestedCompare, since);
+            }
+            var est = handle.Length > 0 ? HistoryService.EstimateFor(handle) : null;
+            return (samples, discharge, charge, stats, health, compareSamples, est);
+        });
+        if (gen != _reloadGen)
+        {
+            return; // superseded: a newer selection changed the data set
+        }
+
+        var samples2 = data.samples;
+        _currentSamples = samples2;
+        var stats2 = data.stats;
 
         // Stat cards (viewer.rs paint values).
-        var stats = HistoryService.CycleStatsOf(samples);
-        StatCyclesValue.Text = $"{stats.Cycles}";
-        StatUseValue.Text = stats.UseHoursPerPct is { } useRate
+        StatCyclesValue.Text = $"{stats2.Cycles}";
+        StatUseValue.Text = stats2.UseHoursPerPct is { } useRate
             ? HistoryService.FormatDuration((long)Math.Round(useRate * 100.0 * 3600.0))
             : "--";
-        StatChargeValue.Text = stats.ChargeHoursPerPct is { } chargeRate
+        StatChargeValue.Text = stats2.ChargeHoursPerPct is { } chargeRate
             ? HistoryService.FormatDuration((long)Math.Round(chargeRate * 100.0 * 3600.0))
             : "--";
 
-        var est = handle.Length > 0 ? HistoryService.EstimateFor(handle) : null;
-        StatNowValue.Text = est is { } e ? HistoryService.FormatDuration(e.Secs) : "--";
+        var est2 = data.est;
+        StatNowValue.Text = est2 is { } e ? HistoryService.FormatDuration(e.Secs) : "--";
         StatNowValue.Foreground = new SolidColorBrush(
             new Windows.UI.Color { A = 0xFF, R = 0x60, G = 0xCD, B = 0xFF });
-        StatNowCaption.Text = I18n.Tr(est is { Charging: true } ? "until full (now)" : "time remaining now");
+        StatNowCaption.Text = I18n.Tr(est2 is { Charging: true } ? "until full (now)" : "time remaining now");
 
         // Battery health (computed over ALL recorded data, not range-limited:
         // fade is a years-scale trend).
-        var health = HistoryService.HealthStatsOf(samples);
-        if (health is { } h)
+        if (data.health is { } h)
         {
             HealthSohValue.Text = $"≈{Math.Round(h.SohPct)}%";
             HealthFadeValue.Text = h.FadePerMonthPct >= 0.1 ? $"−{h.FadePerMonthPct:0.0}%" : I18n.Tr("stable");
@@ -335,52 +366,49 @@ public sealed partial class HistoryPage : Page
             HealthEolValue.Text = "--";
         }
 
-            // Compare series picker: None + other recorded devices.
-            _suppressSelection = true;
-            try
-            {
-                var compareEntries = new List<DeviceEntry> { new("", I18n.Tr("None")) };
-                compareEntries.AddRange(_devices.Where(d => d.Handle != handle));
-                CompareCombo.ItemsSource = compareEntries.Select(d => d.Name).ToList();
-                var cIdx = compareEntries.FindIndex(d => d.Handle == _compareHandle);
-                CompareCombo.SelectedIndex = cIdx >= 0 ? cIdx : 0;
-                // A stale handle (the compare device became the main device,
-                // or vanished) resets to None — combo, state and chart must
-                // always agree.
-                if (cIdx < 0)
-                {
-                    _compareHandle = "";
-                }
-            }
-            finally
-            {
-                _suppressSelection = false;
-            }
-        List<Sample>? compareSamples = null;
-        string? compareName = null;
-        if (_compareHandle.Length > 0 && _compareHandle != handle)
+        // Compare series picker: None + other recorded devices.
+        _suppressSelection = true;
+        try
         {
-            compareSamples = HistoryService.SamplesInRange(_compareHandle, since);
-            if (compareSamples.Count > 0)
+            var compareEntries = new List<DeviceEntry> { new("", I18n.Tr("None")) };
+            compareEntries.AddRange(_devices.Where(d => d.Handle != handle));
+            CompareCombo.ItemsSource = compareEntries.Select(d => d.Name).ToList();
+            var cIdx = compareEntries.FindIndex(d => d.Handle == _compareHandle);
+            CompareCombo.SelectedIndex = cIdx >= 0 ? cIdx : 0;
+            // A stale handle (the compare device became the main device,
+            // or vanished) resets to None — combo, state and chart must
+            // always agree.
+            if (cIdx < 0)
             {
-                compareName = _devices.FirstOrDefault(d => d.Handle == _compareHandle)?.Name;
+                _compareHandle = "";
             }
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
+        // The prefetch used the handle as selected before the reset above —
+        // a reset (stale compare device) drops it, exactly like the old
+        // fetch-after-reset ordering.
+        List<Sample>? compareSamples2 = _compareHandle.Length > 0 ? data.compareSamples : null;
+        string? compareName = null;
+        if (compareSamples2 is { Count: > 0 })
+        {
+            compareName = _devices.FirstOrDefault(d => d.Handle == _compareHandle)?.Name;
         }
 
         // Chart.
-        Chart.Render(samples, compareSamples, compareName, _showOff);
-        CompareLegend.Visibility = compareSamples is { Count: >= 2 } ? Visibility.Visible : Visibility.Collapsed;
+        Chart.Render(samples2, compareSamples2, compareName, _showOff);
+        CompareLegend.Visibility = compareSamples2 is { Count: >= 2 } ? Visibility.Visible : Visibility.Collapsed;
         if (compareName is not null)
         {
             LegendCompare.Text = compareName;
         }
 
-        // Cycle list: discharge + charge spans merged, newest first.
-        // Deflated like the stat cards above (ReboundFilter): a relaxation
-        // bump must not show up as a fake fast cycle.
-        var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
+        // Cycle list: discharge + charge spans merged, newest first (the
+        // spans came from the single deflated pass above).
         var items = new List<(long EndTs, CycleItem Item)>();
-        foreach (var s in discharge)
+        foreach (var s in data.discharge)
         {
             items.Add((s.EndTs, new CycleItem
             {
@@ -390,7 +418,7 @@ public sealed partial class HistoryPage : Page
                 Levels = $"{s.LevelStart}→{s.LevelEnd}%",
             }));
         }
-        foreach (var s in charge)
+        foreach (var s in data.charge)
         {
             items.Add((s.EndTs, new CycleItem
             {

@@ -42,6 +42,7 @@ public static class HoverPanel
     private static List<Row> _rows = new();
     private static (int X, int Y) _panelPos;
     private static (int W, int H) _panelSize;
+    private static float _lastScale;
     private static IntPtr _hoverWnd;
 
     // Offscreen 32bpp DIB the panel paints into before the per-pixel-alpha
@@ -109,6 +110,16 @@ public static class HoverPanel
         _shown = false;
         _rows.Clear();
         DestroySurface();
+        foreach (var f in IconFontCache.Values)
+        {
+            DeleteObject(f);
+        }
+        foreach (var f in TextFontCache.Values)
+        {
+            DeleteObject(f);
+        }
+        IconFontCache.Clear();
+        TextFontCache.Clear();
         if (_hoverWnd != 0)
         {
             DestroyWindow(_hoverWnd);
@@ -165,6 +176,31 @@ public static class HoverPanel
         return dpi == 0 ? 1.0f : dpi / 96.0f;
     }
 
+    // Font caches, widget-thread only (same pattern as GdiText.CachedTextFont).
+    // Every Measure tick and every WM_PAINT used to create and delete a pair
+    // of fonts; heights are DPI-snapped so the key space stays tiny. Handles
+    // are shared — callers SelectObject but never delete.
+    private static readonly Dictionary<int, IntPtr> IconFontCache = new();
+    private static readonly Dictionary<int, IntPtr> TextFontCache = new();
+
+    private static IntPtr CachedIconFont(int h)
+    {
+        if (!IconFontCache.TryGetValue(h, out var f))
+        {
+            IconFontCache[h] = f = CreateIconFont(h);
+        }
+        return f;
+    }
+
+    private static IntPtr CachedPanelTextFont(int h)
+    {
+        if (!TextFontCache.TryGetValue(h, out var f))
+        {
+            TextFontCache[h] = f = CreateTextFont(h);
+        }
+        return f;
+    }
+
     private static IntPtr CreateIconFont(int h)
     {
         // Snap to Microsoft's magic icon sizes (16/20/24/…) for crisp glyphs.
@@ -207,8 +243,8 @@ public static class HoverPanel
         var hdc = GetDC(0);
         int textH = (int)MathF.Round(14.0f * scale);
         int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
-        var textFont = CreateTextFont(textH);
-        var iconFont = CreateIconFont(iconH);
+        var textFont = CachedPanelTextFont(textH);
+        var iconFont = CachedIconFont(iconH);
         var old = SelectObject(hdc, textFont);
         int nameW = 0, pctW = 0, etaW = 0;
         foreach (var r in rows)
@@ -225,8 +261,6 @@ public static class HoverPanel
         // Device-type icon column: widest kind at this row height (must run
         // while hdc is still valid).
         int kindW = rows.Count > 0 ? rows.Max(r => DeviceIcons.WidthFor(hdc, iconH, r.Kind)) : 0;
-        DeleteObject(textFont);
-        DeleteObject(iconFont);
         ReleaseDC(0, hdc);
         int pad = (int)MathF.Round(10.0f * scale);
         int gap = (int)MathF.Round(6.0f * scale);
@@ -301,13 +335,19 @@ public static class HoverPanel
             return;
         }
         var rows = SnapshotRows();
-        var (w, h) = Measure(rows);
-        var pos = Place(widget, wrect, w, h, cursor);
+        float scale = ScaleOf();
         bool rowsChanged = !_rows.SequenceEqual(rows);
+        // The size depends only on (rows, DPI): an unchanged hover reuses the
+        // last measure instead of re-running the font-measure pass every
+        // 120ms tick. Position still follows the cursor.
+        bool sizeKnown = !rowsChanged && _panelSize.W > 0 && scale == _lastScale;
+        var (w, h) = sizeKnown ? _panelSize : Measure(rows);
+        var pos = Place(widget, wrect, w, h, cursor);
         bool geometryChanged = _panelPos != pos || _panelSize != (w, h) || !_shown;
         _rows = rows;
         _panelPos = pos;
         _panelSize = (w, h);
+        _lastScale = scale;
         _shown = true;
         if (geometryChanged)
         {
@@ -378,11 +418,6 @@ public static class HoverPanel
 
     private static void PaintBody(IntPtr hdc, List<Row> rows, int w, int h)
     {
-        // Hoisted so the finally can free them on every path: a mid-paint
-        // exception used to leak both per-frame fonts (hover repaints run
-        // constantly while the panel is visible).
-        IntPtr iconFont = 0;
-        IntPtr textFont = 0;
         try
         {
             // Card base: opaque dark fill. The presenter turns bare-card
@@ -409,8 +444,8 @@ public static class HoverPanel
             int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
             int rowH = Math.Max(iconH, textH);
             int rowGap = (int)MathF.Round(3.0f * scale);
-            iconFont = CreateIconFont(iconH);
-            textFont = CreateTextFont(textH);
+            var iconFont = CachedIconFont(iconH);
+            var textFont = CachedPanelTextFont(textH);
             var old = SelectObject(hdc, textFont);
 
             int pctW = 0, etaW = 0;
@@ -525,11 +560,6 @@ public static class HoverPanel
         catch (Exception e)
         {
             Log.Error("hover panel paint body failed", e);
-        }
-        finally
-        {
-            DeleteObject(iconFont);
-            DeleteObject(textFont);
         }
     }
 

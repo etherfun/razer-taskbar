@@ -1307,11 +1307,17 @@ public static class HistoryService
     public static CycleStats CycleStatsOf(IReadOnlyList<Sample> samples)
     {
         var (discharge, charge) = ComputeSpans(ReboundFilter.Deflate(samples));
-        return new CycleStats(
+        return CycleStatsOfSpans(discharge, charge);
+    }
+
+    /// <summary>Spans-based form of <see cref="CycleStatsOf"/> for callers
+    /// that already split the (deflated) series — the page reuses one
+    /// ComputeSpans pass for stats, health and the cycle list.</summary>
+    public static CycleStats CycleStatsOfSpans(List<Span> discharge, List<Span> charge)
+        => new(
             discharge.Count(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs)),
             WeightedHoursPerPct(discharge),
             WeightedHoursPerPct(charge));
-    }
 
     /// <summary>Battery health / lifespan estimate for the history page, or
     /// null when there is not enough recorded data yet.
@@ -1328,6 +1334,13 @@ public static class HistoryService
     public static HealthStats? HealthStatsOf(IReadOnlyList<Sample> samples)
     {
         var (_, charge) = ComputeSpans(ReboundFilter.Deflate(samples));
+        return HealthStatsOfSpans(charge);
+    }
+
+    /// <summary>Spans-based form of <see cref="HealthStatsOf"/> (see
+    /// <see cref="CycleStatsOfSpans"/>): takes the deflated charge sessions.</summary>
+    public static HealthStats? HealthStatsOfSpans(List<Span> charge)
+    {
         var qualified = charge
             .Where(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs) && s.MovedPct >= HealthMinChargePct)
             .OrderBy(s => s.EndTs)

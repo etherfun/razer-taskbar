@@ -134,8 +134,24 @@ public sealed class BatteryChart : Canvas
             Canvas.SetTop(tb, gy - (tb.DesiredSize.Height > 0 ? tb.DesiredSize.Height / 2 : 7));
         }
 
-        // Bands per interval: off/unknown (disconnected or > GAP_BREAK_SECS)
-        // → off band; charging → green band; discharging → none.
+        // Bands: off/unknown (disconnected or > GAP_BREAK_SECS) → off band;
+        // charging → green band; discharging → none. Adjacent same-kind
+        // intervals merge into ONE Rectangle — a long history is thousands
+        // of intervals but only a handful of contiguous streaks, and a XAML
+        // UIElement per interval made big ranges freeze the UI thread.
+        var runBrush = (Brush?)null;
+        double runX = 0, runEndX = 0;
+        void FlushBand()
+        {
+            if (runBrush is null)
+            {
+                return;
+            }
+            var rect = new Rectangle { Width = Math.Max(runEndX - runX, 1), Height = _plotH, Fill = runBrush };
+            Children.Add(rect);
+            Canvas.SetLeft(rect, runX);
+            Canvas.SetTop(rect, _y0);
+        }
         for (int i = 1; i < main.Count; i++)
         {
             var prev = main[i - 1];
@@ -145,17 +161,25 @@ public sealed class BatteryChart : Canvas
             Brush? band = active ? (cur.Charging ? greenBandBrush : null)
                 : showOffBands ? offBandBrush
                 : null;
+            double bx = X(prev.Ts);
+            double bEnd = Math.Max(X(cur.Ts), bx + 1);
             if (band is null)
             {
+                FlushBand();
+                runBrush = null;
                 continue;
             }
-            double bx = X(prev.Ts);
-            double bw = Math.Max(X(cur.Ts) - bx, 1);
-            var rect = new Rectangle { Width = bw, Height = _plotH, Fill = band };
-            Children.Add(rect);
-            Canvas.SetLeft(rect, bx);
-            Canvas.SetTop(rect, _y0);
+            if (ReferenceEquals(band, runBrush) && bx <= runEndX + 0.5)
+            {
+                runEndX = bEnd;
+                continue;
+            }
+            FlushBand();
+            runBrush = band;
+            runX = bx;
+            runEndX = bEnd;
         }
+        FlushBand();
 
         // Area fill under contiguous connected runs, then the level line in
         // per-mode segments (broken across off/gap stretches).
@@ -395,20 +419,35 @@ public sealed class BatteryChart : Canvas
     private double XOf(long ts)
     {
         // _axis is filled by BuildAxis with one breakpoint per sample and
-        // every caller is gated on main.Count >= 2, so it is never empty here.
+        // every caller is gated on main.Count >= 2, so it is never empty
+        // here. Binary search: ascending in Ts, and this runs per sample on
+        // render plus per pointer move on the hover readout.
+        int count = _axis.Count;
         if (ts <= _axis[0].Ts)
         {
             return _axis[0].X;
         }
-        for (int i = 1; i < _axis.Count; i++)
+        if (ts >= _axis[count - 1].Ts)
         {
-            if (ts <= _axis[i].Ts)
+            return _axis[count - 1].X;
+        }
+        int lo = 0, hi = count - 1;
+        while (hi - lo > 1)
+        {
+            int mid = (lo + hi) / 2;
+            if (_axis[mid].Ts <= ts)
             {
-                double f = (ts - _axis[i - 1].Ts) / (double)Math.Max(_axis[i].Ts - _axis[i - 1].Ts, 1);
-                return _axis[i - 1].X + (f * (_axis[i].X - _axis[i - 1].X));
+                lo = mid;
+            }
+            else
+            {
+                hi = mid;
             }
         }
-        return _axis[^1].X;
+        var a = _axis[lo];
+        var b = _axis[hi];
+        double f = (ts - a.Ts) / (double)Math.Max(b.Ts - a.Ts, 1);
+        return a.X + (f * (b.X - a.X));
     }
 
     /// <summary>Chart-y pixel for a battery level. Single source shared by
@@ -416,22 +455,36 @@ public sealed class BatteryChart : Canvas
     private double LevelY(int level)
         => _y0 + _plotH - (Math.Clamp(level, 0, 100) / 100.0 * _plotH);
 
-    /// <summary>Inverse of XOf for ticks and the hover readout.</summary>
+    /// <summary>Inverse of XOf for ticks and the hover readout (binary
+    /// search over the X-ascending axis).</summary>
     private long TsAtX(double px)
     {
+        int count = _axis.Count;
         if (px <= _axis[0].X)
         {
             return _axis[0].Ts;
         }
-        for (int i = 1; i < _axis.Count; i++)
+        if (px >= _axis[count - 1].X)
         {
-            if (px <= _axis[i].X)
+            return _axis[count - 1].Ts;
+        }
+        int lo = 0, hi = count - 1;
+        while (hi - lo > 1)
+        {
+            int mid = (lo + hi) / 2;
+            if (_axis[mid].X <= px)
             {
-                double f = (px - _axis[i - 1].X) / Math.Max(_axis[i].X - _axis[i - 1].X, 0.001);
-                return _axis[i - 1].Ts + (long)(f * (_axis[i].Ts - _axis[i - 1].Ts));
+                lo = mid;
+            }
+            else
+            {
+                hi = mid;
             }
         }
-        return _axis[^1].Ts;
+        var a = _axis[lo];
+        var b = _axis[hi];
+        double f = (px - a.X) / Math.Max(b.X - a.X, 0.001);
+        return a.Ts + (long)(f * (b.Ts - a.Ts));
     }
 
     /// <summary>WinUI Measure on an element outside the tree can report 0 —
