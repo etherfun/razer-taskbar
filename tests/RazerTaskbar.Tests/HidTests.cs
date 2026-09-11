@@ -208,6 +208,51 @@ public class HidTests
     }
 
     [Fact]
+    public void Commit_FoldsRootedBleFallbackOnceIdentityResolves()
+    {
+        var watcher = new HidWatcher();
+        var store = new DeviceStore();
+        // First BT-connect rounds root the MAC fallback before the heartbeat
+        // identity bridge knows the device — live: rooted as "Joro"
+        // (vendor-channel name) at 13:22:56, resolved as "Razer Joro" at
+        // 13:23:58, and the fallback row lingered disconnected until now.
+        var fallback = new HidDeviceReading(0x02CE, "", "BLE:CF4FCB85ADF3", 245, 96, null,
+            "Joro", DeviceKind.Keyboard);
+        watcher.Commit(store, new List<HidDeviceReading> { fallback }, shown: "");
+        Assert.True(store.Snapshot()["BLE:CF4FCB85ADF3"].IsConnected);
+
+        // Identity hit: same physical device, real serial, canonical name.
+        var resolved = new HidDeviceReading(0x02CE, "", "SI2522F18701637", 245, 96, null,
+            "Razer Joro", DeviceKind.Keyboard);
+        watcher.Commit(store, new List<HidDeviceReading> { resolved }, shown: "");
+
+        var snap = store.Snapshot();
+        Assert.True(snap.ContainsKey("SI2522F18701637"));
+        Assert.True(snap["SI2522F18701637"].IsConnected);
+        Assert.False(snap.ContainsKey("BLE:CF4FCB85ADF3")); // folded away immediately
+    }
+
+    [Fact]
+    public void Commit_FallbackFoldIsPidPinned()
+    {
+        var watcher = new HidWatcher();
+        var store = new DeviceStore();
+        // A fallback row of ANOTHER pid must survive a resolved reading even
+        // when the names nest ("Joro" keyboard dongle slot vs BT keyboard).
+        var dongleSlot = new HidDeviceReading(0x00B8, "", "HID:00B8", 247, 97, null,
+            "Joro", DeviceKind.Keyboard);
+        watcher.Commit(store, new List<HidDeviceReading> { dongleSlot }, shown: "");
+
+        var resolved = new HidDeviceReading(0x02CE, "", "SI2522F18701637", 245, 96, null,
+            "Razer Joro", DeviceKind.Keyboard);
+        watcher.Commit(store, new List<HidDeviceReading> { resolved }, shown: "");
+
+        var snap = store.Snapshot();
+        Assert.True(snap.ContainsKey("HID:00B8"));
+        Assert.True(snap.ContainsKey("SI2522F18701637"));
+    }
+
+    [Fact]
     public void SerialQuery_Layout()
     {
         var buf = RazerReport.BuildSerialQuery(0x1F);

@@ -101,6 +101,10 @@ public sealed class HidWatcher
     /// loop must not flip connectivity for an entry the log source has since
     /// rewritten (auto-mode fallback rounds) — last writer owns the state.</summary>
     private readonly Dictionary<string, RazerDevice> _written = new();
+    /// <summary>Pid of the poll that rooted each fallback identity (contains
+    /// ':'): a resolved reading folds same-pid fallback rows only — pid pins
+    /// the model, keeping name containment from crossing models.</summary>
+    private readonly Dictionary<string, int> _fallbackPid = new();
 
     /// <summary>One HID poll cycle. Returns the number of battery devices
     /// that answered (drives the auto-mode fallback to log parsing).</summary>
@@ -195,6 +199,14 @@ public sealed class HidWatcher
         Commit(devices, readings, cfg.ShownDeviceHandle);
         return readings.Count;
     }
+
+    /// <summary>Same-device naming across sources: the vendor channel may
+    /// answer the bare name ("Joro") where Synapse logs the canonical one
+    /// ("Razer Joro"). Only consulted under the same-pid guard.</summary>
+    internal static bool NamesMatch(string a, string b)
+        => a.Equals(b, StringComparison.OrdinalIgnoreCase)
+            || a.Contains(b, StringComparison.OrdinalIgnoreCase)
+            || b.Contains(a, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Pure mapping into the shared device model: HID readings look
     /// exactly like Synapse-log entries downstream (selection stamping
@@ -345,8 +357,8 @@ public sealed class HidWatcher
                 // into, so HID:{pid} took root and reached battery.db). The
                 // pid-derived form is unambiguous — it is exactly what this
                 // device's failed serial query produces. BLE:{mac} fallbacks
-                // are not pid-derived; their rooted entries keep relying on
-                // the name-based fold and the startup DB merge.
+                // are handled by the pid-pinned fold below (their names can
+                // differ from the canonical one, so exact-name pairing fails).
                 if (handle.IndexOf(':') < 0)
                 {
                     var rooted = $"HID:{reading.ProductId:X4}";
@@ -357,6 +369,47 @@ public sealed class HidWatcher
                         Log.Info($"hid: serial resolved, retiring rooted fallback {rooted} -> {handle}");
                         aliases.Add((rooted, handle));
                     }
+                }
+                else
+                {
+                    _fallbackPid[handle] = reading.ProductId;
+                }
+            }
+            // Fold fallback-rooted rows orphaned by this round's resolved
+            // readings: the first BT-connect rounds root BLE:{mac} before the
+            // heartbeat identity bridge knows the device (live 2026-09-11:
+            // rooted as "Joro", resolved a minute later as "Razer Joro" —
+            // the row then lingered as a disconnected duplicate until
+            // restart; the startup heal's exact-name rule can't pair those
+            // names either). Same pid ⇒ same model, so containment absorbs
+            // the bare-vs-canonical naming gap safely. (Two same-model units
+            // can't hit this: an ambiguous heartbeat match resolves neither,
+            // and pid-shaped fallbacks of a resolved pid never root.)
+            foreach (var reading in readings)
+            {
+                var handle = HandleFor(reading);
+                if (handle.IndexOf(':') >= 0)
+                {
+                    continue; // still unresolved this round — nothing to fold into
+                }
+                foreach (var (src, device) in map)
+                {
+                    if (src.IndexOf(':') < 0
+                        || seen.Contains(src)
+                        || !_fallbackPid.TryGetValue(src, out var pid)
+                        || pid != reading.ProductId
+                        || !NamesMatch(device.Name, reading.NameOverride ?? reading.ProductName))
+                    {
+                        continue;
+                    }
+                    map.Remove(src);
+                    _owned.Remove(src);
+                    _written.Remove(src);
+                    _misses.Remove(src);
+                    _lastSeenMs.Remove(src);
+                    _fallbackPid.Remove(src);
+                    Log.Info($"hid: identity resolved, folding rooted fallback {src} -> {handle}");
+                    aliases.Add((src, handle));
                 }
             }
             // This source only manages connectivity of the entries it wrote:
