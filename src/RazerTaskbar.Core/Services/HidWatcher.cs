@@ -56,7 +56,17 @@ public sealed class HidWatcher
     // the full budget once per poll on the watcher thread.
     private static readonly int[] RetryDelaysMs = { 100, 200, 350, 500 };
     private const int DisconnectAfterMisses = 2;
-    private const int ReopenAfterFailStreak = 6; // polls; stale-handle failsafe
+    /// <summary>Disconnect additionally requires this much silence since the
+    /// last answer: a waking radio misses 2-4 rounds within ~20 s and must
+    /// not flicker the device offline in the widget and history samples.</summary>
+    internal long DisconnectAfterMs = 30_000;
+    // Reopen is a stale-handle failsafe, but a handle whose exchanges return
+    // protocol responses (busy/no-response) is alive — the device is merely
+    // asleep. Reopening then only burns the "reopen after idle intermittently
+    // fails" risk (live log: ~4000 silent reopens vs 2 real API faults in 4 h).
+    private const int ReopenAfterFaultStreak = 6;       // polls with exchange faults
+    private const int DeepReopenAfterEmptyStreak = 120; // silent polls; wedged-device last resort
+    private const int UnsupportedLogCooldownMs = 10 * 60 * 1000;
 
     private const int HidpStatusSuccess = 0x0011_0000;
     private const int ErrorInvalidFunction = 1;
@@ -82,7 +92,15 @@ public sealed class HidWatcher
     private readonly Dictionary<string, int> _misses = new();
     private readonly Dictionary<int, HidSession> _sessions = new();
     private readonly Dictionary<int, HashSet<string>> _deadPaths = new(); // pid → paths without feature reports
-    private readonly Dictionary<int, int> _failStreak = new();
+    private readonly Dictionary<int, int> _emptyStreak = new();
+    private readonly Dictionary<int, int> _faultStreak = new();
+    private bool _faultInRound; // set by QueryCommand (watcher thread only)
+    private readonly Dictionary<(int Pid, byte Tx), long> _unsupportedLoggedMs = new();
+    private readonly Dictionary<string, long> _lastSeenMs = new();
+    /// <summary>Device instances this source last wrote, by handle: the miss
+    /// loop must not flip connectivity for an entry the log source has since
+    /// rewritten (auto-mode fallback rounds) — last writer owns the state.</summary>
+    private readonly Dictionary<string, RazerDevice> _written = new();
 
     /// <summary>One HID poll cycle. Returns the number of battery devices
     /// that answered (drives the auto-mode fallback to log parsing).</summary>
@@ -169,7 +187,9 @@ public sealed class HidWatcher
         {
             Log.Info("hid poll: " + (readings.Count == 0
                 ? "no battery devices"
-                : string.Join(", ", readings.Select(r => $"0x{r.ProductId:X4} \"{r.NameOverride ?? r.ProductName}\" {r.LevelPercent}%"))));
+                : string.Join(", ", readings.Select(r =>
+                    $"0x{r.ProductId:X4} \"{r.NameOverride ?? r.ProductName}\" {r.LevelPercent}%" +
+                    (r.IsCharging == true ? " (charging)" : "")))));
             _lastSignature = signature;
         }
         Commit(devices, readings, cfg.ShownDeviceHandle);
@@ -314,6 +334,7 @@ public sealed class HidWatcher
                     continue;
                 }
                 map[handle] = merged;
+                _written[handle] = merged;
                 if (stale is { } dead && dead != handle)
                 {
                     map.Remove(dead);
@@ -341,26 +362,40 @@ public sealed class HidWatcher
             // This source only manages connectivity of the entries it wrote:
             // a device missing from this round starts a miss counter (dongle
             // still enumerated, device powered off) and is marked
-            // disconnected after N consecutive misses.
+            // disconnected after N consecutive misses AND a wall-clock
+            // silence floor — a radio wake storm misses rounds in quick
+            // succession and must not flicker the device offline.
             foreach (var handle in _owned)
             {
                 if (seen.Contains(handle)
                     || !map.TryGetValue(handle, out var device)
-                    || !device.IsConnected)
+                    || !device.IsConnected
+                    || !ReferenceEquals(device, _written.GetValueOrDefault(handle)))
                 {
-                    continue;
+                    continue; // answered this round / gone (merged away) / offline
+                              // already / rewritten by the log source — it owns
+                              // connectivity now
                 }
-                _misses[handle] = _misses.GetValueOrDefault(handle) + 1;
-                if (_misses[handle] >= DisconnectAfterMisses)
+                var misses = _misses[handle] = _misses.GetValueOrDefault(handle) + 1;
+                var silentMs = Environment.TickCount64 - _lastSeenMs.GetValueOrDefault(handle);
+                if (misses >= DisconnectAfterMisses && silentMs >= DisconnectAfterMs)
                 {
+                    Log.Info($"hid: {handle} marked disconnected ({misses} missed polls, silent {(int)(silentMs / 1000)} s)");
                     map[handle] = device with { IsConnected = false };
+                    _written[handle] = map[handle];
                 }
             }
             foreach (var handle in seen)
             {
                 _misses.Remove(handle);
+                _lastSeenMs[handle] = Environment.TickCount64;
             }
-            _owned = seen;
+            // Ownership persists across rounds: a device that answered once
+            // keeps accumulating misses while it stays missing. Replacing the
+            // set with `seen` would empty it on the first empty round and the
+            // disconnect flip could never fire (live-observed: deep-sleeping
+            // devices stayed "online" with stale levels for hours).
+            _owned.UnionWith(seen);
         });
         foreach (var (src, dst) in aliases)
         {
@@ -535,11 +570,13 @@ public sealed class HidWatcher
                 continue;
             }
             _collectionUnusable = false;
+            _faultInRound = false;
             var readings = ExchangeSlots(session, pid);
             if (readings.Count > 0)
             {
                 _workingPath[pid] = path;
-                _failStreak[pid] = 0;
+                _emptyStreak.Remove(pid);
+                _faultStreak.Remove(pid);
                 return readings;
             }
             if (_collectionUnusable)
@@ -551,14 +588,22 @@ public sealed class HidWatcher
                 continue;
             }
             // Device not answering right now (powered off / wireless asleep)
-            // or a stale handle. Keep the handle; a stale one is detected by
-            // a persistent failure streak, a replug by the path check.
-            var streak = _failStreak[pid] = _failStreak.GetValueOrDefault(pid) + 1;
-            if (streak >= ReopenAfterFailStreak)
+            // or a stale handle. Keep the handle: a stale one surfaces as
+            // exchange faults within a few polls, a replug as a vanished path.
+            var empty = _emptyStreak[pid] = _emptyStreak.GetValueOrDefault(pid) + 1;
+            if (_faultInRound)
             {
-                Log.Info($"hid: no answer {streak} polls in a row, reopening …{path[^40..]}");
+                var faults = _faultStreak[pid] = _faultStreak.GetValueOrDefault(pid) + 1;
+                if (faults >= ReopenAfterFaultStreak)
+                {
+                    Log.Info($"hid: pid 0x{pid:X4} no answer {empty} polls ({faults} with exchange faults), reopening …{path[^40..]}");
+                    CloseSession(pid);
+                }
+            }
+            else if (empty >= DeepReopenAfterEmptyStreak)
+            {
+                Log.Info($"hid: pid 0x{pid:X4} silent {empty} polls without exchange faults, deep-failsafe reopen …{path[^40..]}");
                 CloseSession(pid);
-                _failStreak[pid] = 0;
             }
             return readings;
         }
@@ -583,19 +628,24 @@ public sealed class HidWatcher
             // short budget: they are usually absent, and NoResponse storms
             // on the shared radio must not stretch the poll.
             var attempts = slot.Role == RazerPidTable.SlotRole.Keyboard ? 2 : MaxAttempts;
-            if (QueryCommand(session.Handle, session.Iface.FeatureLength,
-                    RazerReport.BuildBatteryQuery(slot.TransactionId), attempts) is not { } levelRaw)
+            var battery = QueryCommand(session.Handle, session.Iface.FeatureLength,
+                RazerReport.BuildBatteryQuery(slot.TransactionId), attempts);
+            if (battery.Value is not { } levelRaw)
             {
                 if (_collectionUnusable)
                 {
                     break; // collection can't carry feature reports at all
                 }
-                continue; // slot absent / asleep — try the next one
+                if (battery.Unsupported)
+                {
+                    LogUnsupportedOnce(pid, slot.TransactionId);
+                }
+                continue; // slot absent / asleep / unsupported — try the next one
             }
             // Charging is optional: AA-battery devices fail this command and
             // report null (displayed as not charging).
             var chargingRaw = QueryCommand(session.Handle, session.Iface.FeatureLength,
-                RazerReport.BuildChargingQuery(slot.TransactionId), attempts);
+                RazerReport.BuildChargingQuery(slot.TransactionId), attempts).Value;
             var charging = chargingRaw is { } raw ? raw != 0 : (bool?)null;
             var vendorSerial = SerialFor(session, slot.TransactionId);
             var serial = vendorSerial.Length > 0 ? vendorSerial : session.Iface.Serial;
@@ -737,11 +787,30 @@ public sealed class HidWatcher
         {
             HidApi.CloseHandle(session.Handle);
         }
+        _emptyStreak.Remove(pid);
+        _faultStreak.Remove(pid);
+    }
+
+    /// <summary>Empty-slot / AA-battery devices answer the battery query with
+    /// status 0x05 — expected and unfixable, so the diagnostic is rate-limited
+    /// per (pid, slot) instead of flooding the log every poll.</summary>
+    private void LogUnsupportedOnce(int pid, byte tx)
+    {
+        long now = Environment.TickCount64;
+        var key = (pid, tx);
+        if (now - _unsupportedLoggedMs.GetValueOrDefault(key) < UnsupportedLogCooldownMs)
+        {
+            return;
+        }
+        _unsupportedLoggedMs[key] = now;
+        Log.Info($"hid: pid 0x{pid:X4} slot tx=0x{tx:X2} answers status=0x05 (unsupported) to the battery query; muting repeats for {UnsupportedLogCooldownMs / 60000} min");
     }
 
     /// <summary>Send one get-command and read the answer, resending while
-    /// the device reports busy / no-response. Returns arguments[1] or null.</summary>
-    private byte? QueryCommand(IntPtr handle, ushort featureLength, byte[] query, int attempts = MaxAttempts)
+    /// the device reports busy / no-response. Returns arguments[1] plus a
+    /// flag distinguishing "command unsupported" from "no answer" — both
+    /// yield null, but only the latter counts as a transient miss.</summary>
+    private (byte? Value, bool Unsupported) QueryCommand(IntPtr handle, ushort featureLength, byte[] query, int attempts = MaxAttempts)
     {
         // The declared length can be 0; the exchange itself decides whether
         // the collection accepts the 90-byte vendor report.
@@ -759,8 +828,9 @@ public sealed class HidWatcher
                     // vendor report (no feature reports at all, or — BLE — a
                     // fixed-size standard one). The caller blacklists the path.
                     _collectionUnusable = true;
-                    return null;
+                    return (null, false);
                 }
+                _faultInRound = true; // generic failure — stale-handle evidence
                 Log.Info($"hid setFeature failed err={err} (attempt {attempt + 1}/{MaxAttempts})");
                 Thread.Sleep(30);
                 continue;
@@ -769,6 +839,7 @@ public sealed class HidWatcher
             var recv = new byte[bufferLength]; // zero-initialized: report id byte 0
             if (!HidApi.HidD_GetFeature(handle, recv, (uint)recv.Length))
             {
+                _faultInRound = true;
                 Log.Info($"hid getFeature failed err={Marshal.GetLastWin32Error()} (attempt {attempt + 1}/{MaxAttempts})");
             }
             else
@@ -776,22 +847,21 @@ public sealed class HidWatcher
                 switch (RazerReport.ParseResponse(recv, query[2], query[7], commandId, out var argument1))
                 {
                     case RazerResponseKind.Success:
-                        return argument1;
+                        return (argument1, false);
                     case RazerResponseKind.Busy:
                     case RazerResponseKind.NoResponse:
+                        break; // link still waking / transient — resend after a wait
                     case RazerResponseKind.BadEcho:
                     case RazerResponseKind.BadCrc:
                     case RazerResponseKind.BadLength:
-                        break; // link still waking / transient — resend after a wait
+                        _faultInRound = true; // garbage frames — exchange not trustworthy
+                        break;
                     case RazerResponseKind.NotSupported:
-                        // Devices without a charging command (AA-battery mice)
-                        // answer 0x05 every poll — only surface the battery
-                        // query, the charging one is expected to fail.
-                        if (query[8] == RazerReport.CommandGetBatteryLevel)
-                        {
-                            Log.Info($"hid: device reported status=0x{recv[1]:X2} for the battery query, giving up");
-                        }
-                        return null; // device doesn't implement this command
+                        // Device doesn't implement this command (charging on
+                        // AA-battery devices; empty receiver slots answer the
+                        // battery query this way too). The caller logs it
+                        // rate-limited with pid/slot context.
+                        return (null, true);
                 }
             }
             if (attempt < RetryDelaysMs.Length)
@@ -799,7 +869,7 @@ public sealed class HidWatcher
                 Thread.Sleep(RetryDelaysMs[attempt]); // let the link wake, then resend
             }
         }
-        return null;
+        return (null, false);
     }
 
     /// <summary>Serial query (class 0x00/0x82): same exchange rhythm as the

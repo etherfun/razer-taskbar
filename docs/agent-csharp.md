@@ -207,3 +207,22 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   亚像素抽稀;HoverPanel 字体按高度缓存+行集不变跳过重测。
 - 实机:重启后 bootstrap/首绘/UIA 注册/放置/V4 解析(devices=2, connected=1)全部正常,
   日志零 ERROR,进程稳定(~150MB)。
+
+## 冒烟验证记录(数据获取迭代,2026-09-11,Win11 26340)
+
+实机键盘 Joro 已切 USB(PID 0x02CD),鼠标 Viper V3 HyperSpeed 2.4G(0x00B8)。日志 4h 统计
+暴露三处采集质量问题并修复(提交见 git,单测 160/160):
+
+- **判离线从未生效(真 bug)**:`Commit` 尾部 `_owned = seen` 在首轮空读后清空归属集合,
+  miss 计数永远到不了 2——深睡/关机设备一直显示最后电量"在线"。修复:归属集合并入 seen
+  持久累积;同时加 30s 墙钟静默下限(wake 风暴 2-4 轮 miss 不再闪烁离线)与"最后写入者
+  拥有连接权"守卫(auto 回退日志源重写的条目,HID miss 循环按引用比对跳过,不越权翻转)。
+  离线/上线转换各记一条 INFO。
+- **reopen 风暴**:4h 3964 次 `no answer → reopening`,其中 API 级失败仅 2 次——99.9% 是对
+  深睡设备的无意义重开(重开有"空闲后间歇失败"风险)。修复:重开须在连续空轮内观察到
+  交换故障证据(setFeature/getFeature 失败、BadEcho/BadCrc/BadLength,6 轮触发);
+  纯静默深睡只保留 120 轮深保底重开。日志带 pid。
+- **0x05 刷屏**:键盘离开 dongle 后空键盘槽偶发以 status=0x05 应答电量查询(4h 2685 条)。
+  修复:按 (pid, slot) 10 分钟限频,消息带 pid+tx 便于定位;`QueryCommand` 返回
+  (value, unsupported) 区分"不支持"与"无应答"。
+- 其他:hid poll 签名行附 `(charging)`,可从日志直接验证充电位(Joro USB 线充实测 99% 在充)。

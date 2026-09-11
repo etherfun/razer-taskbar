@@ -190,7 +190,8 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 0x180A（Manufacturer="Razer"+PnP ID `028E06CE02…`）、0x180F（BAS，Read+Notify）。
 - **充电标志现状**：厂商通道可用时充电位来自 (05,85)；通道被占回退 BAS（无充电）+
   心跳 `chargingStatus`。`Commit` 仍保留有线读数的充电状态不被 BLE 读数覆盖。
-- 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——2 轮后判离线。
+- 蓝牙模式同时 dongle 键盘槽会持续 NoResponse（2 次预算后缺席计数）——缺席 2 轮且静默
+  ≥30s 后判离线（2026-09-11 起判离线需墙钟静默，见"设备身份 / 数据流"）。
 
 ## get 半区全段扫描（2026-09-07 真机，`--hid-scan`，结果 hid-scan.log）
 
@@ -253,7 +254,20 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
   写入 `DeviceStore` 的条目与日志源同构（`IsSelected` 盖章、`DeviceClassifier` 分类），
   下游挂件/hover/托盘/历史零改动。历史采样仍由 `Tick` 统一挂载。
 - 身份：优先厂商序列号查询，其次 HID 序列号字符串，最后 `HID:{pid:X4}`（见第 6 点）。
-- 连接判定：本轮查到 → connected；连续 2 轮查不到（接收器在、设备关机/离开）→ disconnected。
+- 连接判定（2026-09-11 修订）：本轮查到 → connected；缺席计数 ≥2 轮 **且** 距最后应答
+  静默 ≥30s（`DisconnectAfterMs`）→ disconnected。墙钟下限吸收无线链路 wake 风暴
+  （2-4 轮快速 miss 不闪烁离线）；转换各记一条 INFO。两个坑（真机日志定位）：
+  ① 原 `_owned = seen` 首轮空读即清空归属集，miss 永远到不了 2——判离线实际从未生效，
+   深睡设备恒显示最后电量"在线"，已改为归属持久累积；
+  ② auto 回退日志源期间日志源会重写同一条目——HID miss 循环按"最后写入者引用比对"
+   跳过非本源写入的条目，不越权翻转日志源的连接判定。
+- **句柄重开判据（2026-09-11 修订）**：重开（stale-handle failsafe）只在连续空轮内存在
+  **交换故障证据**（setFeature/getFeature 失败、BadEcho/BadCrc/BadLength，`_faultInRound`）
+  满 6 轮时触发；纯 NoResponse/Busy = 设备深睡而句柄健在，重开无意义且有"空闲后重开
+  间歇失败"风险（实测 4h：3964 次重开 vs 2 次 API 故障）。纯静默仅保留 120 轮深保底。
+- **status=0x05（不支持）日志限频**：空接收器槽/AA 设备对电量查询回 0x05 属预期，按
+  (pid, slot) 10 分钟限频，消息带 pid+tx（`QueryCommand` 返回 (value, unsupported)）。
+- `hid poll` 签名行附 `(charging)`，可从日志直接核验充电位。
 - **auto 模式的粒度是整体而非按设备**：HID 查到 ≥1 台后日志解析不再运行。HID 不支持
   `0x07` 电量命令的设备（耳机是另一套协议）会停留在最后一次日志值并保持冻结——此类设备
   为主时建议 `battery_source=log`，或等待按设备合并的后续改进。

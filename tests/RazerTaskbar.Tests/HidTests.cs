@@ -165,6 +165,49 @@ public class HidTests
     }
 
     [Fact]
+    public void Commit_DisconnectRequiresMissQuorumAndWallClockSilence()
+    {
+        var watcher = new HidWatcher();
+        var store = new DeviceStore();
+        var reading = new HidDeviceReading(0x00B8, "Razer Viper V3 HyperSpeed", "632516H31000044", 63, 63, false);
+
+        watcher.Commit(store, new List<HidDeviceReading> { reading }, shown: "");
+        Assert.True(store.Snapshot()["632516H31000044"].IsConnected);
+
+        // A radio wake storm misses the quorum rounds within seconds: the
+        // device must not flicker offline (widget + history samples).
+        watcher.Commit(store, new List<HidDeviceReading>(), shown: "");
+        watcher.Commit(store, new List<HidDeviceReading>(), shown: "");
+        Assert.True(store.Snapshot()["632516H31000044"].IsConnected);
+
+        // Silence past the wall-clock floor: the flip happens once.
+        watcher.DisconnectAfterMs = -1; // test hook: floor elapsed
+        watcher.Commit(store, new List<HidDeviceReading>(), shown: "");
+        Assert.False(store.Snapshot()["632516H31000044"].IsConnected);
+
+        // An answer reconnects and resets the miss bookkeeping.
+        watcher.Commit(store, new List<HidDeviceReading> { reading }, shown: "");
+        Assert.True(store.Snapshot()["632516H31000044"].IsConnected);
+    }
+
+    [Fact]
+    public void Commit_MissLoopSkipsEntriesRewrittenByAnotherSource()
+    {
+        var watcher = new HidWatcher { DisconnectAfterMs = -1 };
+        var store = new DeviceStore();
+        var reading = new HidDeviceReading(0x00B8, "Razer Viper V3 HyperSpeed", "632516H31000044", 63, 63, false);
+        watcher.Commit(store, new List<HidDeviceReading> { reading }, shown: "");
+
+        // The log source (auto-mode fallback round) rewrote the entry: it
+        // owns connectivity now — HID misses must not flip it offline.
+        store.Mutate(map => map["632516H31000044"] =
+            map["632516H31000044"] with { BatteryPercentage = 62 });
+        watcher.Commit(store, new List<HidDeviceReading>(), shown: "");
+        watcher.Commit(store, new List<HidDeviceReading>(), shown: "");
+        Assert.True(store.Snapshot()["632516H31000044"].IsConnected);
+    }
+
+    [Fact]
     public void SerialQuery_Layout()
     {
         var buf = RazerReport.BuildSerialQuery(0x1F);
