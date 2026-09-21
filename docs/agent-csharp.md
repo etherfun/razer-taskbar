@@ -42,7 +42,8 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 | taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
 | hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
 | tray.rs | Native/TrayIcon.cs | legacy 回调(2026-09-09 移除 VERSION_4:V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,与 WM_TRAY 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘右键/双击一并失效)、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
-| icons.rs | Native/DeviceIcons.cs | 字形墨迹扫描 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
+| icons.rs | Native/DeviceIcons.cs | 字形常量 + D2d 墨迹宽度 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
+| (新增) | Native/D2d.cs | 共享 D2D/DWrite 上下文：工厂/字体回退探测/格式缓存/墨迹扫描(渲染像素为准) |
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
 | watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖;V3 解析单测 WatcherV3Tests |
 | battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
@@ -241,3 +242,19 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   形态,且首尾名字不同连启动自愈的精确同名配对也失败)。修复:Commit 实时折叠同 pid +
   名字相等/互相包含的回退行(`_fallbackPid` + `NamesMatch`,见 agent-hid.md 蓝牙节);
   存量 DB 分裂序列已手术合并(2 样本 + devices 行)。部署后首轮即以规范名出现,零回退根。
+- **发现并修复组合接收器跨子设备串台(2026-09-18)**:`HID:{pid}` 只命名得了一个子设备,
+  Viper V3 HS 接收器(0x00B8)的键盘槽(Joro,80%)与鼠标槽(36%)共用它 → 同一条历史序列;
+  任一侧解析出串号时,`Commit` 的退休折叠(只判 `map.ContainsKey(rooted)`)把另一侧的行整批
+  `MergeAlias` 进该序列——直接 INSERT 绕过 SpikeFilter,当日 8 次合并 → 库里 8 组 36%↔80%
+  ±44 尖峰(启动 scrub 认这个形状可清,但一次遍历漏掉每组平台最后一行——重锚定行自身仍是
+  80%;已改为跑不动点,见 agent-history.md 第 2 点)。修复:第二子设备(槽位角色
+  ≠ pid 首槽角色)合成身份带键 `HID:{pid}:K`(`RazerPidTable.SecondaryKey`),`HandleFor`/
+  `DedupRound`/退休折叠/孤儿折叠统一按键判定;第二个子设备也不再继承共享的接口串号。
+  同批副作用(顺带修掉):键盘槽不再因同 pid 有串号应答而在当轮被丢弃——此前它每轮被判缺席,
+  在 hover/挂件里闪断。回归测试 `DeviceIdentityTests.SerialResolutionNeverRetiresTheSiblingSlotsFallback`。
+- **发现并修复更新闪帧(2026-09-19)**:ETA 文本宽度每分钟变化 → `PaintBody` 量出新自然尺寸后
+  按旧矩形先呈现一帧,1s 轮询才 `SetWindowPos` 到新矩形——旧尺寸表面被拉伸进新矩形,而嵌入态
+  每次呈现都 poke 带重建,重建恰好落在"已改几何、未上新帧"的窗口期时把拉伸帧冻结上屏(用户
+  报告"更新时闪一下")。修复:`Paint` 内量得尺寸变化就地按新尺寸重渲染 → `PlaceWidgetCore`
+  立即应用几何 → `AlphaPresent`,DWM 只可能合成最终帧;启动不再有 144→42→71→89 的多级 churn
+  (首帧直接落最终尺寸)。红线已记入 AGENTS.md"尺寸与帧同一次 Paint 提交"。

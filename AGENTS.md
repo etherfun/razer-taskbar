@@ -1,6 +1,6 @@
 # razer-taskbar — Agent 协作规范
 
-Windows 任务栏电池挂件（C# / WinUI 3 + Win32 P/Invoke，挂件层 GDI/ULW 原生绘制，无图片资源）。
+Windows 任务栏电池挂件（C# / WinUI 3 + Win32 P/Invoke，挂件层 Direct2D+DirectWrite/ULW 原生绘制，无图片资源）。
 Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全量版。
 
 - 运行环境：Windows 10 / 11；Razer Synapse 3/4 可选（回退电量源 + 蓝牙身份桥）；.NET 8 SDK 构建，
@@ -19,11 +19,11 @@ Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全�
 | `src/RazerTaskbar/` | WinUI3 主应用（exe，`WindowsPackageType=None` 框架依赖 unpackaged） |
 | `Program.cs` / `App.xaml(.cs)` | 入口、单实例、Bootstrap 降级、线程划分 |
 | `MainWindow.xaml(.cs)` | NavigationView 主窗口（History/Settings 两页宿主，按需惰性创建） |
-| `Native/WidgetWindow.cs` | 挂件覆盖层窗口、ULW/GDI 绘制、菜单、事件驱动布局、embed v2、交叉淡化 |
+| `Native/WidgetWindow.cs` | 挂件覆盖层窗口、ULW/D2D 绘制、菜单、事件驱动布局、embed v2、交叉淡化 |
 | `Native/TaskbarLocator.cs` | 任务栏发现、Win10/11 定位、widgets 板 UIA 查询与避让 |
 | `Native/HoverPanel.cs` | 悬停设备列表面板（光标轮询，非交互只读） |
 | `Native/TrayIcon.cs` | 托盘兜底图标（菜单入口，explorer 重启后重挂） |
-| `Native/DeviceIcons.cs` / `GdiText.cs` | GDI 矢量设备类型图标 / 字体回退与墨迹测量 |
+| `Native/DeviceIcons.cs` / `Native/D2d.cs` | 设备字形常量、吸附字号 / 共享 D2D 渲染上下文（工厂/字体回退/格式缓存/墨迹扫描）|
 | `Native/UiaEvents.cs` + `Native/Interop/Uia.cs` | UIA 结构变化监听（手写 COM interop） |
 | `Native/Interop/Win32.cs` | Win32 P/Invoke 声明集中地 |
 | `Native/AppState.cs` / `SingleInstance.cs` | 配置权威副本（挂件线程写+落盘）/ 单实例守卫 |
@@ -75,8 +75,10 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 - 配置新增字段必须带默认值（`ConfigService`），保持旧配置文件可加载。
 - 渲染保真红线：任何模式**不**调 `SetLayeredWindowAttributes` COLORKEY（黑 key 有 AA 暗边）；阴影
   `0x202020` 非纯黑；覆盖层保持 `WS_POPUP`、嵌入保持出生即 `WS_CHILD`，模式切换走销毁重建**永不**
-  SetParent（`docs/agent-embed.md`）；z-burst 运行中不重排定时器；`DrawTextW` 空缓冲短路；V4 末行损坏
-  不推进时间戳。
+  SetParent（`docs/agent-embed.md`）；z-burst 运行中不重排定时器；空文本 DrawText 短路（`D2d.DrawInkText`/`TextWidth` 内置）；V4 末行损坏
+  不推进时间戳；**尺寸与帧同一次 Paint 提交**——量出新自然尺寸后必须按新尺寸重渲染、`SetWindowPos`、
+  ULW 一气呵成（`WidgetWindow.Paint` 的 resize 分支），先呈现后等 1s 轮询缩放会让旧尺寸表面被拉伸进
+  新矩形，被带重建冻结成可见闪帧。
 
 # 分文档索引
 

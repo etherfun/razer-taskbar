@@ -50,6 +50,16 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
 - arguments 寻址无效（0x9F args0=0x01 → NotSupported）；键盘槽用短重试预算（2 次，通常缺席时不拖慢轮询）
 - 串号按 tx 缓存于会话；**查询失败不缓存**（风暴期打开会话时拿不到串号，若缓存会导致
   `HID:{pid}` 假身份落库），未解析时每轮重试
+- **子设备分键（2026-09-18 修复）**：`HID:{pid}` 这个合成身份只能命名接收器的主子设备，两个槽
+  共用它 → 同一个 DeviceStore 条目 + 同一条历史序列，任一侧解析出串号时 `MergeAlias` 会把
+  另一侧的读数整批搬进来（真机：键盘槽 80% 的行落进鼠标序列，库里出现 36%↔80% 的 ±44 尖峰，
+  当天 8 次；`HidWatcher.Commit` 的退休折叠当时只判 `map.ContainsKey(rooted)`）。
+  修复：**槽位角色 ≠ 该 pid 首槽角色**的槽（即第二个子设备）在合成句柄上带自己的键
+  （`RazerPidTable.SecondaryKey` → `HID:00B8:K`），`HandleFor`/`DedupRound`/退休折叠/孤儿折叠
+  全部按这个键判定；同角色的槽位（0x1F/0x3F/0x0F 都通向鼠标）仍共用裸 `HID:{pid}` 以保持折叠。
+  同批：**第二个子设备不得继承接口串号**（那是接收器/主子设备的身份，会让键盘顶鼠标的名）。
+  `HID:{pid}` 两段旧格式不再产生，历史库里残留的旧行仍由启动自愈 `AliasPairs` 按名配对。
+  单槽设备（有线 Joro 0x02CD 等）不受影响，仍是裸 `HID:{pid}`。
 - 键盘槽的显示名：产品字符串是鼠标名，且**厂商协议没有名称命令**（INFO 类 0x00 实测只有
   0x81 固件 / 0x82 串号 / 0x84 模式；OpenRazer 的设备名也是内核驱动按 PID 硬编码的
   `device_type` switch，daemon 只读 sysfs）。名称来源：优先从 Synapse V4 日志收割
@@ -256,7 +266,9 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 6. 接收器 HID 序列号字符串是全 0（如 `000000000000`），不是设备身份。真实序列号通过厂商命令
    `class 0x00 / id 0x82`（22 字节 ASCII，OpenRazer `razer_chroma_standard_get_serial`）查询，
    在鼠标 TLC 上可用——Viper V3 HS 真机返回 `632516H31000044`，与 Synapse 日志的 `serialNumber`
-   完全一致，两个数据源共用同一身份。查询失败（设备忙/不支持，如 Joro）才退化为 `HID:{pid:X4}`。
+   完全一致，两个数据源共用同一身份。查询失败（设备忙/不支持，如 Joro）才退化为 `HID:{pid:X4}`
+   ——**接收器的第二子设备（键盘槽）退化为 `HID:{pid:X4}:K`**，否则两槽共用一条历史序列
+   （2026-09-18 的 ±44 尖峰事故，见上）。
    **不做按名合并**：同名≠同设备（用户更换全新同型号鼠标即反例），历史库出现分裂身份时由
    展示层用序列号后缀区分（`DeviceLabels`：历史页/hover/托盘/设置页显示 `名称(序列号尾8位)`）。
 7. 与 Synapse 并存无冲突（只读 feature 交换）；`Razer Control Device`(RZCONTROL) 是 Synapse
@@ -267,7 +279,8 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - `HidWatcher.Poll` 由 `WatcherService.ParseOnce` 在 watcher 线程调用（单写者），
   写入 `DeviceStore` 的条目与日志源同构（`IsSelected` 盖章、`DeviceClassifier` 分类），
   下游挂件/hover/托盘/历史零改动。历史采样仍由 `Tick` 统一挂载。
-- 身份：优先厂商序列号查询，其次 HID 序列号字符串，最后 `HID:{pid:X4}`（见第 6 点）。
+- 身份：优先厂商序列号查询，其次 HID 序列号字符串，最后 `HID:{pid:X4}`（见第 6 点；
+  接收器第二子设备带槽位键 `HID:{pid:X4}:K`）。
 - 连接判定（2026-09-11 修订）：本轮查到 → connected；缺席计数 ≥2 轮 **且** 距最后应答
   静默 ≥30s（`DisconnectAfterMs`）→ disconnected。墙钟下限吸收无线链路 wake 风暴
   （2-4 轮快速 miss 不闪烁离线）；转换各记一条 INFO。两个坑（真机日志定位）：
