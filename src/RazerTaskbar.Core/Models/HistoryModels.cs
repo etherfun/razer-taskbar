@@ -24,7 +24,11 @@ public readonly record struct Estimate(long Secs, bool Charging);
 
 /// <summary>Aggregate stats for a sample series (history page header).</summary>
 public readonly record struct CycleStats(
-    int Cycles,
+    /// <summary>Equivalent full discharge cycles (industry accounting): the
+    /// qualifying discharge spans' moved percent summed and divided by 100 —
+    /// one complete charge-empty-recharge sequence equals one cycle, and
+    /// partial sessions accrue fractionally.</summary>
+    double Cycles,
     double? UseHoursPerPct,
     double? ChargeHoursPerPct);
 

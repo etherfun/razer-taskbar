@@ -188,6 +188,11 @@ public sealed class BatteryChart : Canvas
         var areaPoints = new List<Windows.Foundation.Point>();
         var discharge = new List<Windows.Foundation.Point>();
         var charge = new List<Windows.Foundation.Point>();
+        // Mode of the previous active interval: a charge/discharge flip must
+        // split the polylines, or the old run's tail connects straight to the
+        // next run's head — a chord across the whole other-color phase (a
+        // white line crossing the green charge hump).
+        bool? lastCharging = null;
 
         void FlushArea()
         {
@@ -244,8 +249,14 @@ public sealed class BatteryChart : Canvas
             {
                 FlushArea();
                 FlushLine();
+                lastCharging = null;
                 continue;
             }
+            if (lastCharging is { } prevMode && prevMode != cur.Charging)
+            {
+                FlushLine();
+            }
+            lastCharging = cur.Charging;
             var pc = new Windows.Foundation.Point(X(cur.Ts), Y(cur.Level));
             var pp = new Windows.Foundation.Point(X(prev.Ts), Y(prev.Level));
             if (areaPoints.Count == 0 || areaPoints[^1] != pp)

@@ -45,6 +45,26 @@ public sealed class HistoryTests
     }
 
     [Fact]
+    public void DisconnectedSamplesCarryTrustedLevel()
+    {
+        // A disconnected device cannot report a live level: the store
+        // parrots its last read, which may be the very glitch a spike hold
+        // is about to catch (2026-09-10 05:04: 58% live → glitch-100 at
+        // power-off → a 5.5h stale plateau committed by the grace expiry).
+        // Record the series' trusted level and clear the stale charging
+        // flag instead, so the hold sees the true fall-back.
+        var trusted = S(0, 58, false, true);
+        var coalesced = HistoryService.CoalesceSample(S(900, 100, true, false), trusted);
+        Assert.Equal(58, coalesced.Level);
+        Assert.False(coalesced.Charging);
+        Assert.False(coalesced.Connected);
+        // Connected readings and first-sight rows (no trusted history) pass
+        // through untouched.
+        Assert.Equal(S(901, 100, true, true), HistoryService.CoalesceSample(S(901, 100, true, true), trusted));
+        Assert.Equal(S(902, 100, false, false), HistoryService.CoalesceSample(S(902, 100, false, false), null));
+    }
+
+    [Fact]
     public void SpikeFilterDropsGlitchSegment()
     {
         // Real glitch from battery.db (2026-09-06, device 632516H31000044):
@@ -171,6 +191,62 @@ public sealed class HistoryTests
         Assert.Equal(new Estimate(2 * 3600 - 1800, false), HistoryService.PseudoAdjust(e, 0, 1800));
         Assert.Equal(new Estimate(0, false), HistoryService.PseudoAdjust(e, 0, 5 * 3600));
         Assert.Equal(e, HistoryService.PseudoAdjust(e, 100, 100));
+    }
+
+    [Fact]
+    public void CyclesAreEquivalentFullCycles()
+    {
+        // The cycle stat is industry equivalent-full-cycle accounting, not a
+        // session count: total qualifying discharge ÷ 100%. Two 50% outings
+        // between docks — together one complete charge-empty-recharge
+        // sequence — count as 1 cycle, where the old per-span count said 2.
+        var samples = new List<Sample>();
+        long ts = 0;
+        for (int lv = 100; lv >= 50; lv -= 5) // discharge 100→50
+        {
+            samples.Add(S(ts, lv, false, true));
+            ts += 900;
+        }
+        ts += 100; // flag-flip boundary gap
+        for (int lv = 50; lv <= 100; lv += 5) // charge 50→100
+        {
+            samples.Add(S(ts, lv, true, true));
+            ts += 900;
+        }
+        ts += 100;
+        for (int lv = 100; lv >= 50; lv -= 5) // discharge 100→50 again
+        {
+            samples.Add(S(ts, lv, false, true));
+            ts += 900;
+        }
+        var stats = HistoryService.CycleStatsOf(samples);
+        Assert.Equal(1.0, stats.Cycles, 2);
+    }
+
+    [Fact]
+    public void CyclesSkipSubThresholdSpansAndAccrueFractionally()
+    {
+        // A 4-point flicker is below the Qualifies floor and mints nothing;
+        // qualifying partial sessions accrue fractionally: 10% + 5% of
+        // discharge = 0.15 cycles.
+        var samples = new List<Sample>
+        {
+            S(0, 100, false, true),
+            S(900, 96, false, true),   // 4 points — below the floor
+            S(1000, 96, true, true),
+            S(1900, 98, true, true),
+            S(2800, 100, true, true),
+            S(2900, 100, false, true),
+            S(3800, 95, false, true),
+            S(4700, 90, false, true),  // 10 points
+            S(4800, 90, true, true),
+            S(5700, 95, true, true),
+            S(6600, 100, true, true),
+            S(6700, 100, false, true),
+            S(7600, 95, false, true),  // 5 points
+        };
+        var stats = HistoryService.CycleStatsOf(samples);
+        Assert.Equal(0.15, stats.Cycles, 2);
     }
 
     [Fact]

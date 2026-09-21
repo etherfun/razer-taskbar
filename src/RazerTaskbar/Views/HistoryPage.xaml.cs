@@ -89,7 +89,7 @@ public sealed partial class HistoryPage : Page
         HealthSohValue.Foreground = new SolidColorBrush(
             new Windows.UI.Color { A = 0xFF, R = 0x60, G = 0xCD, B = 0xFF });
         // Stat card hover tooltips (longer explanations).
-        TipCycles.Text = I18n.Tr("Discharge cycles completed within the selected range. A cycle runs from one charge session to the next; off periods are not counted.");
+        TipCycles.Text = I18n.Tr("Equivalent full cycles completed within the selected range: total discharged percent divided by 100, so one complete charge-empty-recharge sequence counts as one cycle and partial sessions add up fractionally. Off periods are not counted.");
         TipUse.Text = I18n.Tr("Estimated usable time per 100% of charge, from the discharge cycles in range. Recent cycles count most — weight decays with a 30-day half-life (tracking battery aging and habit changes).");
         TipCharge.Text = I18n.Tr("Estimated time to fully charge the device, from the charge sessions in range.");
         TipNow.Text = I18n.Tr("Estimated usable time right now (discharging) or time until full (charging), anchored at the current level and counting down in real time.");
@@ -212,12 +212,16 @@ public sealed partial class HistoryPage : Page
             // "All" ranges can be megabytes: build + write off the UI thread.
             var csv = await Task.Run(() => ExportService.ToCsv(samples));
             await File.WriteAllTextAsync(file.Path, csv);
-            ShowExportInfo(InfoBarSeverity.Success, I18n.Tr("CSV exported ({})").Replace("{}", $"{samples.Count}"));
+            // The awaits above resumed on a thread-pool thread (no UI
+            // SynchronizationContext in WinUI 3): hop back for the InfoBar.
+            DispatcherQueue.TryEnqueue(() =>
+                ShowExportInfo(InfoBarSeverity.Success, I18n.Tr("CSV exported ({})").Replace("{}", $"{samples.Count}")));
         }
         catch (Exception ex)
         {
             Log.Error("export failed", ex);
-            ShowExportInfo(InfoBarSeverity.Error, I18n.Tr("Export failed"));
+            DispatcherQueue.TryEnqueue(
+                () => ShowExportInfo(InfoBarSeverity.Error, I18n.Tr("Export failed")));
         }
     }
 
@@ -310,22 +314,59 @@ public sealed partial class HistoryPage : Page
         // whole series and one Deflate+ComputeSpans pass feeds the stat
         // cards, health card and cycle list (three full recomputes used to
         // run here, all on the UI thread).
-        var data = await Task.Run(() =>
+        (List<Sample>, List<Span>, List<Span>, CycleStats, HealthStats?, List<Sample>?, Estimate?) data;
+        try
         {
-            var samples = handle.Length > 0
-                ? HistoryService.SamplesInRange(handle, since)
-                : new List<Sample>();
-            var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
-            var stats = HistoryService.CycleStatsOfSpans(discharge, charge);
-            var health = HistoryService.HealthStatsOfSpans(charge);
-            List<Sample>? compareSamples = null;
-            if (requestedCompare.Length > 0 && requestedCompare != handle)
+            data = await Task.Run(() =>
             {
-                compareSamples = HistoryService.SamplesInRange(requestedCompare, since);
+                var samples = handle.Length > 0
+                    ? HistoryService.SamplesInRange(handle, since)
+                    : new List<Sample>();
+                var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
+                var stats = HistoryService.CycleStatsOfSpans(discharge, charge);
+                var health = HistoryService.HealthStatsOfSpans(charge);
+                List<Sample>? compareSamples = null;
+                if (requestedCompare.Length > 0 && requestedCompare != handle)
+                {
+                    compareSamples = HistoryService.SamplesInRange(requestedCompare, since);
+                }
+                var est = handle.Length > 0 ? HistoryService.EstimateFor(handle) : null;
+                return (samples, discharge, charge, stats, health, compareSamples, est);
+            });
+        }
+        catch (Exception e)
+        {
+            Log.Error("history load failed", e);
+            return;
+        }
+        // WinUI 3's UI thread has no SynchronizationContext: the continuation
+        // after the await above resumes on a thread-pool thread, and any XAML
+        // touch there throws RPC_E_WRONG_THREAD (0x8001010E), killing the
+        // process — hop back to the dispatcher before touching controls.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                ApplyReload(gen, handle, data);
             }
-            var est = handle.Length > 0 ? HistoryService.EstimateFor(handle) : null;
-            return (samples, discharge, charge, stats, health, compareSamples, est);
+            catch (Exception e)
+            {
+                Log.Error("history render failed", e);
+            }
         });
+    }
+
+    private void ApplyReload(
+        int gen,
+        string handle,
+        (List<Sample> samples,
+         List<Span> discharge,
+         List<Span> charge,
+         CycleStats stats,
+         HealthStats? health,
+         List<Sample>? compareSamples,
+         Estimate? est) data)
+    {
         if (gen != _reloadGen)
         {
             return; // superseded: a newer selection changed the data set
@@ -335,8 +376,9 @@ public sealed partial class HistoryPage : Page
         _currentSamples = samples2;
         var stats2 = data.stats;
 
-        // Stat cards (viewer.rs paint values).
-        StatCyclesValue.Text = $"{stats2.Cycles}";
+        // Stat cards (viewer.rs paint values). Cycles are equivalent full
+        // cycles (a double): 1–2 decimals so fractional accrual stays visible.
+        StatCyclesValue.Text = $"{stats2.Cycles:0.0#}";
         StatUseValue.Text = stats2.UseHoursPerPct is { } useRate
             ? HistoryService.FormatDuration((long)Math.Round(useRate * 100.0 * 3600.0))
             : "--";

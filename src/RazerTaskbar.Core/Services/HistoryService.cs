@@ -356,9 +356,38 @@ public static class HistoryService
     /// level — or swings back across the jump — inside GraceSecs was a
     /// reporting glitch; the jump rows up to (not including) the returning
     /// sample are deleted, the returning sample stays (it is the device's
-    /// true reading). A jump with no fall-back inside the window is a real
-    /// swap/reconnect and is kept.</summary>
+    /// true reading). A jump the device took into a disconnect was never
+    /// live-confirmed either: the next connected reading after the off
+    /// stretch re-anchors, and the jump plus the stale off plateau go. A
+    /// jump with no fall-back inside the window is a real swap/reconnect
+    /// and is kept. The rule runs to a fixed point: one sweep leaves the last
+    /// row of a glitch plateau in place when its hunt re-anchored on a row
+    /// that was itself stale (live 2026-09-18: the plateau's final 80% closed
+    /// the segment, the true 36% followed 9 s later, and the leftover pair
+    /// read as a fresh spike in the chart). Re-judging the survivors against
+    /// the reduced series condemns it and matches the write-time hold, which
+    /// drops the whole pending run the moment a reading falls back.</summary>
     internal static List<long> CommittedGlitchTs(IReadOnlyList<Sample> hist)
+    {
+        var doomed = new List<long>();
+        var work = hist.ToList();
+        while (work.Count > 1)
+        {
+            var round = GlitchPass(work);
+            if (round.Count == 0)
+            {
+                break;
+            }
+            var drop = new HashSet<long>(round);
+            doomed.AddRange(round);
+            work.RemoveAll(s => drop.Contains(s.Ts));
+        }
+        return doomed;
+    }
+
+    /// <summary>One sweep of <see cref="CommittedGlitchTs"/>'s rule over a
+    /// series: the timestamps that sweep condemns.</summary>
+    private static List<long> GlitchPass(IReadOnlyList<Sample> hist)
     {
         var doomed = new List<long>();
         int i = 0;
@@ -378,9 +407,39 @@ public static class HistoryService
             }
             int k = -1;
             int peak = b.Level, trough = b.Level;
+            // A disconnect after (or on) the jump voids live confirmation:
+            // the device took the jump into power-off, and past builds
+            // parroted the store's last level into the disconnected
+            // heartbeats — a 100% plateau across hours that the grace expiry
+            // then committed as a "real swap" (seen live 2026-09-10 05:04:
+            // 58% → glitch-100 → 5.5h of 100% conn=0 → wake at the true
+            // 62%). Once the hunt crosses a disconnected row, the next
+            // CONNECTED reading re-anchors the series and everything before
+            // it (jump + stale plateau) is doomed, whatever its level.
+            bool bridgedOff = !b.Connected;
             for (int m = i + 2; m < hist.Count; m++)
             {
                 var r = hist[m];
+                if (!r.Connected)
+                {
+                    bridgedOff = true;
+                    // An honest disconnect echo carries the series' trusted
+                    // (pre-jump) level: it confirms the glitch exactly like a
+                    // connected fall-back, whatever its age. A stale-plateau
+                    // row (the parroted glitch value) is far from the anchor
+                    // and keeps hunting for the live return.
+                    if (Math.Abs(r.Level - a.Level) <= SpikeFilter.TolerancePct)
+                    {
+                        k = m;
+                        break;
+                    }
+                    continue;
+                }
+                if (bridgedOff)
+                {
+                    k = m;
+                    break;
+                }
                 if (r.Ts - b.Ts > SpikeFilter.GraceSecs)
                 {
                     break; // window expired with the level still away: real jump
@@ -389,10 +448,6 @@ public static class HistoryService
                 {
                     k = m;
                     break;
-                }
-                if (!r.Connected)
-                {
-                    break; // a disconnect ends the hunt (oscillation needs live readings)
                 }
                 peak = Math.Max(peak, r.Level);
                 trough = Math.Min(trough, r.Level);
@@ -464,6 +519,23 @@ public static class HistoryService
         }
     }
 
+    /// <summary>The sample to record for a device state. A disconnected
+    /// device cannot report a live level — the store parrots its last read,
+    /// which may be the very glitch the spike hold below is about to catch
+    /// (58% live → glitch-100 at power-off → disconnected heartbeats repeat
+    /// 100 until the 60s grace expires and commits the whole plateau as a
+    /// "real swap", seen live 2026-09-10 05:04). Disconnected rows carry the
+    /// series' trusted level instead, so the hold sees the true fall-back
+    /// and drops the glitch segment outright.</summary>
+    internal static Sample CoalesceSample(Sample incoming, Sample? lastTrusted)
+    {
+        if (incoming.Connected || lastTrusted is null)
+        {
+            return incoming;
+        }
+        return incoming with { Level = lastTrusted.GetValueOrDefault().Level, Charging = false };
+    }
+
     /// <summary>Called on the watcher thread after every parse pass. The
     /// caller passes its single config read; the disabled path must still
     /// run — it is what retires the prediction cache, so tray/hover/eta
@@ -513,18 +585,20 @@ public static class HistoryService
                         _series[d.Handle] = hist;
                     }
                     bool need = hist.Count == 0;
+                    var s = CoalesceSample(
+                        new Sample(now, d.BatteryPercentage, d.IsCharging, d.IsConnected),
+                        hist.Count > 0 ? hist[^1] : null);
                     if (!need)
                     {
                         var last = hist[^1];
-                        need = last.Charging != d.IsCharging
-                            || last.Connected != d.IsConnected
-                            || last.Level != d.BatteryPercentage
+                        need = last.Charging != s.Charging
+                            || last.Connected != s.Connected
+                            || last.Level != s.Level
                             || now - last.Ts >= HeartbeatSecs;
                     }
                     if (need)
                     {
                         dirty.Add(d.Handle);
-                        var s = new Sample(now, d.BatteryPercentage, d.IsCharging, d.IsConnected);
                         // Spike guard: a suspicious jump is held out of the DB
                         // for 60s (see SpikeFilter) — a fall-back within the
                         // window drops the segment as a reporting glitch,
@@ -1302,8 +1376,12 @@ public static class HistoryService
     }
 
     /// <summary>Cycle count + weighted rates for the history page header.
-    /// Computed on the rebound-deflated series: a relaxation bump's fake
-    /// consumption must not skew the pooled rates.</summary>
+    /// Cycles are EQUIVALENT FULL CYCLES: every complete charge-empty-
+    /// recharge sequence counts as one (total qualifying discharge ÷ 100%),
+    /// partial sessions accrue fractionally — five 20% outings between
+    /// docks make one cycle, not five. Computed on the rebound-deflated
+    /// series: a relaxation bump's fake consumption must not skew the
+    /// pooled rates.</summary>
     public static CycleStats CycleStatsOf(IReadOnlyList<Sample> samples)
     {
         var (discharge, charge) = ComputeSpans(ReboundFilter.Deflate(samples));
@@ -1312,10 +1390,13 @@ public static class HistoryService
 
     /// <summary>Spans-based form of <see cref="CycleStatsOf"/> for callers
     /// that already split the (deflated) series — the page reuses one
-    /// ComputeSpans pass for stats, health and the cycle list.</summary>
+    /// ComputeSpans pass for stats, health and the cycle list. Cycles sum
+    /// the qualifying spans' moved percent (the <see cref="Span.Qualifies"/>
+    /// floors keep a 2-point flicker from minting cycles) and divide by
+    /// 100; off periods contribute nothing (they never move percent).</summary>
     public static CycleStats CycleStatsOfSpans(List<Span> discharge, List<Span> charge)
         => new(
-            discharge.Count(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs)),
+            discharge.Where(s => s.Qualifies(MinSpanDropPct, MinSpanActiveSecs)).Sum(s => s.MovedPct) / 100.0,
             WeightedHoursPerPct(discharge),
             WeightedHoursPerPct(charge));
 

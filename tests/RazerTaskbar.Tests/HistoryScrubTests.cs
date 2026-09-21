@@ -106,6 +106,94 @@ public sealed class HistoryScrubTests
     }
 
     [Fact]
+    public void ScrubsJumpToPowerOffStalePlateau()
+    {
+        // Production rows (2026-09-10 05:04, Viper 632516H31000044): 58%
+        // live, glitch-100 taken into power-off, a 5.5h plateau of stale
+        // 100% disconnect heartbeats that the grace expiry then committed
+        // as a "real swap", wake at the true 62%. The jump plus the stale
+        // plateau go; the wake re-anchors whatever its level (rebound may
+        // sit a few points above the anchor).
+        var hist = new List<Sample>
+        {
+            S(0, 58, false, true),
+            S(163, 100, false, true),
+            S(183, 100, false, false),
+            S(333, 100, false, false),
+            S(20144, 100, false, false),
+            S(20163, 62, false, true),
+        };
+        Assert.Equal(new long[] { 163, 183, 333, 20144 }, HistoryService.CommittedGlitchTs(hist));
+    }
+
+    [Fact]
+    public void KeepsJumpToPowerOffWhenDeviceNeverReturns()
+    {
+        // No connected reading ever follows the plateau: the verdict stays
+        // open and the rows are kept — the next live return re-anchors via
+        // the normal admission path.
+        var hist = new List<Sample>
+        {
+            S(0, 58, false, true),
+            S(163, 100, false, true),
+            S(183, 100, false, false),
+            S(20144, 100, false, false),
+        };
+        Assert.Empty(HistoryService.CommittedGlitchTs(hist));
+    }
+
+    [Fact]
+    public void KeepsSwapBridgedByOffThenSteadyNewLevel()
+    {
+        // A real battery swap bridged by an honest off gap: the new level
+        // arrives live (connected jump) and holds beyond the grace window —
+        // kept, only the echo rows around it are ordinary.
+        var hist = new List<Sample>
+        {
+            S(0, 20, false, true),
+            S(10, 20, false, false),
+            S(100, 90, false, true),
+            S(200, 90, false, true),
+        };
+        Assert.Empty(HistoryService.CommittedGlitchTs(hist));
+    }
+
+    [Fact]
+    public void ScrubsStaleDisconnectedJumpRow()
+    {
+        // Pre-clamp builds could also commit the jump on a disconnected row
+        // (store parrot): the jump row was never live, the next connected
+        // reading re-anchors and the bogus row goes.
+        var hist = new List<Sample>
+        {
+            S(0, 61, false, true),
+            S(600, 100, false, false),
+            S(700, 63, false, true),
+        };
+        Assert.Equal(new long[] { 600 }, HistoryService.CommittedGlitchTs(hist));
+    }
+
+    [Fact]
+    public void ScrubsPlateauLeftoverAfterReanchor()
+    {
+        // Production rows (2026-09-18 11:13-11:17, Viper 632516H31000044):
+        // a merge-injected 80% plateau on a live 36% series. The first sweep
+        // re-anchors on the plateau's last row (connected 80%) and spares it;
+        // the true 36% follows 9 s later, so the leftover reads as a fresh
+        // ±44 spike. Every plateau row goes, every true reading stays.
+        var hist = new List<Sample>
+        {
+            S(0, 36, false, true),
+            S(15, 80, false, true),
+            S(81, 80, false, false),
+            S(123, 80, false, true),
+            S(132, 36, false, true),
+            S(194, 36, false, true),
+        };
+        Assert.Equal(new long[] { 15, 81, 123 }, HistoryService.CommittedGlitchTs(hist));
+    }
+
+    [Fact]
     public void ScrubDeletesRowsFromDatabase()
     {
         using var conn = new SqliteConnection("Data Source=:memory:");
