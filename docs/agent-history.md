@@ -7,6 +7,10 @@
 - SQLite `%APPDATA%\razer-taskbar\battery.db`（WAL，永久保留，表 `samples`/`devices`；schema 与已移除的 Rust 版字节兼容，两者不可同时运行）。
 - 采样挂在 watcher 线程每次解析之后（`Record`）：`(connected, charging, level)` 任一变化即写点，静止时 15 分钟心跳（`HeartbeatSecs`，必须远小于 `GapBreakSecs`，否则长静默会被误判为离线）。
 - `record_battery_history` 的判定收敛在 `Record` 一处（`Tick` 无条件调用、一次读盘）：关闭时挂件/托盘/悬停不残留冻结预测（历史 bug，2026-09-09 修复）。记录间隔设置只影响 watcher 的轮询节奏；事件驱动下过渡点即时入库。
+- **WAL 尺寸恒定 ≠ 没在写**：SQLite checkpoint 之后**原位复用** WAL 空间，所以 `battery.db-wal`
+  长期停在 ~4.13 MB（1000 页自动 checkpoint 阈值附近）而 mtime 每 5 秒更新一次——判"在不在写"要看
+  mtime 与进程写入计数器，不能看文件尺寸。实测一次真实 checkpoint 只回写本代有效帧（几十 KB），
+  不是整个 4 MB，所以无需为 WAL 大小额外调优。
 - `devices.source` 记每台设备**上次读数是从哪条链路来的**（`BatteryTransport`：Wired/Receiver/Ble/Log，写入见 `UpsertDevice`）。旧库由 `EnsureTables` 自动补列（`pragma_table_info` 探测 + `ALTER TABLE ... DEFAULT ''`），旧行读回按 `Log`（`ParseSavedSource`）。读取入口 `HistoryService.SavedTransport(handle)`；实时值在 `RazerDevice.Transport` 上，优先级链见 `docs/agent-hid.md`。
 
 ## 并发模型（2026-09-11 定稿）

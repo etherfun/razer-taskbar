@@ -16,6 +16,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]
   静默失败——Core.dll 刷新了而 app 产物仍是旧版，改完"没生效"多半是它。
 - 普通构建不刷新 win-x64 RID 输出时加 `--no-incremental`。
 - exe 是 apphost 壳，判断是否部署成功要看 **razer-taskbar.dll** 的时间戳。
+  **但改动只落在 Core 时这个时间戳不动**（MSBuild 判定 app 项目输入未变，不重链）——此时要看
+  `dist/RazerTaskbar.Core.dll`（2026-09-21 踩过：Core 已是新版而 `razer-taskbar.dll` 仍是旧时间戳，
+  一度以为发布没生效；逻辑全在 Core，Core 新即代码新）。
 - **不带 `-p:Platform=x64` 的构建会落到另一棵输出树 `bin/Release/.../win-x64/`**：那里的陈旧副本与
   规范路径互不覆盖，从旧路径手动启动就会跑旧版（2026-09-07 踩过：color-key 时代的 `bin/Release`
   副本被启动，误判为渲染回退）。bin 树只用于构建，运行/自启动一律指向仓库根 `dist/razer-taskbar.exe`
@@ -52,6 +55,50 @@ dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj   # 勿加 --quie
   （`Task.Run(...).GetAwaiter().GetResult()`）；HidWatcher 的轮询线程本就是后台 MTA，无此问题。
 - 探针构建/部署遵循上节（Release x64、先停进程）；未知设备先跑 `--hid-probe` 确认 tx/缩放
   （`docs/agent-hid.md`）。
+
+## 内存与磁盘 I/O 测量（无外部工具时的做法）
+
+本机没有 `dotnet-counters`/`dotnet-dump`/`dotnet-gcdump`/`handle.exe`/ProcMon（安装需联网），
+所以归因靠进程计数器 + 临时探针。**探针一律测完即删**（改动落到提交里之前先摘掉）。
+
+### 磁盘 I/O
+
+`GetProcessIoCounters` 就是任务管理器"磁盘"列的同源计数器：
+
+```powershell
+# 200ms 采样两次差值可抓启动突发；30s 采样看稳态
+(Get-CimInstance Win32_Process -Filter "Name='razer-taskbar.exe'").ReadTransferCount
+```
+
+- 这是**逻辑**字节：命中文件缓存也算，不等于磁盘物理吞吐。
+- 稳态指纹（2026-09-21，2 台设备在接收器上）：**每 5 秒读 766 B（settings.json）+ 写 8240 B
+  （`battery.db-wal` 2 个页帧）** ≈ 2 KB/s。写的是 `Record` 每轮**无条件** UPSERT 的 `devices` 行
+  （采样点只在变化/15 分钟心跳时才写），不是采样点。
+- 启动突发：200 ms 采样可见一次性大读。2026-09-21 修掉的两处 V4 日志整文件读（解析首读 + 串号
+  名称收割）合计 4.66 MB → 修后 2.79 MB；剩下的 ~1.9-2.8 MB 是 WindowsAppSDK/XAML 框架加载
+  （随文件缓存冷热波动，应用侧压不掉）。用户报的"0.1 MB/s"就是那笔突发摊到任务管理器的 60 秒窗口。
+
+### 内存
+
+```powershell
+$p = Get-Process razer-taskbar
+$p.WorkingSet64; $p.PrivateMemorySize64; $p.HandleCount; $p.Threads.Count
+Add-Type -Name G -Namespace W -MemberDefinition '[DllImport("user32.dll")] public static extern uint GetGuiResources(IntPtr h, uint f);'
+[W.G]::GetGuiResources($p.Handle, 0)   # GDI 对象；1 = USER 对象
+$p.Modules | Sort-Object ModuleMemorySize -Descending | Select-Object -First 12   # 模块归因
+```
+
+- **`GetGuiResources` 是区分"GDI/USER 泄漏"与"内核句柄泄漏"的关键**：GDI/USER 平而 `HandleCount`
+  在涨 ⇒ 内核句柄（文件/事件/注册表/驱动）。注意 `HandleCount` 是**进程级**的，无法区分线程，
+  做阶段归因时会被并发线程的 churn 干扰（2026-09-21 在 HID 轮询阶段量到 +5，但无法排除其他线程）。
+- **区分"垃圾未回收"与"真被持有"**：临时在 1s 定时器里打一行 `GC.GetTotalMemory(false)` +
+  `GC.CollectionCount(0)`；若 `gc0` 长时间为 0 而堆在涨，再插一次
+  `GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true)` +
+  `GC.WaitForPendingFinalizers()` 对比前后——堆大幅回落 = 垃圾，不回落 = 真持有。
+  2026-09-21 的内存问题就是这样定位的（堆 8 MB → 2 MB 存活，见 `docs/agent-csharp.md` 内存节）。
+- 基线（2026-09-21，空闲无窗口）：私有 ~93 MB、WS ~126 MB、线程 ~78、句柄 ~950。大头是框架模块
+  （NVIDIA UMD、WindowsAppSDK/XAML、.NET），应用自身数据很小（`_series` 4148 样本 ≈ 97 KB）。
+  打开一次设置/历史窗口另加 ~98 MB / ~956 句柄（XAML 页面树），且按设计常驻。
 
 ## 运行与调试
 

@@ -45,8 +45,8 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 | icons.rs | Native/DeviceIcons.cs | 字形常量 + D2d 墨迹宽度 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
 | (新增) | Native/D2d.cs | 共享 D2D/DWrite 上下文：工厂/字体回退探测/格式缓存/墨迹扫描(渲染像素为准) |
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
-| watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖;V3 解析单测 WatcherV3Tests |
-| battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
+| watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖;V4 首读走尾部(agent-watcher.md);按设备的日志兜底(agent-hid.md);V3 解析单测 WatcherV3Tests |
+| battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;链路来源 `BatteryTransport`(Wired/Receiver/Ble/Log)+优先级(见 agent-hid.md);显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
 | history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页)+ ReboundFilter 弛豫回弹剔除(读路径包络,见"已知差异") |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
 | i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |
@@ -105,7 +105,7 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   调用、一次读盘),修复关闭记录后挂件/托盘/悬停残留冻结预测的 bug;
   ④ TrayIcon.BuildIcon 补齐 GDI 判零(全库唯一不设防点)与选中态
   DeleteObject 泄漏,顺修 hdc 提前 ReleaseDC 的 use-after-release;
-  ⑤ 字体回退改 `GetTextFaceW` 验证式(GdiText.FaceResolved;DeviceIcons/
+  ⑤ 字体回退改 `GetTextFaceW` 验证式(当时在 `GdiText.FaceResolved`,2026-09 迁到 `D2d.ProbeFace`;DeviceIcons/
   HoverPanel 的 `font == 0` 是永假分支,Win10 上字形会落 SimSun 替换);
   ⑥ Native 层 24 处诊断日志从 Console.Error 双轨统一进 Log(WinExe 下
   stderr 无去处,Log 落文件且镜像 stderr);⑦ I18n 表 switch 转 Dictionary
@@ -116,9 +116,10 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 - **墨迹居中/测量走渲染实况(2026-09-09,用户实报"换字形后竖向居中不可用")**:图标字体的
   声明度量(GGO_METRICS)与实际光栅不符——E850 电池字形声明 8px、实际渲染 10px@20px
   (旧 EBA0 同样 12 vs 14),且图标字体行盒为纯 ascent(desc=0);行高收紧(窗口贴墨迹)后
-  GGO 居中的 1~2px 偏差变得可见。`GdiText.InkCenterDelta`/`InkHeight` 改为把文本用调用方
-  DC 的字体渲染进内存 DIB 后扫描实际墨迹行(单字符按 (字号,字符) 缓存,多字符标签直算,
-  GGO 仅作 InkHeight 兜底);`GetCurrentObject/OBJ_FONT` 为本次新增 P/Invoke。类型图标盒高
+  GGO 居中的 1~2px 偏差变得可见。墨迹测量改为"渲染后扫像素"(当时在 `GdiText`:调用方 DC 的
+  字体渲染进内存 DIB,单字符按 (字号,字符) 缓存、多字符标签直算,GGO 仅作 InkHeight 兜底;
+  2026-09 随 D2D 迁移搬到 `D2d.InkCenterDelta`/`InkHeight`,改经 D2D 渲染进 scratch 预乘 DIB
+  扫 alpha,缓存键 (格式,文本));`GetCurrentObject/OBJ_FONT` 为当时新增的 P/Invoke。类型图标盒高
   `kindH` 也走 `SnapSize` 吸附(微软图标字体推荐字号 16/20/24/32/40/48/64,偏离会模糊;
   96 DPI 下 14→16),电池 20px、状态/预计图标 16px 均已吸附。
 

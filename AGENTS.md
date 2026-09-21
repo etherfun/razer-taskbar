@@ -73,6 +73,11 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 - 任务栏定位改动先读 `docs/agent-taskbar.md`：小组件板（天气）硬保留、UIA 缓存失效路径必须维持；不重新
   引入反应式第三方避让（设计决定见该文档）。
 - 配置新增字段必须带默认值（`ConfigService`），保持旧配置文件可加载。
+- 常驻内存红线：**不要删 `WidgetWindow.MemWatchdog`**（1s 定时器里堆过 8 MiB 就做一次后台回收）。
+  运行时的 GC 预算按物理内存推算，本应用每秒几 KB 的瞬时分配永远够不到它——实测十分钟 `gc0=0`、
+  私有字节 +0.9 MB/分钟无上限（用户看到的"内存一直涨"），强制回收后堆 8 MB→2 MB 存活且走平。
+  新增绘制/轮询代码时避免每帧/每轮分配大数组（>85 KB 即落 LOH，例：墨迹扫描曾每次 `Marshal.Copy`
+  一个 294,912 B 数组）；缓存要么有界（`InkCacheMax`），要么键空间固定。
 - 渲染保真红线：任何模式**不**调 `SetLayeredWindowAttributes` COLORKEY（黑 key 有 AA 暗边）；阴影
   `0x202020` 非纯黑；覆盖层保持 `WS_POPUP`、嵌入保持出生即 `WS_CHILD`，模式切换走销毁重建**永不**
   SetParent（`docs/agent-embed.md`）；z-burst 运行中不重排定时器；空文本 DrawText 短路（`D2d.DrawInkText`/`TextWidth` 内置）；V4 末行损坏
@@ -82,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 
 # 分文档索引
 
-- 构建/测试/调试/诊断探针：`docs/agent-build.md`
+- 构建/测试/调试/诊断探针/内存与磁盘 I/O 测量：`docs/agent-build.md`
 - 编码规范与检查：`docs/agent-conventions.md`
 - 日志解析与设备选择：`docs/agent-watcher.md`
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
