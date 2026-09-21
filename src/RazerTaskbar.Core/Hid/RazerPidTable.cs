@@ -152,6 +152,22 @@ public static class RazerPidTable
         return FallbackSlots;
     }
 
+    /// <summary>Discriminator for the synthesized identity of a slot that
+    /// serves a SECOND sub-device of its dongle — one whose role differs from
+    /// the pid's primary slot — or null for slots that alias the primary
+    /// sub-device (`HID:{pid}` stays their fallback). The pid names only one
+    /// sub-device, so without the key the sibling's readings share its
+    /// DeviceStore entry and history series (see HidWatcher.HandleFor).</summary>
+    public static string? SecondaryKey(int pid, DeviceSlot slot)
+    {
+        var slots = DeviceSlots(pid);
+        if (slots.Count <= 1 || slots[0].Role == slot.Role)
+        {
+            return null;
+        }
+        return slot.Role == SlotRole.Keyboard ? "K" : "M";
+    }
+
     public static bool TryGetDevice(int pid, out DeviceTx tx) => Known.TryGetValue(pid, out tx);
 
     /// <summary>Ids to try for a PID, known ones as a single candidate,

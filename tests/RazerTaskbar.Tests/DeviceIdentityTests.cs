@@ -141,15 +141,23 @@ public sealed class DeviceIdentityTests
     }
 
     [Fact]
-    public void ComboDongleKeyboardFallbackYieldsToSamePidSerial()
+    public void ComboDongleKeyboardKeepsItsOwnFallback()
     {
         // The mouse resolved its serial; the keyboard slot's serial query
-        // failed. Its pid fallback would root a phantom "Razer Keyboard" row
-        // colliding with the mouse's fallback namespace — drop until it can
-        // answer under a real identity.
+        // failed. Same pid, different devices: the keyboard keeps its own
+        // `HID:{pid}:K` fallback. Dropping it (the old pid-only rule) flapped
+        // the keyboard offline on every mouse wake.
         var mouse = Reading with { Serial = Serial };
-        var keyboard = Reading with { NameOverride = "Razer Keyboard", KindOverride = DeviceKind.Keyboard };
-        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { mouse, keyboard }));
+        var keyboard = Reading with
+        {
+            NameOverride = "Razer Keyboard",
+            KindOverride = DeviceKind.Keyboard,
+            SubDeviceKey = "K",
+        };
+        var round = HidWatcher.DedupRound(new List<HidDeviceReading> { mouse, keyboard });
+        Assert.Equal(2, round.Count);
+        // The sibling's serial still retires the SAME slot's fallback.
+        Assert.Single(HidWatcher.DedupRound(new List<HidDeviceReading> { keyboard with { Serial = Serial }, keyboard }));
     }
 
     [Fact]
@@ -161,6 +169,63 @@ public sealed class DeviceIdentityTests
         var ble = Reading with { ProductId = 0x02CE, Serial = "BLE:001122334455" };
         var round = HidWatcher.DedupRound(new List<HidDeviceReading> { resolved, ble });
         Assert.Equal(2, round.Count);
+    }
+
+    // — combo-dongle sub-device keys: one pid, two sub-devices. Live
+    // 2026-09-18: the Viper dongle's paired Joro keyboard rooted as the same
+    // `HID:00B8` key as the mouse, and the mouse's serial resolution folded
+    // the keyboard's 80% rows into the mouse's history as ±44% spikes —
+
+    private const int ComboPid = 0x00B8; // Viper V3 HyperSpeed + Joro dongle
+
+    private static RazerPidTable.DeviceSlot SlotOf(int pid, RazerPidTable.SlotRole role)
+        => RazerPidTable.DeviceSlots(pid).First(s => s.Role == role);
+
+    [Fact]
+    public void SecondarySlotKeyIsSetForTheDonglesSecondSubDevice()
+    {
+        Assert.Null(RazerPidTable.SecondaryKey(ComboPid, SlotOf(ComboPid, RazerPidTable.SlotRole.Mouse)));
+        Assert.Equal("K", RazerPidTable.SecondaryKey(ComboPid, SlotOf(ComboPid, RazerPidTable.SlotRole.Keyboard)));
+        // Single-slot devices (the Joro in cable mode) keep the bare form.
+        Assert.Null(RazerPidTable.SecondaryKey(0x02CD, SlotOf(0x02CD, RazerPidTable.SlotRole.Keyboard)));
+    }
+
+    [Fact]
+    public void SecondarySlotFallbackCarriesItsKey()
+    {
+        var keyboard = new HidDeviceReading(ComboPid, "Razer Viper V3 HyperSpeed",
+            Serial: "000000000000", LevelRaw: 200, LevelPercent: 80, IsCharging: false,
+            NameOverride: "Razer Keyboard", KindOverride: DeviceKind.Keyboard,
+            SubDeviceKey: "K");
+        Assert.Equal("HID:00B8:K", HidWatcher.HandleFor(keyboard));
+        Assert.Equal("HID:00B8", HidWatcher.HandleFor(keyboard with { SubDeviceKey = null }));
+    }
+
+    [Fact]
+    public void SerialResolutionNeverRetiresTheSiblingSlotsFallback()
+    {
+        // The regression: the mouse answered with its serial while the
+        // keyboard's fallback was still rooted. The retirement fold must take
+        // only the mouse's own `HID:00B8` — the keyboard's rows stay in its
+        // own series (they used to be re-pointed at the mouse and reach
+        // battery.db as spikes).
+        var store = new DeviceStore();
+        var hid = new HidWatcher();
+        var mouse = new HidDeviceReading(ComboPid, "Razer Viper V3 HyperSpeed", "", 90, 36, false);
+        var keyboard = mouse with
+        {
+            LevelRaw = 200, LevelPercent = 80, NameOverride = "Razer Keyboard",
+            KindOverride = DeviceKind.Keyboard, SubDeviceKey = "K",
+        };
+        hid.Commit(store, new List<HidDeviceReading> { mouse, keyboard }, "");
+        var rooted = store.Snapshot();
+        Assert.True(rooted.ContainsKey("HID:00B8"));
+        Assert.True(rooted.ContainsKey("HID:00B8:K"));
+        hid.Commit(store, new List<HidDeviceReading> { mouse with { Serial = Serial } }, "");
+        var map = store.Snapshot();
+        Assert.True(map.ContainsKey(Serial));
+        Assert.False(map.ContainsKey("HID:00B8"));
+        Assert.True(map.ContainsKey("HID:00B8:K"));
     }
 
     // — cross-round heal (Commit): the fallback rooted at cold start must be

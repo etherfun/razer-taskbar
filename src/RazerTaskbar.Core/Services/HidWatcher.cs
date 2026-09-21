@@ -44,7 +44,13 @@ public sealed record HidDeviceReading(
     /// <summary>Combo-dongle keyboards: the product string names the dongle's
     /// primary device, so the slot role supplies the real label/kind.</summary>
     string? NameOverride = null,
-    DeviceKind? KindOverride = null);
+    DeviceKind? KindOverride = null,
+    /// <summary>Synthetic-identity discriminator for a slot that is a SECOND
+    /// sub-device of its dongle (see <see cref="RazerPidTable.SecondaryKey"/>):
+    /// appended to the pid-shaped fallback as `HID:{pid}:{key}`. Slots that
+    /// alias the pid's primary sub-device leave it null and keep the bare
+    /// `HID:{pid}` identity.</summary>
+    string? SubDeviceKey = null);
 
 public sealed class HidWatcher
 {
@@ -235,12 +241,37 @@ public sealed class HidWatcher
     /// <summary>Handle key: the USB serial string when the device reports a
     /// real one (Synapse logs carry the same value as `serialNumber`);
     /// dongles report an all-zero serial, which falls back to a synthesized
-    /// stable id.</summary>
+    /// stable id — `HID:{pid}`, plus `:{key}` for a dongle's second
+    /// sub-device (see <see cref="FallbackHandleFor"/>).</summary>
     public static string HandleFor(HidDeviceReading reading)
     {
         var serial = reading.Serial.Trim();
-        return serial.Length > 0 && !serial.All(c => c == '0') ? serial : $"HID:{reading.ProductId:X4}";
+        return serial.Length > 0 && !serial.All(c => c == '0')
+            ? serial
+            : FallbackHandleFor(reading);
     }
+
+    /// <summary>The synthetic identity <see cref="HandleFor"/> would give this
+    /// reading while its serial is unresolved. The pid names the dongle's
+    /// primary sub-device, so a slot serving a SECOND sub-device appends its
+    /// key (`HID:00B8:K` for the keyboard paired to a Viper dongle): without
+    /// it both sub-devices share one key — one DeviceStore entry, one history
+    /// series — and the identity fold later pours the sibling's readings into
+    /// whichever serial resolved first (live 2026-09-18: the paired Joro
+    /// keyboard injected ±44% spikes into the mouse's battery.db rows).</summary>
+    internal static string FallbackHandleFor(HidDeviceReading reading)
+        => reading.SubDeviceKey is { Length: > 0 } key
+            ? $"HID:{reading.ProductId:X4}:{key}"
+            : $"HID:{reading.ProductId:X4}";
+
+    /// <summary>True when a fallback-keyed entry belongs to the same sub-device
+    /// as this (serial-resolved) reading. BLE MAC keys are per-device and left
+    /// to the caller's pid + name checks; a pid-shaped key must match this
+    /// slot's own form (`HID:{pid}` vs `HID:{pid}:K`), so a combo dongle's
+    /// sibling never folds its rows into this device.</summary>
+    private static bool SameFallbackSlot(string src, HidDeviceReading reading)
+        => !src.StartsWith("HID:", StringComparison.Ordinal)
+            || src == FallbackHandleFor(reading);
 
     /// <summary>Identity bridge across the two battery sources. When the
     /// vendor serial query goes unanswered, HandleFor synthesizes a fallback
@@ -287,24 +318,26 @@ public sealed class HidWatcher
         return twin is null ? (handle, null) : (twin, handle);
     }
 
-    /// <summary>Same-round pid dedup: a slot whose battery answered but whose
-    /// serial query failed yields the fallback identity `HID:{pid}` — and the
-    /// same physical device may have answered with its real serial on another
-    /// slot/transaction of the same pid in the same poll (dongles expose
-    /// several transaction ids that all reach the mouse). The serial reading
-    /// wins; the pid-shaped fallback of an already-resolved pid is dropped.
-    /// Kept: fallbacks of pids with no serial answer this round (the device
-    /// still needs its entry) and BLE MAC fallbacks (per-device, not
-    /// pid-derived — a second same-model unit on the same BLE pid must not
-    /// be swallowed).</summary>
+    /// <summary>Same-round sub-device dedup: a slot whose battery answered but
+    /// whose serial query failed yields the fallback identity `HID:{pid}` —
+    /// and the same sub-device may have answered with its real serial on
+    /// another slot/transaction of the same pid in the same poll (dongles
+    /// expose several transaction ids that all reach the mouse). The serial
+    /// reading wins; the pid-shaped fallback of an already-resolved SUB-DEVICE
+    /// is dropped. A combo dongle's second sub-device (its own
+    /// `HID:{pid}:{key}` fallback) is untouched by its sibling's serial — it
+    /// is a different device that merely shares the pid. Kept: fallbacks of
+    /// pids with no serial answer this round (the device still needs its
+    /// entry) and BLE MAC fallbacks (per-device, not pid-derived — a second
+    /// same-model unit on the same BLE pid must not be swallowed).</summary>
     internal static List<HidDeviceReading> DedupRound(List<HidDeviceReading> readings)
     {
-        var serialPids = new HashSet<int>();
+        var serialSlots = new HashSet<(int Pid, string? Key)>();
         foreach (var r in readings)
         {
             if (HandleFor(r).IndexOf(':') < 0)
             {
-                serialPids.Add(r.ProductId);
+                serialSlots.Add((r.ProductId, r.SubDeviceKey));
             }
         }
         List<HidDeviceReading>? result = null;
@@ -312,8 +345,8 @@ public sealed class HidWatcher
         {
             var r = readings[i];
             var h = HandleFor(r);
-            if (serialPids.Contains(r.ProductId)
-                && h == $"HID:{r.ProductId:X4}")
+            if (h == FallbackHandleFor(r)
+                && serialSlots.Contains((r.ProductId, r.SubDeviceKey)))
             {
                 result ??= new List<HidDeviceReading>(readings.Take(i));
                 continue;
@@ -355,13 +388,14 @@ public sealed class HidWatcher
                 // the fallback entry rooted while the radio was still waking
                 // (cold start: ResolveIdentity had no serial twin to fold
                 // into, so HID:{pid} took root and reached battery.db). The
-                // pid-derived form is unambiguous — it is exactly what this
-                // device's failed serial query produces. BLE:{mac} fallbacks
-                // are handled by the pid-pinned fold below (their names can
-                // differ from the canonical one, so exact-name pairing fails).
+                // key is this SLOT's own fallback form — the sibling slot of a
+                // combo dongle keys apart, so its rows stay out of this fold.
+                // BLE:{mac} fallbacks are handled by the pid-pinned fold below
+                // (their names can differ from the canonical one, so
+                // exact-name pairing fails).
                 if (handle.IndexOf(':') < 0)
                 {
-                    var rooted = $"HID:{reading.ProductId:X4}";
+                    var rooted = FallbackHandleFor(reading);
                     if (map.ContainsKey(rooted))
                     {
                         map.Remove(rooted);
@@ -398,6 +432,7 @@ public sealed class HidWatcher
                         || seen.Contains(src)
                         || !_fallbackPid.TryGetValue(src, out var pid)
                         || pid != reading.ProductId
+                        || !SameFallbackSlot(src, reading)
                         || !NamesMatch(device.Name, reading.NameOverride ?? reading.ProductName))
                     {
                         continue;
@@ -701,7 +736,15 @@ public sealed class HidWatcher
                 RazerReport.BuildChargingQuery(slot.TransactionId), attempts).Value;
             var charging = chargingRaw is { } raw ? raw != 0 : (bool?)null;
             var vendorSerial = SerialFor(session, slot.TransactionId);
-            var serial = vendorSerial.Length > 0 ? vendorSerial : session.Iface.Serial;
+            // A dongle's second sub-device must not wear the shared interface
+            // serial either — that string belongs to the dongle (its primary
+            // sub-device), and adopting it collides exactly like the
+            // pid-shaped fallback does. With no vendor answer it keeps its own
+            // keyed fallback until it can answer for itself.
+            var subKey = RazerPidTable.SecondaryKey(pid, slot);
+            var serial = vendorSerial.Length > 0
+                ? vendorSerial
+                : subKey is null ? session.Iface.Serial : "";
             var product = session.Iface.Product;
             var keyboardSlot = slot.Role == RazerPidTable.SlotRole.Keyboard;
             string? nameOverride = null;
@@ -714,7 +757,8 @@ public sealed class HidWatcher
                 nameOverride = HarvestedName(serial) ?? "Razer Keyboard";
             }
             var reading = new HidDeviceReading(pid, product, serial, levelRaw,
-                RazerReport.LevelPercent(levelRaw, slot.Scale), charging, nameOverride, kindOverride);
+                RazerReport.LevelPercent(levelRaw, slot.Scale), charging, nameOverride, kindOverride,
+                subKey);
             // Serial-keyed dedup: transaction ids that route to the same
             // sub-device (0x1F/0x3F/0x0F all answered for the mouse) collapse.
             if (seenHandles.Add(HandleFor(reading)))
