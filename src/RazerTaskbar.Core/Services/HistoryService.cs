@@ -143,6 +143,9 @@ public static class HistoryService
 
     private static Dictionary<string, List<Sample>> _series = new();
     private static Dictionary<string, string> _names = new();
+    /// <summary>handle → the link its last reading arrived on, as persisted in
+    /// the devices table (<see cref="BatteryTransport"/>).</summary>
+    private static Dictionary<string, BatteryTransport> _sources = new();
     /// <summary>handle → present in the last record pass (drives disconnect detection).</summary>
     private static Dictionary<string, bool> _seen = new();
     /// <summary>handle → (prediction, display anchor), both computed on the
@@ -610,17 +613,9 @@ public static class HistoryService
                             hist.Add(w);
                         }
                     }
-                    using (var cmd = conn.CreateCommand())
-                    {
-                        cmd.CommandText =
-                            "INSERT INTO devices(handle, name, first_seen, last_seen) VALUES($h, $n, $t, $t) " +
-                            "ON CONFLICT(handle) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen";
-                        cmd.Parameters.AddWithValue("$h", d.Handle);
-                        cmd.Parameters.AddWithValue("$n", d.Name);
-                        cmd.Parameters.AddWithValue("$t", now);
-                        cmd.ExecuteNonQuery();
-                    }
+                    UpsertDevice(conn, d.Handle, d.Name, now, d.Transport);
                     _names[d.Handle] = d.Name;
+                    _sources[d.Handle] = d.Transport;
                 }
 
                 // Devices that vanished since the last pass: record the disconnect
@@ -773,6 +768,18 @@ public static class HistoryService
         }
     }
 
+    /// <summary>The link a device's reading last arrived on, as persisted in
+    /// battery.db — null when the device has no stored row yet. The live
+    /// value rides on <see cref="RazerDevice.Transport"/>; this one is what
+    /// survives a restart.</summary>
+    public static BatteryTransport? SavedTransport(string handle)
+    {
+        lock (Sync)
+        {
+            return _sources.TryGetValue(handle, out var t) ? t : null;
+        }
+    }
+
     /// <summary>Raw samples for the history page chart/list (short blocking query, WAL read).</summary>
     public static List<Sample> SamplesInRange(string handle, long sinceTs)
     {
@@ -838,11 +845,63 @@ public static class HistoryService
         Exec(conn,
             "CREATE TABLE IF NOT EXISTS devices(" +
             "handle TEXT PRIMARY KEY, name TEXT NOT NULL, " +
-            "first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL);" +
+            "first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, " +
+            "source TEXT NOT NULL DEFAULT '');" +
             "CREATE TABLE IF NOT EXISTS samples(" +
             "handle TEXT NOT NULL, ts INTEGER NOT NULL, level INTEGER NOT NULL, " +
             "charging INTEGER NOT NULL, connected INTEGER NOT NULL, " +
             "PRIMARY KEY(handle, ts)) WITHOUT ROWID;");
+        // Databases written before the source column existed: add it rather
+        // than recreating (the table carries every device's first/last seen).
+        if (!HasColumn(conn, "devices", "source"))
+        {
+            Exec(conn, "ALTER TABLE devices ADD COLUMN source TEXT NOT NULL DEFAULT ''");
+        }
+    }
+
+    /// <summary>True when `table` already carries `column` (the migration
+    /// probe: CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so
+    /// added columns need their own step).</summary>
+    private static bool HasColumn(SqliteConnection conn, string table, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT name FROM pragma_table_info($t)";
+        cmd.Parameters.AddWithValue("$t", table);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(0), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Persisted devices.source text → transport. A row written
+    /// before the column existed (or by a build that predates the transport)
+    /// reads back empty, and an unknown value is no better: the log source is
+    /// the honest default for both.</summary>
+    internal static BatteryTransport ParseSavedSource(string? text)
+        => Enum.TryParse(text, out BatteryTransport t) ? t : BatteryTransport.Log;
+
+    /// <summary>Upsert one device row, recording the link its reading arrived
+    /// on (<see cref="BatteryTransport"/>): the source that actually answered
+    /// is part of the device's durable state, so it survives a restart and
+    /// says where to look when a later read fails. Internal for tests.</summary>
+    internal static void UpsertDevice(
+        SqliteConnection conn, string handle, string name, long ts, BatteryTransport transport)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText =
+            "INSERT INTO devices(handle, name, first_seen, last_seen, source) VALUES($h, $n, $t, $t, $s) " +
+            "ON CONFLICT(handle) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen, " +
+            "source = excluded.source";
+        cmd.Parameters.AddWithValue("$h", handle);
+        cmd.Parameters.AddWithValue("$n", name);
+        cmd.Parameters.AddWithValue("$t", ts);
+        cmd.Parameters.AddWithValue("$s", transport.ToString());
+        cmd.ExecuteNonQuery();
     }
 
     private static void Exec(SqliteConnection conn, string sql)
@@ -867,13 +926,16 @@ public static class HistoryService
     {
         var series = new Dictionary<string, List<Sample>>();
         var names = new Dictionary<string, string>();
+        var sources = new Dictionary<string, BatteryTransport>();
         using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = "SELECT handle, name FROM devices";
+            cmd.CommandText = "SELECT handle, name, source FROM devices";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                names[reader.GetString(0)] = reader.GetString(1);
+                var h = reader.GetString(0);
+                names[h] = reader.GetString(1);
+                sources[h] = ParseSavedSource(reader.IsDBNull(2) ? null : reader.GetString(2));
             }
         }
         using (var cmd = conn.CreateCommand())
@@ -900,6 +962,7 @@ public static class HistoryService
         {
             _series = series;
             _names = names;
+            _sources = sources;
         }
     }
 

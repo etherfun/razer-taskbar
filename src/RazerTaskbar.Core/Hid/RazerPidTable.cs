@@ -94,6 +94,15 @@ public static class RazerPidTable
     /// rather than a receiver or Bluetooth link.</summary>
     public static bool IsWiredDevice(int pid) => WiredDevicePids.Contains(pid);
 
+    /// <summary>USB HID transport of this pid: cable mode when the pid
+    /// enumerates the device itself, a 2.4G receiver otherwise (an unknown
+    /// Razer pid that enumerates over USB is a dongle far more often than a
+    /// cabled device — cable-mode pids are the enumerated list above). Both
+    /// rank as the USB tier; the split is kept because it is recorded per
+    /// device (see <see cref="BatteryTransport"/>).</summary>
+    public static BatteryTransport UsbTransport(int pid)
+        => IsWiredDevice(pid) ? BatteryTransport.Wired : BatteryTransport.Receiver;
+
     /// <summary>Which wireless sub-device a transaction id addresses. On
     /// multi-device combo dongles the mouse and the paired keyboard share one
     /// vendor feature channel: the dongle routes by transaction id

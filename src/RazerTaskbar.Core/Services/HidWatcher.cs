@@ -50,7 +50,13 @@ public sealed record HidDeviceReading(
     /// appended to the pid-shaped fallback as `HID:{pid}:{key}`. Slots that
     /// alias the pid's primary sub-device leave it null and keep the bare
     /// `HID:{pid}` identity.</summary>
-    string? SubDeviceKey = null);
+    string? SubDeviceKey = null,
+    /// <summary>Link this reading arrived on, and therefore its read priority
+    /// (see <see cref="BatteryTransports"/>). Set at every construction site
+    /// in <see cref="HidWatcher"/>: the BLE branches say `Ble`, the USB query
+    /// asks <see cref="RazerPidTable.UsbTransport"/>. The default is only a
+    /// convenience for callers that never read a device directly.</summary>
+    BatteryTransport Transport = BatteryTransport.Receiver);
 
 public sealed class HidWatcher
 {
@@ -147,7 +153,8 @@ public sealed class HidWatcher
                         readings.Add(new HidDeviceReading(group.Key, "", serial,
                             power.RawBattery, BleVendor.BatteryPercent(power.RawBattery),
                             power.Charging, name,
-                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name)));
+                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name),
+                            Transport: BatteryTransport.Ble));
                     }
                     else if (BleBattery.TryRead(mac) is { } ble)
                     {
@@ -166,7 +173,8 @@ public sealed class HidWatcher
                             ?? "Razer Keyboard";
                         readings.Add(new HidDeviceReading(group.Key, "", serial,
                             ble.Percent, ble.Percent, identity?.Charging, name,
-                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name)));
+                            DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name),
+                            Transport: BatteryTransport.Ble));
                     }
                     continue;
                 }
@@ -199,7 +207,8 @@ public sealed class HidWatcher
                 ? "no battery devices"
                 : string.Join(", ", readings.Select(r =>
                     $"0x{r.ProductId:X4} \"{r.NameOverride ?? r.ProductName}\" {r.LevelPercent}%" +
-                    (r.IsCharging == true ? " (charging)" : "")))));
+                    (r.IsCharging == true ? " (charging)" : "") +
+                    $" [{r.Transport}]"))));
             _lastSignature = signature;
         }
         Commit(devices, readings, cfg.ShownDeviceHandle);
@@ -235,7 +244,8 @@ public sealed class HidWatcher
             BatterySaver: false, // not exposed by the vendor battery commands
             IsConnected: true,
             shownHandle.Length == 0 || shownHandle == handle,
-            reading.KindOverride ?? DeviceClassifier.FromCategoryAndName("", reading.ProductName));
+            reading.KindOverride ?? DeviceClassifier.FromCategoryAndName("", reading.ProductName),
+            reading.Transport);
     }
 
     /// <summary>Handle key: the USB serial string when the device reports a
@@ -362,6 +372,12 @@ public sealed class HidWatcher
         // Alias merges touch SQLite; collect them and run after Mutate so
         // the DeviceStore lock never spans DB IO (Snapshot blocks on it).
         var aliases = new List<(string Src, string Dst)>();
+        // Which link each handle was written from in THIS round, so a device
+        // answering on two links at once keeps the better one (USB HID
+        // outranks Bluetooth LE — see BatteryTransports). Round scoped on
+        // purpose: a device that moved to Bluetooth must not stay pinned to a
+        // stale USB reading on later rounds, so this never consults the store.
+        var roundTransport = new Dictionary<string, BatteryTransport>();
         devices.Mutate(map =>
         {
             var seen = new HashSet<string>();
@@ -370,6 +386,19 @@ public sealed class HidWatcher
                 var (handle, stale) = ResolveIdentity(map, HandleFor(reading), reading, seen);
                 var merged = ToRazerDevice(reading, handle, shown);
                 seen.Add(handle);
+                // A strictly worse link never displaces the better one that
+                // already answered for this device this round — order of
+                // arrival must not decide it, so a later USB reading takes the
+                // entry over and a later BLE reading is dropped. Equal links
+                // fall through to the rules below: wired and receiver share
+                // tier 0, and the slots of one dongle all reach the same
+                // device (0x1F/0x3F/0x0F), which must keep collapsing the way
+                // it always has.
+                if (roundTransport.TryGetValue(handle, out var incumbent)
+                    && BatteryTransports.Priority(reading.Transport) > BatteryTransports.Priority(incumbent))
+                {
+                    continue;
+                }
                 // Same handle from two transports (cable + BT charging at
                 // once): keep the entry that knows charging — GATT has no
                 // charging flag, so a BLE reading must not erase it.
@@ -380,6 +409,7 @@ public sealed class HidWatcher
                 }
                 map[handle] = merged;
                 _written[handle] = merged;
+                roundTransport[handle] = reading.Transport;
                 if (stale is { } dead && dead != handle)
                 {
                     map.Remove(dead);
@@ -758,7 +788,7 @@ public sealed class HidWatcher
             }
             var reading = new HidDeviceReading(pid, product, serial, levelRaw,
                 RazerReport.LevelPercent(levelRaw, slot.Scale), charging, nameOverride, kindOverride,
-                subKey);
+                subKey, RazerPidTable.UsbTransport(pid));
             // Serial-keyed dedup: transaction ids that route to the same
             // sub-device (0x1F/0x3F/0x0F all answered for the mouse) collapse.
             if (seenHandles.Add(HandleFor(reading)))

@@ -294,10 +294,23 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
   间歇失败"风险（实测 4h：3964 次重开 vs 2 次 API 故障）。纯静默仅保留 120 轮深保底。
 - **status=0x05（不支持）日志限频**：空接收器槽/AA 设备对电量查询回 0x05 属预期，按
   (pid, slot) 10 分钟限频，消息带 pid+tx（`QueryCommand` 返回 (value, unsupported)）。
-- `hid poll` 签名行附 `(charging)`，可从日志直接核验充电位。
-- **auto 模式的粒度是整体而非按设备**：HID 查到 ≥1 台后日志解析不再运行。HID 不支持
-  `0x07` 电量命令的设备（耳机是另一套协议）会停留在最后一次日志值并保持冻结——此类设备
-  为主时建议 `battery_source=log`，或等待按设备合并的后续改进。
+- `hid poll` 签名行附 `(charging)` 与来源标签 `[Receiver]`/`[Wired]`/`[Ble]`，可从日志直接核验充电位与链路。
+- **数据源优先级（2026-09-21）**：有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志。USB 与蓝牙
+  仍在同一轮 `Poll` 内完成，但**按设备仲裁**：同一轮里两条链路都答同一台设备时，优先级
+  严格更低的那条读数直接丢弃（`HidWatcher.Commit` 内的 round 级 `roundTransport`）。判据是
+  "严格更低才丢"，所以同层的线缆/接收器之间、以及同一 dongle 的多槽（0x1F/0x3F/0x0F 都通向
+  鼠标）行为不变。到达顺序不决定结果：后到的 USB 读数接管，后到的蓝牙读数被丢。
+  胜出链路记在 `RazerDevice.Transport`（`BatteryTransport`：Wired/Receiver/Ble/Log），
+  并随设备行持久化到 battery.db 的 `devices.source` 列（旧库由 `EnsureTables` 自动
+  `ALTER TABLE` 补列，旧行读回按 `Log`），`HistoryService.SavedTransport(handle)` 读回。
+- **获取失败再跑一次（2026-09-21）**：`ParseOnce` 记下上一轮的应答数，本轮**少**了
+  （设备掉线、唤醒风暴、查询抛异常）就整条链再跑一次（`RazerWatcher.PollHidWithRetry` /
+  `AcquisitionFailed`），之后才轮到 miss 计数判离线。稳态（数量不变）不额外轮询；真被拔掉的
+  设备只让某一轮变短一次，所以只触发一次重跑而不是每轮都重跑。
+- **auto 模式的粒度是整体而非按设备**：HID 查到 ≥1 台后日志解析不再运行（日志源会重写它
+  认识的每一台设备，按设备混跑会与 HID 的连接判定互相打架，见上面连接判定第 ② 点）。
+  HID 不支持 `0x07` 电量命令的设备（耳机是另一套协议）会停留在最后一次日志值并保持冻结——
+  此类设备为主时建议 `battery_source=log`，或等待按设备合并的后续改进。
 - 探针：`razer-taskbar.exe --hid-probe`（绕过单实例），枚举全部 Razer collection、
   dump 收发 hex 与错误码，输出到控制台与 `%APPDATA%\razer-taskbar\hid-probe.log`。
   新增未知设备时先跑探针确认 tx/缩放。
@@ -306,3 +319,6 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 
 `tests/RazerTaskbar.Tests/HidTests.cs`：CRC 向量、报文布局、响应解析各分支、缩放规则、
 PID 表、HID→RazerDevice 映射与 `IsSelected` 盖章。协议解析改动必须同步此文件。
+`tests/RazerTaskbar.Tests/TransportPriorityTests.cs`：链路分层（线缆=接收器 > 蓝牙 > 日志）、
+`UsbTransport` 的线缆/接收器判定、`Commit` 的单轮仲裁（两种到达顺序都必须 USB 胜）、
+`AcquisitionFailed` 的"只在本轮变短时重跑"，以及 `devices.source` 的持久化与旧库补列。

@@ -20,8 +20,8 @@ public sealed class HistoryAliasTests
         var conn = new SqliteConnection("Data Source=:memory:");
         conn.Open();
         HistoryService.EnsureTables(conn);
-        Exec(conn, $"INSERT INTO devices VALUES('{Serial}', '{Name}', 100, 200)");
-        Exec(conn, $"INSERT INTO devices VALUES('{Alias}', '{Name}', 50, 60)");
+        Exec(conn, $"INSERT INTO devices(handle, name, first_seen, last_seen) VALUES('{Serial}', '{Name}', 100, 200)");
+        Exec(conn, $"INSERT INTO devices(handle, name, first_seen, last_seen) VALUES('{Alias}', '{Name}', 50, 60)");
         // alias-rooted samples (cold start before the serial resolved)…
         Exec(conn, $"INSERT INTO samples VALUES('{Alias}', 50, 64, 0, 1)");
         Exec(conn, $"INSERT INTO samples VALUES('{Alias}', 55, 63, 0, 1)");

@@ -14,6 +14,42 @@ public enum DeviceKind
     Other,
 }
 
+/// <summary>Which link a device's battery reading actually came in on. The
+/// read priority is declared by <see cref="BatteryTransports.Priority"/>: a
+/// cabled device and one sitting on its 2.4G receiver both speak USB HID and
+/// share a tier, above a Bluetooth-LE link, above the Synapse log
+/// fallback.</summary>
+public enum BatteryTransport
+{
+    /// <summary>USB HID in cable mode — the PID enumerates the device itself
+    /// (see <c>RazerPidTable.IsWiredDevice</c>).</summary>
+    Wired,
+    /// <summary>USB HID through a 2.4G receiver/dongle.</summary>
+    Receiver,
+    /// <summary>Bluetooth LE: Razer's vendor GATT channel when it is free,
+    /// the plain Battery Service otherwise.</summary>
+    Ble,
+    /// <summary>Synapse log parsing — the last-resort source.</summary>
+    Log,
+}
+
+public static class BatteryTransports
+{
+    /// <summary>Read priority: lower wins. Wired and receiver deliberately
+    /// share tier 0 (有线usb = 2.4G接收器), so neither displaces the other —
+    /// only BLE and the log sit below them.</summary>
+    public static int Priority(BatteryTransport t) => t switch
+    {
+        BatteryTransport.Wired or BatteryTransport.Receiver => 0,
+        BatteryTransport.Ble => 1,
+        _ => 2,
+    };
+
+    /// <summary>True when `candidate` is the better source of the two.</summary>
+    public static bool Outranks(BatteryTransport candidate, BatteryTransport incumbent)
+        => Priority(candidate) < Priority(incumbent);
+}
+
 public sealed record RazerDevice(
     string Name,
     string Handle,
@@ -23,7 +59,11 @@ public sealed record RazerDevice(
     bool BatterySaver,
     bool IsConnected,
     bool IsSelected,
-    DeviceKind Kind);
+    DeviceKind Kind,
+    /// <summary>Link this reading came in on — recorded per device and
+    /// persisted by the history store. Defaults to the log source: every
+    /// producer that does not read a device directly is the log parser.</summary>
+    BatteryTransport Transport = BatteryTransport.Log);
 
 public static class DeviceClassifier
 {

@@ -807,7 +807,7 @@ public sealed class HistoryTests
                     Exec(conn,
                         $"INSERT INTO samples VALUES('h', {now - (10 - i) * 180L}, {60 - i}, 0, 1)");
                 }
-                Exec(conn, $"INSERT INTO devices VALUES('h', 'Test Mouse', {now}, {now})");
+                Exec(conn, $"INSERT INTO devices(handle, name, first_seen, last_seen) VALUES('h', 'Test Mouse', {now}, {now})");
             }
             HistoryService.Init();
             Assert.True(HistoryService.Ready());

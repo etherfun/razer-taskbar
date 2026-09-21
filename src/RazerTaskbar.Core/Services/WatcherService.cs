@@ -144,6 +144,10 @@ public sealed class RazerWatcher
 
     private readonly DeviceStore _devices;
     private readonly HidWatcher _hid = new();
+    /// <summary>Battery devices the HID round answered last time. A round
+    /// that comes back short of this read failed part-way rather than finding
+    /// nothing, and re-runs the chain once (see PollHidWithRetry).</summary>
+    private int _lastHidAnswered;
     private readonly object _lastV4TimestampLock = new();
     private string _lastV4Timestamp = "";
     // V4 incremental read state (watcher thread only): the logs rotate at
@@ -596,22 +600,50 @@ public sealed class RazerWatcher
     private static long IntervalSecs(ulong secs)
         => (long)Math.Min(secs, (ulong)(int.MaxValue / 1000));
 
+    /// <summary>True when this round's acquisition came back short of the
+    /// previous one. That is a read failure (radio wake storm, USB
+    /// re-enumeration, a throwing query), not a device the user unplugged:
+    /// a permanent absence makes a round short exactly once, so the retry
+    /// stays bounded to one extra poll per drop instead of one per round.</summary>
+    internal static bool AcquisitionFailed(int answered, int previousAnswered)
+        => answered < previousAnswered;
+
+    /// <summary>One HID round — the USB tier (cable and 2.4G receiver) and the
+    /// Bluetooth tier both live in this one poll — re-run once when it came
+    /// back short, so a failed acquisition goes around the whole chain again
+    /// before the miss counters start retiring devices.</summary>
+    private int PollHidWithRetry(Config cfg)
+    {
+        var answered = _hid.Poll(_devices, cfg);
+        if (AcquisitionFailed(answered, _lastHidAnswered))
+        {
+            Log.Info($"hid: acquisition came back short ({answered} < {_lastHidAnswered}), re-running the source chain");
+            answered = Math.Max(answered, _hid.Poll(_devices, cfg));
+        }
+        _lastHidAnswered = answered;
+        return answered;
+    }
+
     private void ParseOnce(Config cfg)
     {
         // `cfg` was read once for this pass (edits apply live next pass).
         switch (cfg.BatterySource)
         {
             case "hid":
-                _hid.Poll(_devices, cfg);
+                // Direct HID only: the source chain without its log tail.
+                PollHidWithRetry(cfg);
                 return;
             case "log":
                 ParseLog(cfg);
                 return;
             default:
-                // auto: direct HID wins whenever at least one battery device
-                // answers (no Synapse needed); an empty poll falls back to
-                // Synapse log parsing.
-                if (_hid.Poll(_devices, cfg) > 0)
+                // auto: the source chain, best link first. USB HID (cable or
+                // 2.4G receiver) and Bluetooth LE are arbitrated per device
+                // inside the poll; the Synapse log is the last resort,
+                // consulted only when the HID round came back empty. Direct
+                // HID wins whenever at least one battery device answers (no
+                // Synapse needed).
+                if (PollHidWithRetry(cfg) > 0)
                 {
                     return;
                 }
