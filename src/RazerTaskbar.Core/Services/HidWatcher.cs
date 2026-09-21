@@ -117,6 +117,16 @@ public sealed class HidWatcher
     /// ':'): a resolved reading folds same-pid fallback rows only — pid pins
     /// the model, keeping name containment from crossing models.</summary>
     private readonly Dictionary<string, int> _fallbackPid = new();
+    /// <summary>Handles this commit wrote from live readings — the round's
+    /// coverage. The auto chain hands it to the log source so a device that
+    /// answered directly is never rewritten from a snapshot (per-device
+    /// independence: one device's live read must not silence another's
+    /// fallback, and the log must not overwrite the one it did read).</summary>
+    private readonly HashSet<string> _roundWritten = new();
+
+    /// <summary>Devices this source wrote in the last commit (see
+    /// <see cref="_roundWritten"/>).</summary>
+    public IReadOnlyCollection<string> WrittenThisRound => _roundWritten;
 
     /// <summary>One HID poll cycle. Returns the number of battery devices
     /// that answered (drives the auto-mode fallback to log parsing).</summary>
@@ -369,6 +379,7 @@ public sealed class HidWatcher
     internal void Commit(DeviceStore devices, List<HidDeviceReading> readings, string shown)
     {
         readings = DedupRound(readings);
+        _roundWritten.Clear();
         // Alias merges touch SQLite; collect them and run after Mutate so
         // the DeviceStore lock never spans DB IO (Snapshot blocks on it).
         var aliases = new List<(string Src, string Dst)>();
@@ -410,6 +421,7 @@ public sealed class HidWatcher
                 map[handle] = merged;
                 _written[handle] = merged;
                 roundTransport[handle] = reading.Transport;
+                _roundWritten.Add(handle);
                 if (stale is { } dead && dead != handle)
                 {
                     map.Remove(dead);

@@ -295,22 +295,25 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - **status=0x05（不支持）日志限频**：空接收器槽/AA 设备对电量查询回 0x05 属预期，按
   (pid, slot) 10 分钟限频，消息带 pid+tx（`QueryCommand` 返回 (value, unsupported)）。
 - `hid poll` 签名行附 `(charging)` 与来源标签 `[Receiver]`/`[Wired]`/`[Ble]`，可从日志直接核验充电位与链路。
-- **数据源优先级（2026-09-21）**：有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志。USB 与蓝牙
-  仍在同一轮 `Poll` 内完成，但**按设备仲裁**：同一轮里两条链路都答同一台设备时，优先级
-  严格更低的那条读数直接丢弃（`HidWatcher.Commit` 内的 round 级 `roundTransport`）。判据是
-  "严格更低才丢"，所以同层的线缆/接收器之间、以及同一 dongle 的多槽（0x1F/0x3F/0x0F 都通向
-  鼠标）行为不变。到达顺序不决定结果：后到的 USB 读数接管，后到的蓝牙读数被丢。
-  胜出链路记在 `RazerDevice.Transport`（`BatteryTransport`：Wired/Receiver/Ble/Log），
-  并随设备行持久化到 battery.db 的 `devices.source` 列（旧库由 `EnsureTables` 自动
+- **数据源优先级（2026-09-21）**：有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志，**按设备独立**
+  （Joro 走蓝牙、Viper 走 2.4G 时两者互不影响）。USB 与蓝牙仍在同一轮 `Poll` 内完成，但按设备
+  仲裁：同一轮里两条链路都答同一台设备时，优先级严格更低的那条读数直接丢弃（`HidWatcher.Commit`
+  内的 round 级 `roundTransport`）。判据是"严格更低才丢"，所以同层的线缆/接收器之间、以及同一
+  dongle 的多槽（0x1F/0x3F/0x0F 都通向鼠标）行为不变。到达顺序不决定结果：后到的 USB 读数接管，
+  后到的蓝牙读数被丢。胜出链路记在 `RazerDevice.Transport`（`BatteryTransport`：Wired/Receiver/
+  Ble/Log），并随设备行持久化到 battery.db 的 `devices.source` 列（旧库由 `EnsureTables` 自动
   `ALTER TABLE` 补列，旧行读回按 `Log`），`HistoryService.SavedTransport(handle)` 读回。
-- **获取失败再跑一次（2026-09-21）**：`ParseOnce` 记下上一轮的应答数，本轮**少**了
+- **日志层按设备兜底（2026-09-21）**：HID 轮结束后日志源只补"本轮没被直接读到的设备"
+  （`ParseOnce` → `AnyUncovered` → `ParseLog(cfg, covered)`，`covered` = `HidWatcher.WrittenThisRound`）。
+  被直接读到的设备整段跳过（`ApplyV4Batch`/`ParseV3` 的 covered 判定）：既不会被更旧的快照覆盖，
+  也不会被日志判离线——连接判定归直接读到的那个源。因此"Viper 在 2.4G 上答了"不再让蓝牙上的
+  Joro 拿不到读数（旧版整体兜底的干扰已消除），HID 不支持 `0x07` 的设备（耳机等）也因此能由日志
+  按设备补齐，不再需要为此切 `battery_source=log`。
+- **获取失败再跑一次（2026-09-21）**：`ParseOnce` 记住上一轮 HID 读到的句柄集合，本轮有句柄没答
   （设备掉线、唤醒风暴、查询抛异常）就整条链再跑一次（`RazerWatcher.PollHidWithRetry` /
-  `AcquisitionFailed`），之后才轮到 miss 计数判离线。稳态（数量不变）不额外轮询；真被拔掉的
-  设备只让某一轮变短一次，所以只触发一次重跑而不是每轮都重跑。
-- **auto 模式的粒度是整体而非按设备**：HID 查到 ≥1 台后日志解析不再运行（日志源会重写它
-  认识的每一台设备，按设备混跑会与 HID 的连接判定互相打架，见上面连接判定第 ② 点）。
-  HID 不支持 `0x07` 电量命令的设备（耳机是另一套协议）会停留在最后一次日志值并保持冻结——
-  此类设备为主时建议 `battery_source=log`，或等待按设备合并的后续改进。
+  `AcquisitionFailed`）。判定**按设备**：一台掉、另一台同轮新出现也算失败（比数量比较更准）。
+  之后才轮到 miss 计数判离线。稳态（集合不变）不额外轮询；真被拔掉的设备只让某一轮变短一次，
+  所以只触发一次重跑而不是每轮都重跑。
 - 探针：`razer-taskbar.exe --hid-probe`（绕过单实例），枚举全部 Razer collection、
   dump 收发 hex 与错误码，输出到控制台与 `%APPDATA%\razer-taskbar\hid-probe.log`。
   新增未知设备时先跑探针确认 tx/缩放。
@@ -321,4 +324,6 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 PID 表、HID→RazerDevice 映射与 `IsSelected` 盖章。协议解析改动必须同步此文件。
 `tests/RazerTaskbar.Tests/TransportPriorityTests.cs`：链路分层（线缆=接收器 > 蓝牙 > 日志）、
 `UsbTransport` 的线缆/接收器判定、`Commit` 的单轮仲裁（两种到达顺序都必须 USB 胜）、
-`AcquisitionFailed` 的"只在本轮变短时重跑"，以及 `devices.source` 的持久化与旧库补列。
+按设备的日志兜底（`ApplyV4Batch` 的 covered：直接读到的设备既不被覆盖也不被判离线，没读到的
+那台仍由日志补齐）、`AcquisitionFailed` 的按设备重跑判定，以及 `devices.source` 的持久化与
+旧库补列。

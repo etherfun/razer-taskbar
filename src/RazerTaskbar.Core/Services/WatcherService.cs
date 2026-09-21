@@ -144,10 +144,10 @@ public sealed class RazerWatcher
 
     private readonly DeviceStore _devices;
     private readonly HidWatcher _hid = new();
-    /// <summary>Battery devices the HID round answered last time. A round
-    /// that comes back short of this read failed part-way rather than finding
-    /// nothing, and re-runs the chain once (see PollHidWithRetry).</summary>
-    private int _lastHidAnswered;
+    /// <summary>Devices the HID round wrote last time. A device in here that
+    /// does not answer this round read failed rather than went away, and
+    /// re-runs the chain once (see PollHidWithRetry).</summary>
+    private HashSet<string> _lastHidHandles = new();
     private readonly object _lastV4TimestampLock = new();
     private string _lastV4Timestamp = "";
     // V4 incremental read state (watcher thread only): the logs rotate at
@@ -600,28 +600,48 @@ public sealed class RazerWatcher
     private static long IntervalSecs(ulong secs)
         => (long)Math.Min(secs, (ulong)(int.MaxValue / 1000));
 
-    /// <summary>True when this round's acquisition came back short of the
-    /// previous one. That is a read failure (radio wake storm, USB
-    /// re-enumeration, a throwing query), not a device the user unplugged:
-    /// a permanent absence makes a round short exactly once, so the retry
-    /// stays bounded to one extra poll per drop instead of one per round.</summary>
-    internal static bool AcquisitionFailed(int answered, int previousAnswered)
-        => answered < previousAnswered;
+    /// <summary>True when a device the previous round read did not answer this
+    /// one — a failed acquisition for that device (radio wake storm, USB
+    /// re-enumeration, a throwing query), not one the user unplugged: a
+    /// permanent absence makes the round short exactly once, so the retry
+    /// costs one extra poll per drop instead of one per round. Per device on
+    /// purpose — a device that drops while another appears still counts.</summary>
+    internal static bool AcquisitionFailed(IReadOnlySet<string> current, IReadOnlySet<string> previous)
+        => previous.Except(current).Any();
 
     /// <summary>One HID round — the USB tier (cable and 2.4G receiver) and the
-    /// Bluetooth tier both live in this one poll — re-run once when it came
-    /// back short, so a failed acquisition goes around the whole chain again
-    /// before the miss counters start retiring devices.</summary>
-    private int PollHidWithRetry(Config cfg)
+    /// Bluetooth tier both live in this one poll — re-run once when a device
+    /// it read last time came back unanswered, so a failed acquisition goes
+    /// around the whole chain again before the miss counters start retiring
+    /// devices. Returns the handles the round wrote, which is what the log
+    /// source is allowed to leave alone.</summary>
+    private HashSet<string> PollHidWithRetry(Config cfg)
     {
-        var answered = _hid.Poll(_devices, cfg);
-        if (AcquisitionFailed(answered, _lastHidAnswered))
+        _hid.Poll(_devices, cfg);
+        var covered = new HashSet<string>(_hid.WrittenThisRound);
+        if (AcquisitionFailed(covered, _lastHidHandles))
         {
-            Log.Info($"hid: acquisition came back short ({answered} < {_lastHidAnswered}), re-running the source chain");
-            answered = Math.Max(answered, _hid.Poll(_devices, cfg));
+            var missed = string.Join(", ", _lastHidHandles.Except(covered).Order());
+            Log.Info($"hid: no answer this round for {missed}, re-running the source chain");
+            _hid.Poll(_devices, cfg);
+            covered.UnionWith(_hid.WrittenThisRound);
         }
-        _lastHidAnswered = answered;
-        return answered;
+        _lastHidHandles = covered;
+        return covered;
+    }
+
+    /// <summary>True when the store holds a device this round's HID pass did
+    /// not write — the log source's remaining work.</summary>
+    private bool AnyUncovered(IReadOnlySet<string> covered)
+    {
+        foreach (var handle in _devices.Snapshot().Keys)
+        {
+            if (!covered.Contains(handle))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void ParseOnce(Config cfg)
@@ -637,45 +657,49 @@ public sealed class RazerWatcher
                 ParseLog(cfg);
                 return;
             default:
-                // auto: the source chain, best link first. USB HID (cable or
-                // 2.4G receiver) and Bluetooth LE are arbitrated per device
-                // inside the poll; the Synapse log is the last resort,
-                // consulted only when the HID round came back empty. Direct
-                // HID wins whenever at least one battery device answers (no
-                // Synapse needed).
-                if (PollHidWithRetry(cfg) > 0)
+                // auto: the chain is resolved per device, best link first.
+                // USB HID (cable or 2.4G receiver) and Bluetooth LE are
+                // arbitrated inside the poll; the Synapse log then fills in
+                // whatever the round did not read — so a device answering
+                // directly no longer silences the log for another (Joro on
+                // Bluetooth while the Viper sits on its 2.4G receiver must
+                // still be read), and a live read is never overwritten by a
+                // snapshot (covered handles are skipped inside the parse).
+                var covered = PollHidWithRetry(cfg);
+                if (covered.Count == 0 || AnyUncovered(covered))
                 {
-                    return;
+                    ParseLog(cfg, covered);
                 }
-                ParseLog(cfg);
                 return;
         }
     }
 
     /// <summary>Synapse log parsing, selected by `synapse_version` (v3/v4/
-    /// auto) — the original data source, unchanged.</summary>
-    private void ParseLog(Config cfg)
+    /// auto) — the original data source. `covered` is the set of handles the
+    /// HID round read live: the log supplies only the rest (null = the log
+    /// owns every device, i.e. `battery_source=log`).</summary>
+    private void ParseLog(Config cfg, IReadOnlySet<string>? covered = null)
     {
         switch (cfg.SynapseVersion)
         {
-            case "v3": ParseV3(cfg); break;
-            case "v4": ParseV4(cfg); break;
+            case "v3": ParseV3(cfg, covered); break;
+            case "v4": ParseV4(cfg, covered); break;
             default:
                 // auto: V4 wins when its log dir has candidates (mirrors TS `auto`).
                 var hasV4 = V4LogDir() is { } d && LatestV4Log(d) is not null;
                 if (hasV4)
                 {
-                    ParseV4(cfg);
+                    ParseV4(cfg, covered);
                 }
                 else
                 {
-                    ParseV3(cfg);
+                    ParseV3(cfg, covered);
                 }
                 break;
         }
     }
 
-    private void ParseV3(Config cfg)
+    private void ParseV3(Config cfg, IReadOnlySet<string>? covered = null)
     {
         var path = V3LogPath();
         if (path is null)
@@ -693,6 +717,10 @@ public sealed class RazerWatcher
         {
             foreach (var (handle, name, level, charging, connected) in snapshot)
             {
+                if (covered is not null && covered.Contains(handle))
+                {
+                    continue; // read live this round — not the log's to rewrite
+                }
                 devices[handle] = new RazerDevice(
                     name, handle, level, charging,
                     BatterySaver: false,
@@ -740,7 +768,7 @@ public sealed class RazerWatcher
         return result;
     }
 
-    private void ParseV4(Config cfg)
+    private void ParseV4(Config cfg, IReadOnlySet<string>? covered = null)
     {
         var dir = V4LogDir();
         if (dir is null)
@@ -873,7 +901,7 @@ public sealed class RazerWatcher
             }
         }
 
-        ApplyV4Batch(_devices, snapshots, connectedIds, offIds, cfg.ShownDeviceHandle, _v4Known);
+        ApplyV4Batch(_devices, snapshots, connectedIds, offIds, cfg.ShownDeviceHandle, _v4Known, covered);
         lock (_lastV4TimestampLock)
         {
             _lastV4Timestamp = lastTs;
@@ -887,11 +915,17 @@ public sealed class RazerWatcher
     /// read as offline (the whole-file replay recomputed every entry against
     /// the latest snapshot's id set — this is the incremental pass's
     /// equivalent). `knownHandles` is the caller's persistent owned-handle
-    /// set; it gains this batch's handles. Internal for tests.</summary>
+    /// set; it gains this batch's handles. `covered` is the set the HID round
+    /// read live this round: those devices are skipped entirely — not
+    /// rewritten from a snapshot that may be older, and not flipped offline
+    /// (their connectivity is the HID source's to declare), so a device read
+    /// directly cannot be disturbed by the log, nor by another device's
+    /// fallback. Internal for tests.</summary>
     internal static void ApplyV4Batch(DeviceStore store,
         List<(string Ts, string Json)> snapshots,
         HashSet<string> connectedIds, HashSet<string> offIds,
-        string shown, HashSet<string> knownHandles)
+        string shown, HashSet<string> knownHandles,
+        IReadOnlySet<string>? covered = null)
     {
         var batchHandles = new HashSet<string>();
         store.Mutate(devices =>
@@ -916,7 +950,7 @@ public sealed class RazerWatcher
                     // TS: `x.serialNumber ?? x.deviceContainerId`; empty
                     // strings fall back too.
                     var handle = d.SerialNumber.Length > 0 ? d.SerialNumber : d.DeviceContainerId;
-                    if (handle.Length == 0)
+                    if (handle.Length == 0 || (covered is not null && covered.Contains(handle)))
                     {
                         continue;
                     }
@@ -939,6 +973,10 @@ public sealed class RazerWatcher
             }
             foreach (var handle in knownHandles)
             {
+                if (covered is not null && covered.Contains(handle))
+                {
+                    continue; // read live this round: the log does not declare it offline
+                }
                 if (connectedIds.Contains(handle)
                     || !devices.TryGetValue(handle, out var d)
                     || !d.IsConnected)

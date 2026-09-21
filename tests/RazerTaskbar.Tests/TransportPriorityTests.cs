@@ -100,18 +100,82 @@ public sealed class TransportPriorityTests
         Assert.Equal(BatteryTransport.Ble, d.Transport);
     }
 
-    // — a failed acquisition re-runs the chain once —
+    // — a failed acquisition re-runs the chain once, per device —
 
     [Fact]
-    public void OnlyAShortRoundCountsAsAFailedAcquisition()
+    public void OnlyAnUnansweredDeviceCountsAsAFailedAcquisition()
     {
-        Assert.True(RazerWatcher.AcquisitionFailed(0, 1)); // the device is gone this round
-        Assert.True(RazerWatcher.AcquisitionFailed(1, 2));
+        var both = Handles("V3", "Joro");
+        var v3Only = Handles("V3");
+
+        Assert.True(RazerWatcher.AcquisitionFailed(v3Only, both)); // the Joro stopped answering
+        // Per device, so a drop in the same round another device appears still
+        // counts — comparing counts would see 2 → 2 and miss it.
+        Assert.True(RazerWatcher.AcquisitionFailed(Handles("V3", "Naga"), both));
         // Steady state must not buy an extra poll every round: a device that
         // stayed absent makes the round short exactly once.
-        Assert.False(RazerWatcher.AcquisitionFailed(1, 1));
-        Assert.False(RazerWatcher.AcquisitionFailed(2, 1)); // recovered
-        Assert.False(RazerWatcher.AcquisitionFailed(0, 0)); // nothing to lose yet
+        Assert.False(RazerWatcher.AcquisitionFailed(v3Only, v3Only));
+        Assert.False(RazerWatcher.AcquisitionFailed(both, v3Only)); // recovered
+        Assert.False(RazerWatcher.AcquisitionFailed(both, new HashSet<string>())); // first round ever
+    }
+
+    // — the log fills exactly what the HID round did not read —
+
+    private const string BatchBoth = """[{"serialNumber":"V3","hasBattery":true,"deviceContainerId":"C1","powerStatus":{"chargingStatus":"Discharging","level":40},"name":{"en":"Razer Viper V3 HyperSpeed"},"category":"MOUSE"},{"serialNumber":"Joro","hasBattery":true,"deviceContainerId":"C2","powerStatus":{"chargingStatus":"Discharging","level":72},"name":{"en":"Razer Joro"},"category":"KEYBOARD"}]""";
+    private const string BatchJoroOnly = """[{"serialNumber":"Joro","hasBattery":true,"deviceContainerId":"C2","powerStatus":{"chargingStatus":"Discharging","level":72},"name":{"en":"Razer Joro"},"category":"KEYBOARD"}]""";
+
+    private static DeviceStore StoreWith(params (string Handle, string Name, int Level, DeviceKind Kind, BatteryTransport Transport)[] devices)
+    {
+        var store = new DeviceStore();
+        store.Mutate(m =>
+        {
+            foreach (var (handle, name, level, kind, transport) in devices)
+            {
+                m[handle] = new RazerDevice(name, handle, level, false,
+                    BatterySaver: false, IsConnected: true, IsSelected: true, Kind: kind,
+                    Transport: transport);
+            }
+        });
+        return store;
+    }
+
+    [Fact]
+    public void LogFillsOnlyTheDevicesHidDidNotRead()
+    {
+        // The live case: the Viper answered over its 2.4G receiver this round,
+        // the Joro is on Bluetooth and did not. The log lists both, with a
+        // stale Viper level — one device's live read must not silence the
+        // other's fallback, and must not be overwritten by it either.
+        var store = StoreWith(
+            ("V3", "Razer Viper V3 HyperSpeed", 69, DeviceKind.Mouse, BatteryTransport.Receiver));
+
+        RazerWatcher.ApplyV4Batch(store, new List<(string, string)> { ("t1", BatchBoth) },
+            Handles("V3", "Joro"), new HashSet<string>(), "", Handles("V3", "Joro"), Handles("V3"));
+
+        var snap = store.Snapshot();
+        Assert.Equal(69, snap["V3"].BatteryPercentage); // the live read stands
+        Assert.Equal(BatteryTransport.Receiver, snap["V3"].Transport);
+        Assert.Equal(72, snap["Joro"].BatteryPercentage); // filled from the log
+        Assert.Equal(BatteryTransport.Log, snap["Joro"].Transport);
+    }
+
+    [Fact]
+    public void LogNeverFlipsACoveredDeviceOffline()
+    {
+        // The log's latest snapshot no longer lists the Viper (its dongle slot
+        // went quiet while the device sits on Bluetooth) — but the HID round
+        // read it live, so its connectivity is not the log's to declare. The
+        // Joro, which nothing read live, still follows the log.
+        var store = StoreWith(
+            ("V3", "Razer Viper V3 HyperSpeed", 69, DeviceKind.Mouse, BatteryTransport.Receiver),
+            ("Joro", "Razer Joro", 72, DeviceKind.Keyboard, BatteryTransport.Log));
+
+        RazerWatcher.ApplyV4Batch(store, new List<(string, string)> { ("t1", BatchJoroOnly) },
+            Handles("Joro"), new HashSet<string>(), "", Handles("V3", "Joro"), Handles("V3"));
+
+        var snap = store.Snapshot();
+        Assert.True(snap["V3"].IsConnected);
+        Assert.True(snap["Joro"].IsConnected);
     }
 
     // — the winning link is persisted with the device row —
@@ -159,6 +223,8 @@ public sealed class TransportPriorityTests
     }
 
     // — helpers —
+
+    private static HashSet<string> Handles(params string[] handles) => new(handles);
 
     private static SqliteConnection OpenDb()
     {
