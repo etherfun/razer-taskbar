@@ -1,9 +1,8 @@
 <Page
-    x:Class="RazerTaskbar.Views.HistoryPage"
+    x:Class="RazerTaskbar.Features.ControlPanel.HistoryPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:RazerTaskbar.Views"
-    xmlns:controls="using:RazerTaskbar.Controls"
+    xmlns:local="using:RazerTaskbar.Features.ControlPanel"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -298,7 +297,7 @@
                                       Checked="ShowOff_Changed" Unchecked="ShowOff_Changed" />
                         </Grid>
                     </Grid>
-                    <controls:BatteryChart x:Name="Chart" Grid.Row="1" />
+                    <local:BatteryChart x:Name="Chart" Grid.Row="1" />
                 </Grid>
             </Border>
 

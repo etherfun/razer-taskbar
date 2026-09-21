@@ -6,9 +6,15 @@ Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全�
 - 运行环境：Windows 10 / 11；Razer Synapse 3/4 可选（回退电量源 + 蓝牙身份桥）；.NET 8 SDK 构建，
   Windows App SDK Runtime 缺失时降级为挂件-only（Bootstrap 静默失败，不退出进程）。
 - 构建产物：`dist/razer-taskbar.exe`（`dotnet publish` 直出，无安装程序；运行/自启动只认 dist）。
-- 入口：`src/RazerTaskbar/Program.cs`（单实例检查 → Bootstrap.TryInitialize → 线程划分：主线程 STA
-  跑 WinUI、razer-widget STA 跑挂件/托盘/悬停、razer-watcher 跑日志解析+历史采样、razer-uia-events
-  MTA 跑 UIA 监听；详见 `docs/agent-csharp.md` 线程模型）。
+- 入口：`src/RazerTaskbar/Program.cs`（12 行，全部转交 `Host/AppHost.cs`）。核心宿主做单实例检查 →
+  Bootstrap.TryInitialize → 初始化共享服务 → **挂载功能** → `Application.Start`，并独占退出策略；
+  四个线程按功能划分：主线程 STA（核心 + 控制面板）、razer-widget STA（挂件/托盘/悬停）、razer-watcher
+  （日志解析+历史采样）、razer-uia-events MTA（UIA 监听）。结构与新增功能清单见 `docs/agent-architecture.md`。
+- **进程归核心、表面归功能**：挂件窗口与设置/历史窗口都由功能持有，关掉任何一个都不结束应用
+  （`Host/KeepAliveWindow.cs` 永不显示的 XAML 窗口是 dispatcher 循环的锚 —— 勿删、勿隐藏）。
+  但**默认关闭 = 隐藏**：反复创建/销毁 XAML 树会按树规模泄漏原生内存与句柄（实测 +6 MB/30 句柄每轮，
+  见 `docs/agent-architecture.md`），所以窗口建一次、页面用 `NavigationCacheMode.Required` 缓存；
+  销毁能力保留（`Destroy()` + 自测开关），只在退出时用。
 - 任务栏布局事件驱动（Taskbar-Lyrics 式）：`TaskbarCreated` 广播 + UIA 结构变化事件触发去抖重排，
   1s 定时器兜底；详见 `docs/agent-taskbar.md`。
 
@@ -17,8 +23,10 @@ Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全�
 | 路径 | 说明 |
 |---|---|
 | `src/RazerTaskbar/` | WinUI3 主应用（exe，`WindowsPackageType=None` 框架依赖 unpackaged） |
-| `Program.cs` / `App.xaml(.cs)` | 入口、单实例、Bootstrap 降级、线程划分 |
-| `MainWindow.xaml(.cs)` | NavigationView 主窗口（History/Settings 两页宿主，按需惰性创建） |
+| `Program.cs` / `App.xaml(.cs)` | 入口与 XAML Application 壳（单实例/Bootstrap/线程划分离到 Host/） |
+| `Host/` | **核心宿主**：`AppHost`（启动、功能挂载、退出策略）、`FeatureRegistry`、`IAppFeature`、`UiThread`、`KeepAliveWindow`、`UiSelftest` |
+| `Features/Widget/` `Features/Data/` | 功能：挂件线程（含托盘/悬停/UIA）与数据采集线程的挂载与生命周期 |
+| `Features/ControlPanel/` | 功能：设置/历史窗口（原 `MainWindow` + `Views/` + `Controls/`，关闭即销毁）|
 | `Native/WidgetWindow.cs` | 挂件覆盖层窗口、ULW/D2D 绘制、菜单、事件驱动布局、embed v2、交叉淡化 |
 | `Native/TaskbarLocator.cs` | 任务栏发现、Win10/11 定位、widgets 板 UIA 查询与避让 |
 | `Native/HoverPanel.cs` | 悬停设备列表面板（光标轮询，非交互只读） |
@@ -27,7 +35,6 @@ Rust 原版已从本分支移除（git 历史可考），当前实现即 C# 全�
 | `Native/UiaEvents.cs` + `Native/Interop/Uia.cs` | UIA 结构变化监听（手写 COM interop） |
 | `Native/Interop/Win32.cs` | Win32 P/Invoke 声明集中地 |
 | `Native/AppState.cs` / `SingleInstance.cs` | 配置权威副本（挂件线程写+落盘）/ 单实例守卫 |
-| `Views/HistoryPage` / `Views/SettingsPage` / `Controls/BatteryChart.cs` | 历史/设置页与 WinUI Shapes 图表 |
 | `src/RazerTaskbar.Core/` | 无 UI 类库（exe 与测试共享） |
 | `Core/Hid/`（RazerReport / RazerPidTable / BleBattery / BleVendor） | USB HID 90 字节 vendor report 与 BLE 厂商 GATT 通道 |
 | `Core/Interop/HidApi.cs` | hid.dll P/Invoke |
@@ -78,6 +85,11 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
   私有字节 +0.9 MB/分钟无上限（用户看到的"内存一直涨"），强制回收后堆 8 MB→2 MB 存活且走平。
   新增绘制/轮询代码时避免每帧/每轮分配大数组（>85 KB 即落 LOH，例：墨迹扫描曾每次 `Marshal.Copy`
   一个 294,912 B 数组）；缓存要么有界（`InkCacheMax`），要么键空间固定。
+- 功能生命周期红线：**不要删 `Host/KeepAliveWindow`**（保活窗口 = `Application.Start` 循环的锚，
+  删掉后关闭设置/历史窗口会让整个应用退出，这正是重构前的老毛病）；不要把控制面板改回 hide-on-close；
+  功能线程体必须自带 `try/catch` 并上报 `AppHost.OnFeatureFaulted`（.NET 会因未捕获的线程异常杀进程）；
+  功能不得释放核心服务（如 `HistoryService.Close()` 只允许出现在 `AppHost.Shutdown`）。
+  详见 `docs/agent-architecture.md`。
 - 渲染保真红线：任何模式**不**调 `SetLayeredWindowAttributes` COLORKEY（黑 key 有 AA 暗边）；阴影
   `0x202020` 非纯黑；覆盖层保持 `WS_POPUP`、嵌入保持出生即 `WS_CHILD`，模式切换走销毁重建**永不**
   SetParent（`docs/agent-embed.md`）；z-burst 运行中不重排定时器；空文本 DrawText 短路（`D2d.DrawInkText`/`TextWidth` 内置）；V4 末行损坏
@@ -93,5 +105,6 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
 - 电量历史与预测（采样/切分/三层预测/防伪过滤）：`docs/agent-history.md`
 - HID 直读电量（协议/Windows 坑/探针）：`docs/agent-hid.md`
+- 核心宿主与功能挂载（core/features 结构、窗口生命周期、保活窗口、新增功能清单）：`docs/agent-architecture.md`
 - C# 实现总览（线程模型/模块映射/冒烟记录/已知差异）：`docs/agent-csharp.md`
 - 任务栏真嵌入设计（embed v2/26340 实测机制）：`docs/agent-embed.md`

@@ -163,5 +163,6 @@ does not constitute a challenge to any Razer trademark or copyright. If you
 redistribute the project or prefer to avoid the trademark entirely, delete
 `assets/app.ico` (or replace it with your own) and drop the
 `<ApplicationIcon>` / `AppWindow.SetIcon` references in
-`src/RazerTaskbar/RazerTaskbar.csproj` and `MainWindow.xaml.cs` — the app
+`src/RazerTaskbar/RazerTaskbar.csproj` and
+`src/RazerTaskbar/Features/ControlPanel/ControlPanelWindow.xaml.cs` — the app
 builds and runs fine without it.

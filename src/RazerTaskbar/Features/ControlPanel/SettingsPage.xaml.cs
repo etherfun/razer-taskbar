@@ -10,7 +10,7 @@ using Microsoft.UI.Xaml.Controls;
 using RazerTaskbar.Core;
 using RazerTaskbar.Native;
 
-namespace RazerTaskbar.Views;
+namespace RazerTaskbar.Features.ControlPanel;
 
 public sealed partial class SettingsPage : Page
 {
@@ -30,6 +30,8 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
+        // Same reason as HistoryPage: keep the one tree this window built.
+        NavigationCacheMode = Microsoft.UI.Xaml.Navigation.NavigationCacheMode.Required;
         Localize();
     }
 

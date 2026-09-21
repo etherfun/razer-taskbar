@@ -18,7 +18,7 @@ using RazerTaskbar.Core;
 using Windows.UI;
 using Windows.UI.Text;
 
-namespace RazerTaskbar.Controls;
+namespace RazerTaskbar.Features.ControlPanel;
 
 public sealed class BatteryChart : Canvas
 {

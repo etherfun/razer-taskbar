@@ -117,7 +117,7 @@ explorer 重启（TaskbarCreated）：IsChildOf 失败 → 销毁重建子窗口
 | `Native/WidgetWindow.cs` | 窗口生命周期：`RecreateAsBandChild()/RecreateAsOverlay()` 替代 embed 迁移；`Paint` 按 `st.Embedded` 分叉 `PaintToWindowDc`（GDI 直画，跳过 `AlphaPresent`）；销毁协议 `PrepareSilentExit()`；定时器重挂 |
 | `Native/TaskbarLocator.cs` | 删除 `SetTaskbarChild`（语义被窗口重建替代）；保留/简化 `IsChildOf`（`GetParent(hwnd)==tray`）；保留 `ClientOrigin`、`ReassertChildTop` |
 | `Native/AppState.cs` | `WidgetState` 与 hwnd 解绑项审计（MemDIB 嵌入态可不分配） |
-| `Views/SettingsPage.xaml(.cs)` | 暴露"嵌入任务栏"开关（`embed_into_taskbar` 键已存在，默认 false），标注实验属性 |
+| `Features/ControlPanel/SettingsPage.xaml(.cs)`（当时为 `Views/SettingsPage`） | 暴露"嵌入任务栏"开关（`embed_into_taskbar` 键已存在，默认 false），标注实验属性 |
 | `docs/agent-taskbar.md` | 修正 26340 失效归因（ULW/SetParent 路径失效，非"分层子窗口整体失效"），指向本文档 |
 | `docs/agent-csharp.md` | 冒烟记录追加嵌入态清单 |
 

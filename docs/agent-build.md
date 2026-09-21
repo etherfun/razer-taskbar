@@ -96,15 +96,32 @@ $p.Modules | Sort-Object ModuleMemorySize -Descending | Select-Object -First 12 
   `GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true)` +
   `GC.WaitForPendingFinalizers()` 对比前后——堆大幅回落 = 垃圾，不回落 = 真持有。
   2026-09-21 的内存问题就是这样定位的（堆 8 MB → 2 MB 存活，见 `docs/agent-csharp.md` 内存节）。
-- 基线（2026-09-21，空闲无窗口）：私有 ~93 MB、WS ~126 MB、线程 ~78、句柄 ~950。大头是框架模块
-  （NVIDIA UMD、WindowsAppSDK/XAML、.NET），应用自身数据很小（`_series` 4148 样本 ≈ 97 KB）。
-  打开一次设置/历史窗口另加 ~98 MB / ~956 句柄（XAML 页面树），且按设计常驻。
+- 基线（2026-09-21，空闲无窗口）：私有 ~93-111 MB、WS ~126 MB、线程 ~78、句柄 ~950-1300。大头是框架
+  模块（NVIDIA UMD、WindowsAppSDK/XAML、.NET），应用自身数据很小（`_series` 4148 样本 ≈ 97 KB）。
+- 设置/历史窗口（2026-09-21 实测）：首次打开 **+70 MB / +560 句柄**（111→185 MB、1320→1880），
+  这笔开销是 **WinUI 框架一次性预热 + 页面树**（强制阻塞 GC 只多回收 ~6 MB），进程内拿不回来；
+  第二次打开不再重复付费。**关闭 = 隐藏**（窗口与页面常驻），12 轮开关私有字节/句柄/GDI/USER 全部走平；
+  若改成每次销毁重建，会按 XAML 树规模**泄漏**原生内存与句柄（+6 MB/30 句柄每轮，空 NavigationView
+  也漏），故默认不这么做——数据与红线见 `docs/agent-architecture.md`。
 
 ## 运行与调试
 
 - 无安装程序：拷贝 `dist/` 目录到任意位置运行；设置页 *Run at startup* 写 `HKCU\...\Run\RazerTaskbar`。
 - 单实例：`Native/SingleInstance.cs`（`FindWindowW` + `EnumChildWindows` 兜底）命中则干净退出。
+- **UI 自测开关**（`Host/UiSelftest.cs`，环境变量驱动，不设则完全不开）：
+  | 变量 | 行为 |
+  |---|---|
+  | `RAZER_TASKBAR_OPEN_WINDOW_SECS=N` | N 秒后打开设置窗口（原有，用于"窗口能否打开"冒烟） |
+  | `RAZER_TASKBAR_PANEL_CYCLE_SECS=N` | N 秒后：打开历史窗口 → 关闭（默认隐藏）→ 切到设置页再开 → 关闭，每步打 `heap/private` |
+  | `RAZER_TASKBAR_PANEL_CYCLE_REPEAT=N` | 上面那轮开关重复 N 次（**内存泄漏回归**：私有字节/句柄必须走平） |
+  | `RAZER_TASKBAR_PANEL_DESTROY_CYCLE_SECS=N` | N 秒后：打开 → **真销毁** → 再打开 → 再销毁（结构保证：销毁窗口不结束进程） |
+  | `RAZER_TASKBAR_EXIT_AFTER_SECS=N` | N 秒后走托盘 Exit 同一链路退出（`AppState.PostExit()`），验证功能逆序卸载 |
+  开关按 **OPEN → CYCLE → DESTROY_CYCLE → EXIT 的顺序串行延时**（同时设多个时后一个从前一个结束算起）。
+  判定"销毁窗口不退出"：日志出现 `control-panel: window destroyed` 之后仍有 `placement`/`hid poll` 行、
+  且**没有** `core: exit requested`，进程继续存在。判定"无泄漏"：`PANEL_CYCLE_REPEAT=12` 跑完，
+  私有字节与句柄走平（实测 181-186 MB / 1835-1864 句柄）。机制与数据见 `docs/agent-architecture.md`。
 - 日志：`Core/Services/Log.cs` 落 `%APPDATA%\razer-taskbar\csharp-debug.log` 并镜像 stderr（终端启动可见）：
+  - `feature <name>: mounted` / `core: exit requested (<reason>)` / `core: features unmounted`：功能挂载与退出。
   - `first paint: device=…`：绘制链路存活。
   - `UIA structure listener registered`：UIA 监听就绪。
   - `overlay kind=… pos=(…) size=… embed=…`：定位结果。

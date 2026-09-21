@@ -144,6 +144,11 @@ public sealed class RazerWatcher
 
     private readonly DeviceStore _devices;
     private readonly HidWatcher _hid = new();
+    /// <summary>Cooperative stop (feature unmount): the tick loop is an
+    /// infinite wait, so the stop request also releases the wait handle the
+    /// loop is parked on instead of leaving the shutdown thread to time out.</summary>
+    private volatile bool _stopping;
+    private volatile SemaphoreSlim? _wake;
     /// <summary>Devices the HID round wrote last time. A device in here that
     /// does not answer this round read failed rather than went away, and
     /// re-runs the chain once (see PollHidWithRetry).</summary>
@@ -499,6 +504,21 @@ public sealed class RazerWatcher
     internal static bool NeedsWholeFile(Dictionary<string, string> tailNames, string? requiredSerial)
         => requiredSerial is { Length: > 0 } && !tailNames.ContainsKey(requiredSerial);
 
+    /// <summary>Ask the loop to wind down (idempotent, callable from any
+    /// thread). Wakes the parked tick so the thread exits promptly.</summary>
+    public void RequestStop()
+    {
+        _stopping = true;
+        try
+        {
+            _wake?.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // already signalled — the loop is on its way out
+        }
+    }
+
     public void Run(int initialPollSeconds)
     {
         try
@@ -529,6 +549,7 @@ public sealed class RazerWatcher
         long? dirtyAt = null;
 
         var signal = new SemaphoreSlim(0, int.MaxValue);
+        _wake = signal;
         var watchers = new List<FileSystemWatcher>();
         void Watch(FileSystemWatcher w)
         {
@@ -557,7 +578,7 @@ public sealed class RazerWatcher
         // Parse when either comes due: a filesystem event (coalesced for
         // EventDebounce) or the fallback poll interval. History sampling rides
         // on every parse either way.
-        while (true)
+        while (!_stopping)
         {
             try
             {
@@ -574,10 +595,16 @@ public sealed class RazerWatcher
                 Thread.Sleep(1000);
             }
         }
+        _wake = null;
+        Log.Info("watcher: stopped");
     }
 
     private void Tick(SemaphoreSlim signal, ref long intervalMs, ref long lastParse, ref long? dirtyAt)
     {
+        if (_stopping)
+        {
+            return; // the stop release woke us; don't parse on the way out
+        }
         long now = Environment.TickCount64;
         long pollDue = lastParse + intervalMs;
         long due = dirtyAt is { } t ? Math.Min(t + (long)EventDebounce.TotalMilliseconds, pollDue) : pollDue;

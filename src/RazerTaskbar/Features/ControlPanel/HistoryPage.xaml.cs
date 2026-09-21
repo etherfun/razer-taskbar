@@ -7,8 +7,9 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using RazerTaskbar.Core;
+using RazerTaskbar.Host;
 
-namespace RazerTaskbar.Views;
+namespace RazerTaskbar.Features.ControlPanel;
 
 /// <summary>One list row (viewer.rs ListItem).</summary>
 public sealed class CycleItem
@@ -59,6 +60,11 @@ public sealed partial class HistoryPage : Page
     public HistoryPage()
     {
         InitializeComponent();
+        // One tree per window, reused across tab switches: creating XAML trees
+        // repeatedly leaks native memory/handles in WinUI3 (measured; see
+        // docs/agent-architecture.md). Loaded still fires on every re-entry,
+        // so the data reload path is unchanged.
+        NavigationCacheMode = Microsoft.UI.Xaml.Navigation.NavigationCacheMode.Required;
         // Wire the bottom bar's adaptive one-line/stacked switch in code: the
         // XAML compiler chokes (WMC9999) on SizeChanged attributes for it.
         BottomBar.SizeChanged += BottomBar_SizeChanged;
@@ -194,7 +200,7 @@ public sealed partial class HistoryPage : Page
             // Desktop (unpackaged) apps must associate pickers with an owner
             // HWND: WindowNative.GetWindowHandle + InitializeWithWindow.
             var picker = new Windows.Storage.Pickers.FileSavePicker();
-            if (!App.TryGetMainWindowHandle(out var hwnd))
+            if (!AppHost.TryGetControlPanelHandle(out var hwnd))
             {
                 return;
             }
@@ -459,7 +465,7 @@ public sealed partial class HistoryPage : Page
             items.Add((s.EndTs, new CycleItem
             {
                 Charge = false,
-                Start = $"{Controls.BatteryChart.FormatStamp(s.StartTs)} → {Controls.BatteryChart.FormatStamp(s.EndTs)}",
+                Start = $"{BatteryChart.FormatStamp(s.StartTs)} → {BatteryChart.FormatStamp(s.EndTs)}",
                 Dur = HistoryService.FormatDuration(s.ActiveSecs),
                 Levels = $"{s.LevelStart}→{s.LevelEnd}%",
             }));
@@ -469,7 +475,7 @@ public sealed partial class HistoryPage : Page
             items.Add((s.EndTs, new CycleItem
             {
                 Charge = true,
-                Start = $"{Controls.BatteryChart.FormatStamp(s.StartTs)} → {Controls.BatteryChart.FormatStamp(s.EndTs)}",
+                Start = $"{BatteryChart.FormatStamp(s.StartTs)} → {BatteryChart.FormatStamp(s.EndTs)}",
                 Dur = HistoryService.FormatDuration(s.ActiveSecs),
                 Levels = $"{s.LevelStart}→{s.LevelEnd}%",
             }));

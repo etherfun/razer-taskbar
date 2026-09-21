@@ -23,22 +23,27 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 
 ## 线程模型(对应 Rust 三线程 + UIA 线程)
 
+每个线程都由一个"功能"（`Features/`）持有，进程本身归核心宿主（`Host/AppHost.cs`）——见
+`docs/agent-architecture.md`：**进程归核心、表面归功能**，关掉设置/历史窗口不再结束应用。
+
 | 线程 | 职责 |
 |---|---|
-| 主线程 (STA) | WinUI3 `Application.Start`;MainWindow(NavigationView)按需惰性创建,空闲时不加载 XAML |
+| 主线程 (STA) | WinUI3 `Application.Start`;保活窗口(`Host/KeepAliveWindow.cs`)锚住循环;控制面板窗口按需惰性创建、关闭即销毁 |
 | razer-widget (STA) | 挂件覆盖层 + 悬停面板 + 托盘 + 菜单 + 4 定时器 + GetMessage 循环 |
 | razer-watcher | 日志解析 + 历史采样(设置每轮重读,即时生效契约不变) |
 | razer-uia-events (MTA) | UIA 结构变化监听,回调仅 PostMessage(WM_APP+2);TaskbarCreated 重绑 + 30s 自检 |
 
 跨线程:UI → 挂件线程用 `WidgetThread.Post`(WM_APP+3 + GCHandle 闭包);挂件 → UI 用
-`DispatcherQueue.TryEnqueue`。配置权威副本在 `AppState`(挂件线程写 + 落盘;UI 经 Post 修改)。
+`Host/UiThread.Post`(已在 UI 线程时内联执行)。配置权威副本在 `AppState`(挂件线程写 + 落盘;UI 经 Post 修改)。
 
 ## 模块映射
 
 | Rust | C# | 说明 |
 |---|---|---|
-| main.rs | Program.cs + App.xaml.cs | 单实例 FindWindow + EnumChildWindows 兜底;Bootstrap 降级 |
-| window.rs | Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画)、show_widget 门控(2026-09-09:`SetWidgetEnabled` 只销毁/重建显示窗口,锚窗口/定时器/UIA/托盘常驻,`TrayHostHwnd()` 在挂件关闭时让锚窗口承载托盘回调,`PlaceWidgetCore` 对 !WidgetOn 短路防 1s 轮询/UIA 复活窗口) |
+| main.rs | Host/AppHost.cs + Program.cs + App.xaml.cs | 单实例 FindWindow + EnumChildWindows 兜底;Bootstrap 降级;功能挂载与退出策略(2026-09-21 拆分,见 agent-architecture.md) |
+| (新增) | Host/IAppFeature.cs + FeatureRegistry.cs + UiThread.cs + KeepAliveWindow.cs | 功能契约/挂载表/UI 线程投递/保活窗口 |
+| (新增) | Features/Widget、Features/Data、Features/ControlPanel | 三个功能:挂件线程、数据采集线程、设置/历史窗口(各自持有生命周期) |
+| window.rs | Features/Widget/WidgetFeature.cs → Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画)、show_widget 门控(2026-09-09:`SetWidgetEnabled` 只销毁/重建显示窗口,锚窗口/定时器/UIA/托盘常驻,`TrayHostHwnd()` 在挂件关闭时让锚窗口承载托盘回调,`PlaceWidgetCore` 对 !WidgetOn 短路防 1s 轮询/UIA 复活窗口) |
 | taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
 | hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
 | tray.rs | Native/TrayIcon.cs | legacy 回调(2026-09-09 移除 VERSION_4:V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,与 WM_TRAY 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘右键/双击一并失效)、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
@@ -50,8 +55,8 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 | history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页)+ ReboundFilter 弛豫回弹剔除(读路径包络,见"已知差异") |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
 | i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |
-| viewer.rs | MainWindow + Views/HistoryPage + Controls/BatteryChart | NavigationView 合并窗口;图表 = WinUI Shapes(网格/色带/面积/分段折线/换电点/5 刻度) |
-| settings.rs | Views/SettingsPage | Win11 设置规范行布局;即时生效经 Post 回投挂件线程 |
+| viewer.rs | Features/ControlPanel/ControlPanelWindow + HistoryPage + BatteryChart | NavigationView 合并窗口;图表 = WinUI Shapes(网格/色带/面积/分段折线/换电点/5 刻度);窗口关闭即销毁、下次打开重建 |
+| settings.rs | Features/ControlPanel/SettingsPage | Win11 设置规范行布局;即时生效经 Post 回投挂件线程 |
 
 ## 冒烟验证记录(2026-09-06,Win11 26340)
 
@@ -182,7 +187,7 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 - C# 版空闲内存约 100MB+ 量级(Rust 约 30MB):.NET 运行时 + WinUI 投影程序集;
   窗口惰性创建使 XAML 在首次打开前不加载。
 - 启动竞态三处已按 Rust 语义处理:WndProc 在 `_state` 赋值前到达(WM_NCCREATE)→ DefWindowProc;
-  `App.RequestExit` 在 Application.Start 构造 App 前到达 → Environment.Exit;
+  `AppHost.RequestExit` 在 Application.Start 构造 App 前到达 → Environment.Exit;
   UIA 线程 CoInitializeEx S_FALSE → 视为成功。
 - 移植保真关键点(勿"顺手改"):任何模式都**不**调用 SLWA COLORKEY(黑 key 有 AA 暗边,
   用户实报"字体劣化";嵌入与覆盖层共用 ULW 管线,嵌入靠 `AlphaPresent` 末尾的
@@ -278,9 +283,12 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   GDI 泄漏；形态为锯齿——HID 轮询阶段 +5 后又释放，净值上漂）。18k/天远低于进程上限，内核池约
   2-4 MB/天，不是 143 MB 的成因。定位受限于：进程级 `HandleCount` 无法区分线程，且本机无
   handle.exe/ProcMon/`dotnet-counters`（安装需联网）。
-- **主窗口内存（2026-09-21 实测）**：首次打开窗口（`creating MainWindow (first open)`）一次性
-  +98 MB 私有字节 / +956 句柄（XAML 页面树 + WinUI 框架），此后驻留。这是**有意设计**：
-  `MainWindow` 的 `Closing` 只 `Hide()`——注释写明销毁唯一的 XAML 窗口会结束 dispatcher 循环、
-  `Application.Start` 返回、进程连同挂件线程一起退出。窗口是惰性创建的，所以不开窗口不付这 98 MB。
-  若要把这笔内存还回去，需要保留一个隐藏的"dispatcher 保活窗口"再销毁 MainWindow——属于结构性改动，
-  未做。
+- **设置/历史窗口的内存（2026-09-21 实测，同日完成结构重构）**：空闲 111 MB / 1320 句柄 → 首次打开
+  `185 MB / 1880` → 关闭后 177 MB（销毁归还 ~9 MB）。那笔 ~70 MB 是 **WinUI 框架一次性预热 + 页面树**，
+  进程内无法归还（强制阻塞 GC 只多回收 ~6 MB），旧文档"留个保活窗口就能把 98 MB 还回去"的假设不成立。
+  重构的部分：窗口由 `Features/ControlPanel/ControlPanelFeature` 持有、`Host/KeepAliveWindow`（永不显示的
+  XAML 窗口）锚住 dispatcher，因此**销毁窗口不再结束进程**（旧注释所述限制解除，`Destroy()` + 自测开关覆盖）。
+  但默认关闭行为是**隐藏**而非销毁：逐层实测表明反复创建/销毁 XAML 树会按树规模泄漏原生内存与句柄
+  （裸窗口不漏；+空 Grid 基本不漏；+NavigationView 漏 +19 句柄/轮；+HistoryPage 漏 +77 句柄/轮；
+  去掉 acrylic 同样漏），换 `GC.Collect(Forced)` 后托管堆每轮回到 1.9 MB、原生侧仍留 ~6 MB/轮。
+  隐藏式 12 轮开关私有字节/句柄/GDI/USER 全部走平。数据、红线与验收步骤见 `docs/agent-architecture.md`。

@@ -11,6 +11,10 @@
 - 文件头 `//` 注释说明职责与移植来源（TrafficMonitor / TS 上游 / OpenRazer 移植需注明）。
 - 错误处理：缺日志/缺窗口/解析失败一律静默返回 + 诊断点 `Log`；消息循环与原生回调内（WndProc、ULW、
   UIA/WinRT 回调、托盘回调）禁止未捕获异常。
+- 分层：`Host/` 是核心（进程、共享服务、退出策略），`Features/` 是功能（线程、窗口）。功能线程体必须
+  自带 `try/catch` 并上报 `AppHost.OnFeatureFaulted`；功能不得释放核心服务；UI 表面（挂件窗/设置窗）
+  的隐藏/销毁都不得结束进程。UI 表面遵循"建一次、别再拆"：关闭走隐藏、页面 `NavigationCacheMode.Required`
+  （重复创建/销毁 XAML 树会泄漏原生内存，实测见 `docs/agent-architecture.md`）。
 - 新增配置字段必须在 `ConfigService` 带默认值，保证旧 settings.json 可加载。
 - 测试在 `tests/RazerTaskbar.Tests`（xUnit）；禁止新增 PNG/图片资源（原生绘制是硬性约束；
   `assets/app.ico` 由 `assets/make_icon.py` 生成，属唯一既有资产）。

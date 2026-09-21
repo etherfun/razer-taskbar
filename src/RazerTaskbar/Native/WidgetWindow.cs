@@ -26,6 +26,8 @@
 
 using System.Diagnostics;
 using RazerTaskbar.Core;
+using RazerTaskbar.Features.ControlPanel;
+using RazerTaskbar.Host;
 using static RazerTaskbar.Native.Interop.Gdi32;
 using RazerTaskbar.Native.Interop;
 using static RazerTaskbar.Native.Interop.User32;
@@ -219,7 +221,7 @@ public static class WidgetWindow
         if (tray == 0)
         {
             Log.Info("razer-taskbar: Shell_TrayWnd not found");
-            App.RequestExit();
+            AppHost.RequestExit("widget: no Shell_TrayWnd");
             return;
         }
         st.Tray = tray;
@@ -252,7 +254,7 @@ public static class WidgetWindow
         if (st.MsgHwnd == 0)
         {
             Log.Error($"razer-taskbar: anchor CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
-            App.RequestExit();
+            AppHost.RequestExit("widget: anchor window");
             return;
         }
 
@@ -272,7 +274,7 @@ public static class WidgetWindow
             if (hwnd == 0)
             {
                 Log.Error($"razer-taskbar: CreateWindowExW failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
-                App.RequestExit();
+                AppHost.RequestExit("widget: display window");
                 return;
             }
             st.Hwnd = hwnd;
@@ -812,9 +814,11 @@ public static class WidgetWindow
                 HoverPanel.Destroy();
                 TrayIcon.Destroy();
                 DestroyMemSurface(st);
-                HistoryService.Close();
                 PostQuitMessage(0);
-                App.RequestExit();
+                // Core-owned services (the history DB) are closed by the host
+                // once every feature is unmounted — a feature must not free
+                // state another feature still reads.
+                AppHost.RequestExit("widget: anchor destroyed");
                 return 0;
             }
             if (hwnd == st.Hwnd && st.Teardown)
@@ -824,9 +828,8 @@ public static class WidgetWindow
                 HoverPanel.Destroy();
                 TrayIcon.Destroy();
                 DestroyMemSurface(st);
-                HistoryService.Close();
                 PostQuitMessage(0);
-                App.RequestExit();
+                AppHost.RequestExit("widget: exit command");
                 return 0;
             }
             // Display window destroyed by a recreate (embed switch / band
@@ -851,7 +854,7 @@ public static class WidgetWindow
             }
             else if (evt == WM_LBUTTONDBLCLK)
             {
-                App.ShowMainWindow(selectSettings: false);
+                AppHost.ShowControlPanel(ControlPanelPage.History);
             }
             return 0;
         }
@@ -1600,7 +1603,7 @@ public static class WidgetWindow
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, null);
 
-        uint uiFlags = App.XamlAvailable ? MF_STRING : MF_STRING | MF_GRAYED;
+        uint uiFlags = AppHost.XamlAvailable ? MF_STRING : MF_STRING | MF_GRAYED;
         AppendItem(menu, uiFlags, IdSettings, "Settings");
         AppendItem(menu, uiFlags, IdHistoryView, "Battery history");
         AppendMenuW(menu, MF_SEPARATOR, 0, null);
@@ -1630,10 +1633,10 @@ public static class WidgetWindow
                 DestroyWindow(hwnd);
                 break;
             case IdSettings:
-                App.ShowMainWindow(selectSettings: true);
+                AppHost.ShowControlPanel(ControlPanelPage.Settings);
                 break;
             case IdHistoryView:
-                App.ShowMainWindow(selectSettings: false);
+                AppHost.ShowControlPanel(ControlPanelPage.History);
                 break;
             default:
                 if (id >= IdDeviceBase)
