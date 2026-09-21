@@ -159,7 +159,7 @@ public sealed class HidWatcher
                         var serial = identity?.Serial ?? $"BLE:{mac:X12}";
                         var name = identity is { Name.Length: > 0 } ? identity.Name
                             : (power.Name.Length > 0 ? power.Name : null)
-                            ?? "Razer Keyboard";
+                            ?? KeyboardFallbackName;
                         readings.Add(new HidDeviceReading(group.Key, "", serial,
                             power.RawBattery, BleVendor.BatteryPercent(power.RawBattery),
                             power.Charging, name,
@@ -180,7 +180,7 @@ public sealed class HidWatcher
                         var name = identity is { Name.Length: > 0 } ? identity.Name
                             : (ble.Serial is { } s ? HarvestedName(s) : null)
                             ?? (ble.Name.Length > 0 ? ble.Name : null)
-                            ?? "Razer Keyboard";
+                            ?? KeyboardFallbackName;
                         readings.Add(new HidDeviceReading(group.Key, "", serial,
                             ble.Percent, ble.Percent, identity?.Charging, name,
                             DeviceClassifier.FromCategoryAndName(identity?.Category ?? "", name),
@@ -747,6 +747,12 @@ public sealed class HidWatcher
     private Dictionary<string, string> _harvestedNames = new();
     private long _harvestAtMs = -1;
     private const int HarvestRetryMs = 10 * 60 * 1000;
+    /// <summary>Stand-in label for a combo dongle's keyboard slot when no real
+    /// model name is known — the vendor protocol has no name query and the USB
+    /// product string names the dongle's primary (mouse) device. It is a
+    /// placeholder, not a name: it must never be taken for a harvested one
+    /// (see HarvestedName).</summary>
+    private const string KeyboardFallbackName = "Razer Keyboard";
 
     private List<HidDeviceReading> ExchangeSlots(HidSession session, int pid)
     {
@@ -796,7 +802,7 @@ public sealed class HidWatcher
                 // Combo dongle: the USB product string names the mouse, and
                 // the vendor protocol has no name query — use the real model
                 // name harvested from the Synapse log when one exists.
-                nameOverride = HarvestedName(serial) ?? "Razer Keyboard";
+                nameOverride = HarvestedName(serial) ?? KeyboardFallbackName;
             }
             var reading = new HidDeviceReading(pid, product, serial, levelRaw,
                 RazerReport.LevelPercent(levelRaw, slot.Scale), charging, nameOverride, kindOverride,
@@ -821,13 +827,28 @@ public sealed class HidWatcher
         {
             return name;
         }
+        // A name learned on an earlier run is as good as one the log has right
+        // now and costs nothing: the history store keeps one per device handle,
+        // and this slot's handle IS its serial. The placeholder is not a name —
+        // accepting it here would mask the real one for good.
+        if (HistoryService.SavedName(serial) is { Length: > 0 } saved && saved != KeyboardFallbackName)
+        {
+            _harvestedNames[serial] = saved;
+            return saved;
+        }
         long now = Environment.TickCount64;
         if (_harvestAtMs < 0 || now - _harvestAtMs > HarvestRetryMs)
         {
             _harvestAtMs = now;
             try
             {
-                _harvestedNames = RazerWatcher.HarvestSerialNames();
+                // Merge, never replace: the log answers for the serial we asked
+                // about, and a later read must not drop what an earlier one
+                // learned about another slot.
+                foreach (var (s, n) in RazerWatcher.HarvestSerialNames(serial))
+                {
+                    _harvestedNames[s] = n;
+                }
             }
             catch (Exception e)
             {

@@ -163,6 +163,15 @@ public sealed class RazerWatcher
     /// <summary>Handles the V4 source has written (drives the disconnect
     /// rule: a handle missing from the latest snapshot reads offline).</summary>
     private readonly HashSet<string> _v4Known = new();
+    /// <summary>Bytes read from the end of the newest V4 log wherever only the
+    /// newest snapshots matter: the incremental parse's first pass (startup, or
+    /// a rotation onto a new file), the BLE identity heartbeat and the
+    /// serial→name harvest. Synapse's heartbeat lists every paired device and
+    /// is written about once a minute, so the tail carries the current state of
+    /// all of them — while a whole-file read costs 4-5 MB per read (measured
+    /// 3,988,907 B on a live 4.0 MB file, which is what a Task Manager
+    /// "0.1 MB/s" reading was made of).</summary>
+    private const int V4TailBytes = 256 * 1024;
 
     public RazerWatcher(DeviceStore devices)
     {
@@ -295,7 +304,7 @@ public sealed class RazerWatcher
         {
             return new List<BleIdentity>();
         }
-        var tail = ReadTail(path, 256 * 1024);
+        var tail = ReadTail(path, V4TailBytes);
         if (tail is null)
         {
             return new List<BleIdentity>();
@@ -454,17 +463,41 @@ public sealed class RazerWatcher
     }
 
     /// <summary>Harvest from the latest V4 log on disk (Synapse must have run
-    /// once — the log persists after it exits). Best effort.</summary>
-    public static Dictionary<string, string> HarvestSerialNames()
+    /// once — the log persists after it exits). The tail answers for devices
+    /// the newest snapshots mention, which is the usual case — but the mapping
+    /// is a historical fact, not a current one: a keyboard asleep for an hour
+    /// keeps its name only in an older line (measured live: the mapping sat
+    /// 475 KB from the end of a 4.0 MB file, and a fixed 256 KB window
+    /// silently downgraded the device to the "Razer Keyboard" placeholder).
+    /// So when the caller needs a specific serial and the tail does not carry
+    /// it, the whole file is read: the tail is a fast path, not a bound.
+    /// A first line cut mid-way cannot inject a bogus entry — the regex needs
+    /// the full `connectingDeviceData: ` prefix and valid JSON after it, so a
+    /// fragment either misses or fails to deserialize. Best effort.</summary>
+    public static Dictionary<string, string> HarvestSerialNames(string? requiredSerial = null)
     {
         var path = V4LogDir() is { } dir ? LatestV4Log(dir) : null;
         if (path is null)
         {
             return new Dictionary<string, string>();
         }
-        var text = ReadShared(path);
-        return text is null ? new Dictionary<string, string>() : ParseSerialNames(text);
+        var tail = ReadTail(path, V4TailBytes);
+        var names = tail is null ? new Dictionary<string, string>() : ParseSerialNames(tail);
+        if (NeedsWholeFile(names, requiredSerial))
+        {
+            var whole = ReadShared(path);
+            if (whole is not null)
+            {
+                return ParseSerialNames(whole);
+            }
+        }
+        return names;
     }
+
+    /// <summary>True when the tail's mappings cannot answer for
+    /// `requiredSerial`, so the whole file has to be read after all.</summary>
+    internal static bool NeedsWholeFile(Dictionary<string, string> tailNames, string? requiredSerial)
+        => requiredSerial is { Length: > 0 } && !tailNames.ContainsKey(requiredSerial);
 
     public void Run(int initialPollSeconds)
     {
@@ -768,6 +801,37 @@ public sealed class RazerWatcher
         return result;
     }
 
+    /// <summary>Fold a freshly read slice onto the pending bytes and split out
+    /// the complete lines: the text to parse (whole lines only) and the
+    /// trailing fragment to carry into the next pass. `startsMidLine` marks a
+    /// slice that begins in the middle of a line (a tail read), whose leading
+    /// fragment is dropped instead of parsed — a cut inside a JSON array can
+    /// leave text that looks like a bracketed log line. Internal for tests.</summary>
+    internal static (string Text, byte[] Pending) V4CompleteLines(
+        byte[] pending, byte[] slice, bool startsMidLine)
+    {
+        var buf = new byte[pending.Length + slice.Length];
+        pending.CopyTo(buf, 0);
+        slice.CopyTo(buf, pending.Length);
+        int lastNl = Array.LastIndexOf(buf, (byte)'\n');
+        if (lastNl < 0)
+        {
+            return ("", buf); // no complete line yet: all of it stays pending
+        }
+        // Only the first slice after a fresh open can begin mid-line: pending
+        // bytes always start at a line start. lastNl ≥ 0 guarantees the
+        // leading newline exists, so `from` lands past it.
+        int from = startsMidLine && pending.Length == 0
+            ? Array.IndexOf(buf, (byte)'\n') + 1
+            : 0;
+        if (from > lastNl)
+        {
+            return ("", buf[from..]); // the fragment's own line is still partial
+        }
+        return (System.Text.Encoding.UTF8.GetString(buf, from, lastNl + 1 - from),
+            buf[(lastNl + 1)..]);
+    }
+
     private void ParseV4(Config cfg, IReadOnlySet<string>? covered = null)
     {
         var dir = V4LogDir();
@@ -792,7 +856,8 @@ public sealed class RazerWatcher
         bool fresh = path != _v4Path || length < _v4Offset;
         if (fresh)
         {
-            // Rotated to a new file (or truncated): replay from the start.
+            // Rotated to a new file (or truncated): start over on it. The
+            // first pass reads its TAIL, not the whole file — see below.
             _v4Path = path;
             _v4Offset = 0;
             _v4Pending = Array.Empty<byte>();
@@ -807,36 +872,27 @@ public sealed class RazerWatcher
         // pending buffer until its rest arrives (the old full replay simply
         // re-read the file until the line completed). Bytes, not text — a
         // UTF-8 character must not be split at the slice boundary.
-        byte[] slice;
-        if (_v4Offset == 0)
+        // First pass on a file reads its tail rather than the whole file: the
+        // parse needs only the newest lines (connection comes from the LAST
+        // snapshot alone, and the batch is last-write-wins per handle), while
+        // a whole-file read costs 4-5 MB on every launch — measured on a live
+        // 4.0 MB file: one 3,988,907 B read, which is what a Task Manager
+        // "0.1 MB/s" reading was made of. Same window HarvestBleIdentities
+        // reads for the newest heartbeat.
+        bool tailRead = _v4Offset == 0;
+        long from = tailRead ? Math.Max(0, length - V4TailBytes) : _v4Offset;
+        var slice = ReadSliceBytes(path, from, length - from);
+        if (slice is null)
         {
-            var whole = ReadShared(path);
-            if (whole is null)
-            {
-                return;
-            }
-            slice = System.Text.Encoding.UTF8.GetBytes(whole);
-        }
-        else
-        {
-            slice = ReadSliceBytes(path, _v4Offset, length - _v4Offset);
-            if (slice is null)
-            {
-                return; // read failed: retry the same region on the next pass
-            }
+            return; // read failed: retry the same region on the next pass
         }
         _v4Offset = length;
-        var buf = new byte[_v4Pending.Length + slice.Length];
-        _v4Pending.CopyTo(buf, 0);
-        slice.CopyTo(buf, _v4Pending.Length);
-        int lastNl = Array.LastIndexOf(buf, (byte)'\n');
-        if (lastNl < 0)
+        var (text, pending) = V4CompleteLines(_v4Pending, slice, startsMidLine: tailRead && from > 0);
+        _v4Pending = pending;
+        if (text.Length == 0)
         {
-            _v4Pending = buf;
             return;
         }
-        _v4Pending = buf[(lastNl + 1)..];
-        var text = System.Text.Encoding.UTF8.GetString(buf, 0, lastNl + 1);
 
         // Snapshot lines in the newly read region, oldest first (the batch
         // replays like the whole-file replay did, just smaller).

@@ -780,6 +780,17 @@ public static class HistoryService
         }
     }
 
+    /// <summary>Device name persisted in battery.db for `handle` — null when
+    /// the device has no stored row yet. The HID source reads it to name a
+    /// combo dongle's keyboard slot without re-reading the Synapse log.</summary>
+    public static string? SavedName(string handle)
+    {
+        lock (Sync)
+        {
+            return _names.TryGetValue(handle, out var n) ? n : null;
+        }
+    }
+
     /// <summary>Raw samples for the history page chart/list (short blocking query, WAL read).</summary>
     public static List<Sample> SamplesInRange(string handle, long sinceTs)
     {

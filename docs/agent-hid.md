@@ -62,9 +62,12 @@ get 半区的 0x00/0xC1、0xC2、0xC6 是配对命令的未文档化镜像，实
   单槽设备（有线 Joro 0x02CD 等）不受影响，仍是裸 `HID:{pid}`。
 - 键盘槽的显示名：产品字符串是鼠标名，且**厂商协议没有名称命令**（INFO 类 0x00 实测只有
   0x81 固件 / 0x82 串号 / 0x84 模式；OpenRazer 的设备名也是内核驱动按 PID 硬编码的
-  `device_type` switch，daemon 只读 sysfs）。名称来源：优先从 Synapse V4 日志收割
-  `serialNumber → name.en`（`WatcherService.HarvestSerialNames`，Synapse 曾运行过即可，
-  10 分钟重试一次），兜底 "Razer Keyboard"；Kind=Keyboard 由槽位角色保证。
+  `device_type` switch，daemon 只读 sysfs）。名称来源（2026-09-21 起按此顺序）：
+  ① 进程内收割缓存；② **历史库已持久化的设备名**（`HistoryService.SavedName`，handle 即串号，
+  零日志读；占位名 `Razer Keyboard` 不算名字，会被拒绝以免把真名永久盖住）；
+  ③ `WatcherService.HarvestSerialNames(serial)` —— 读 V4 日志末尾 256 KiB，该串号不在尾部就
+  回退整文件读（名字是历史事实，尾部只是快路径）。Synapse 曾运行过即可，10 分钟重试一次；
+  兜底 "Razer Keyboard"；Kind=Keyboard 由槽位角色保证。
   键盘自有 dongle（产品名即键盘名）保留产品名；Joro 有线见下节。
 
 ## 有线（线缆）模式（2026-09-07 真机实测，Razer Joro）

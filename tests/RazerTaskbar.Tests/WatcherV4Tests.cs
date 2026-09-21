@@ -203,4 +203,68 @@ public sealed class WatcherV4Tests
             conn, new HashSet<string>(), "", known);
         Assert.False(store.Snapshot().ContainsKey("NOSERIALNUMBER"));
     }
+
+    // — incremental slice assembly (V4CompleteLines) —
+
+    private static byte[] B(string s) => System.Text.Encoding.UTF8.GetBytes(s);
+
+    [Fact]
+    public void CompleteLinesCarryTheTrailingFragment()
+    {
+        // The steady-state append: whole lines parse, the line caught mid-write
+        // waits for its rest.
+        var (text, pending) = RazerWatcher.V4CompleteLines(B("line1\n"), B("line2\nline3"), false);
+        Assert.Equal("line1\nline2\n", text);
+        Assert.Equal("line3", System.Text.Encoding.UTF8.GetString(pending));
+
+        // Nothing terminated yet: everything stays pending.
+        var (none, all) = RazerWatcher.V4CompleteLines(B("part"), B("ial"), false);
+        Assert.Equal("", none);
+        Assert.Equal("partial", System.Text.Encoding.UTF8.GetString(all));
+    }
+
+    [Fact]
+    public void TailReadDropsTheLeadingFragment()
+    {
+        // A tail read starts mid-line. The fragment must not reach the parser:
+        // a cut inside a JSON array can leave text that matches the snapshot
+        // regex, and a bogus timestamp/handle would be replayed as a snapshot.
+        var slice = B("SER\":\"X\"}]\n[09:00:00] connectingDeviceData: [{\"a\":1}]\n[09:01:00] connectingDeviceData: [{\"b\":2}]");
+        var (text, pending) = RazerWatcher.V4CompleteLines(Array.Empty<byte>(), slice, startsMidLine: true);
+        Assert.Equal("[09:00:00] connectingDeviceData: [{\"a\":1}]\n", text);
+        Assert.Equal("[09:01:00] connectingDeviceData: [{\"b\":2}]",
+            System.Text.Encoding.UTF8.GetString(pending));
+
+        // The same slice read from a line boundary keeps its first line — the
+        // incremental path must not drop anything.
+        var (whole, _) = RazerWatcher.V4CompleteLines(Array.Empty<byte>(), slice, startsMidLine: false);
+        Assert.StartsWith("SER\":\"X\"}]", whole);
+    }
+
+    [Fact]
+    public void TailReadWithASingleLineKeepsItPending()
+    {
+        // The window landed inside one line: the fragment is dropped, the
+        // partial line is carried, and nothing is parsed yet.
+        var (text, pending) = RazerWatcher.V4CompleteLines(
+            Array.Empty<byte>(), B("fragment\npartial"), startsMidLine: true);
+        Assert.Equal("", text);
+        Assert.Equal("partial", System.Text.Encoding.UTF8.GetString(pending));
+    }
+
+    [Fact]
+    public void HarvestFallsBackToTheWholeFileOnlyForAMissingSerial()
+    {
+        // The tail is a fast path, not a bound: the serial→name mapping is a
+        // historical fact, so a serial the newest snapshots no longer mention
+        // (live: a keyboard asleep for an hour, its mapping 475 KB from the end
+        // of a 4.0 MB file) must still send the harvest back over the whole
+        // file — otherwise the slot silently falls back to "Razer Keyboard".
+        var tail = new Dictionary<string, string> { ["SI2522F18701637"] = "Razer Joro" };
+        Assert.False(RazerWatcher.NeedsWholeFile(tail, "SI2522F18701637"));
+        Assert.True(RazerWatcher.NeedsWholeFile(tail, "632516H31000044"));
+        // No serial asked for (or none known): the tail's answer stands.
+        Assert.False(RazerWatcher.NeedsWholeFile(tail, null));
+        Assert.False(RazerWatcher.NeedsWholeFile(tail, ""));
+    }
 }
