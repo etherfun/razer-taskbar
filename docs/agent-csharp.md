@@ -258,3 +258,28 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
   报告"更新时闪一下")。修复:`Paint` 内量得尺寸变化就地按新尺寸重渲染 → `PlaceWidgetCore`
   立即应用几何 → `AlphaPresent`,DWM 只可能合成最终帧;启动不再有 144→42→71→89 的多级 churn
   (首帧直接落最终尺寸)。红线已记入 AGENTS.md"尺寸与帧同一次 Paint 提交"。
+- **内存节奏：托管堆看门狗（2026-09-21）**：空闲挂件的私有字节会**持续上涨**（实测 +0.9 MB/分钟，
+  45 分钟从 155 MB 涨到 243 MB）。归因：`GC.GetTotalMemory(false)` 同步上涨而 `gc0=0`——十分钟
+  **一次 GC 都没发生**。workstation GC 的预算按物理内存推算，本机远大于应用每秒几 KB 的瞬时分配
+  （每轮重读 settings.json、V4 日志目录枚举 152 个文件 ×2、30s 一次 UIA 刷新、每分钟一次 ETA 文本
+  变化），于是预算永远够不到，垃圾只堆不收。**强制一次回收把堆从 8 MB 打到 2 MB 存活**，且此后私有
+  字节在窗口内走平——证明是"垃圾未回收"而非"被持有"。
+  修复：① `System.GC.ConserveMemory=5`（csproj → runtimeconfig）；② `WidgetWindow.MemWatchdog`
+  ——1s 定时器里，堆超过 `HeapCeilingBytes`(8 MiB，存活集 1-2 MiB) 就 `GC.Collect(2, Optimized,
+  blocking:false, compacting:false)`（后台回收、不压缩、无 UI 停顿），并有 `WatchdogMinIntervalMs`
+  (60s) 下限，避免存活集高于阈值时变成回收循环。用**上限而非硬限**（`GCHeapHardLimit`）：历史页
+  加载 "All" 范围会瞬时分配几十 MB，硬限会 OOM。
+  实测：空闲私有字节 93.4 → 92.5 MB 走平（此前 +0.9 MB/分钟）；主窗口打开后稳定在 ~183 MB。
+  同批小优化：`D2d.ScanInkUncached` 改为**就地扫描 DIB**（原先每次未命中 `Marshal.Copy` 一个
+  294,912 B 的托管数组，超过 LOH 阈值 → 每分钟一次大对象分配）；`InkCache` 加上界
+  （键含文本，ETA 字符串每分钟变一次，原为无界增长）。
+  遗留（低影响，未修）：进程**内核句柄**以 +12.5/分钟缓慢漂移（GDI/USER 对象是平的 20/35，说明不是
+  GDI 泄漏；形态为锯齿——HID 轮询阶段 +5 后又释放，净值上漂）。18k/天远低于进程上限，内核池约
+  2-4 MB/天，不是 143 MB 的成因。定位受限于：进程级 `HandleCount` 无法区分线程，且本机无
+  handle.exe/ProcMon/`dotnet-counters`（安装需联网）。
+- **主窗口内存（2026-09-21 实测）**：首次打开窗口（`creating MainWindow (first open)`）一次性
+  +98 MB 私有字节 / +956 句柄（XAML 页面树 + WinUI 框架），此后驻留。这是**有意设计**：
+  `MainWindow` 的 `Closing` 只 `Hide()`——注释写明销毁唯一的 XAML 窗口会结束 dispatcher 循环、
+  `Application.Start` 返回、进程连同挂件线程一起退出。窗口是惰性创建的，所以不开窗口不付这 98 MB。
+  若要把这笔内存还回去，需要保留一个隐藏的"dispatcher 保活窗口"再销毁 MainWindow——属于结构性改动，
+  未做。

@@ -42,6 +42,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Long-running idle widget: the default workstation GC sizes its budget
+         from physical memory and can go ten minutes without a single
+         collection (measured: gc0=0, managed 3 -> 9 MB and private 93 -> 103 MB
+         over 10 min — which Task Manager reads as a leak). ConserveMemory makes
+         the GC collect earlier and release segments; the app allocates a few
+         KB/s, so the extra collections cost nothing that matters. -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Copied next to the exe so MainWindow can point AppWindow.Icon at it
        (unpackaged apps have no package manifest to take the icon from). -->
     <None Include="..\..\assets\app.ico" Link="app.ico" CopyToOutputDirectory="PreserveNewest" />

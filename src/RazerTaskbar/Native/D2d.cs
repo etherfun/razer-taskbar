@@ -256,6 +256,8 @@ internal static class D2d
     /// churn) share the rendered line box per format, and multi-char scans
     /// are a few hundred microseconds anyway.</summary>
     private static readonly Dictionary<(IDWriteTextFormat, string), InkBox?> InkCache = new();
+    /// <summary>Cap on <see cref="InkCache"/> — see ScanInk.</summary>
+    private const int InkCacheMax = 2048;
 
     /// <summary>Render `text` white through D2D into the scratch premultiplied
     /// DIB (paragraph-centered in a line-height-tall box, same mode the real
@@ -276,6 +278,14 @@ internal static class D2d
             if (InkCache.TryGetValue(key, out var hit))
             {
                 return hit;
+            }
+            // Bounded: the key carries the text, and label text churns (the
+            // ETA string changes every minute), so an unbounded map grows for
+            // the life of the process. A scan costs a few hundred microseconds,
+            // so dropping the whole map at the cap is simpler than evicting.
+            if (InkCache.Count >= InkCacheMax)
+            {
+                InkCache.Clear();
             }
             var scanned = ScanInkUncached(text, f);
             InkCache[key] = scanned;
@@ -317,23 +327,29 @@ internal static class D2d
             rt.EndDraw(out _, out _);
         }
 
-        int bytes = ScanW * ScanH * 4;
-        var px = new byte[bytes];
-        Marshal.Copy(_scanBits, px, 0, bytes);
         int top = -1, bot = -1, minX = -1, maxX = -1;
-        for (int y = 0; y < ScanH; y++)
+        // Scan the DIB in place: the alpha channel is read straight out of the
+        // mapped section. The managed copy this replaces was 294,912 bytes per
+        // miss — over the LOH threshold, so every uncached scan (the ETA label
+        // churns once a minute) left a large-object allocation behind.
+        unsafe
         {
-            for (int x = 0; x < ScanW; x++)
+            var px = (byte*)_scanBits;
+            for (int y = 0; y < ScanH; y++)
             {
-                if (px[(y * ScanW + x) * 4 + 3] > 0x10)
+                int row = y * ScanW * 4;
+                for (int x = 0; x < ScanW; x++)
                 {
-                    if (top < 0)
+                    if (px[row + x * 4 + 3] > 0x10)
                     {
-                        top = y;
+                        if (top < 0)
+                        {
+                            top = y;
+                        }
+                        bot = y;
+                        minX = minX < 0 ? x : Math.Min(minX, x);
+                        maxX = Math.Max(maxX, x);
                     }
-                    bot = y;
-                    minX = minX < 0 ? x : Math.Min(minX, x);
-                    maxX = Math.Max(maxX, x);
                 }
             }
         }

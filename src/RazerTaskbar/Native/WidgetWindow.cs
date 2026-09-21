@@ -690,6 +690,7 @@ public static class WidgetWindow
             var timer = wParam;
             if (timer == TimerId)
             {
+                MemWatchdog();
                 var wh = st.Hwnd;
                 bool alive = wh != 0 && IsWindow(wh);
                 if (st.Embedded)
@@ -1157,6 +1158,45 @@ public static class WidgetWindow
             Log.Error("razer-taskbar: widget D2D render target creation failed", e);
             DestroyMemSurface(st);
         }
+    }
+
+    /// <summary>Managed-heap ceiling for the idle watchdog (see MemWatchdog).
+    /// The live set is 1-2 MB, so this is 4-8x headroom; the ceiling only has
+    /// to be low enough to be reached at all — the runtime's own budget was
+    /// not, in ten minutes.</summary>
+    private const long HeapCeilingBytes = 8L * 1024 * 1024;
+
+    /// <summary>Floor on the watchdog's cadence: a live set above the ceiling
+    /// (the history page loading an "All" range) must not turn the watchdog
+    /// into a collection loop.</summary>
+    private const long WatchdogMinIntervalMs = 60_000;
+
+    private static long _watchdogAtMs;
+
+    /// <summary>The runtime's own pacing leaves a long-running idle widget
+    /// growing: with a few KB/s of transient allocations (settings.json per
+    /// tick, the log-dir enumeration, UIA refreshes) the workstation GC's
+    /// budget — sized from physical memory — was never reached in ten minutes
+    /// (measured gc0=0, managed 3 -> 9 MB and private 93 -> 103 MB, i.e.
+    /// exactly what Task Manager reads as a leak). Forcing a collection dropped
+    /// the heap from 8 MB to 2 MB live and held private bytes flat across the
+    /// window, so the fix is to collect when the heap passes a ceiling.
+    /// Non-blocking and non-compacting — a background collection with no UI
+    /// pause — and a ceiling rather than a hard limit, so a genuinely large
+    /// working set can never OOM the app. Widget-thread only, once a second.</summary>
+    private static void MemWatchdog()
+    {
+        long now = Environment.TickCount64;
+        if (_watchdogAtMs != 0 && now - _watchdogAtMs < WatchdogMinIntervalMs)
+        {
+            return;
+        }
+        if (GC.GetTotalMemory(false) < HeapCeilingBytes)
+        {
+            return;
+        }
+        _watchdogAtMs = now;
+        GC.Collect(2, GCCollectionMode.Optimized, blocking: false, compacting: false);
     }
 
     private static void DestroyMemSurface(WidgetState st)
