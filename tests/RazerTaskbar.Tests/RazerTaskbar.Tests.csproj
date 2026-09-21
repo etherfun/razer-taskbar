@@ -17,4 +17,11 @@
     <ProjectReference Include="..\..\src\RazerTaskbar.Core\RazerTaskbar.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Linked so D2dSmokeTests can regression-test the hand-written interop
+         vtable slots without dragging the WinUI exe into the test project. -->
+    <Compile Include="..\..\src\RazerTaskbar\Native\Interop\D2D1.cs" Link="Interop\D2D1.cs" />
+    <Compile Include="..\..\src\RazerTaskbar\Native\Interop\DWrite.cs" Link="Interop\DWrite.cs" />
+  </ItemGroup>
+
 </Project>

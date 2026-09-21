@@ -89,16 +89,21 @@ public static class WidgetWindow
         public int WidgetW;
         public int WidgetH;
         /// <summary>Offscreen render surface: a 32bpp top-down DIB section.
-        /// Everything paints here (GDI leaves the alpha byte zero), then
-        /// AlphaPresent turns coverage into premultiplied alpha and hands the
-        /// frame to DWM via UpdateLayeredWindow — per-pixel transparency like
-        /// the native widgets, no black color key. Both modes present through
-        /// this surface (embed pokes a band rebuild after each frame).</summary>
+        /// Everything paints here via D2D (premultiplied alpha straight from
+        /// the render target — DWrite text AA carries true partial coverage),
+        /// then AlphaPresent hands the frame to DWM via UpdateLayeredWindow
+        /// — per-pixel transparency like the native widgets, no black color
+        /// key. Both modes present through this surface (embed pokes a band
+        /// rebuild after each frame).</summary>
         public IntPtr MemDc;
         public IntPtr MemBmp;
         public IntPtr MemBits;
         public int MemW;
         public int MemH;
+        /// <summary>D2D render target bound to MemDc's DIB + its brush;
+        /// recreated with the surface (and after D2DERR_RECREATE_TARGET).</summary>
+        public ID2D1DCRenderTarget? DcRt;
+        public ID2D1SolidColorBrush? Brush;
         public bool UlwFailedLogged;
         public (int X, int Y, int W, int H)? LastLayout;
         public string? LastLog;
@@ -457,12 +462,24 @@ public static class WidgetWindow
             return; // never presented — no snapshot to silence
         }
         EndFade(st);
-        PatBlt(st.MemDc, 0, 0, st.MemW, st.MemH, BLACKNESS);
+        if (st.DcRt != null)
+        {
+            var full = new RECT { Left = 0, Top = 0, Right = st.MemW, Bottom = st.MemH };
+            st.DcRt.BindDC(st.MemDc, ref full);
+            st.DcRt.BeginDraw();
+            var transparent = new D2D1_COLOR_F(0f, 0f, 0f, 0f);
+            st.DcRt.Clear(ref transparent);
+            st.DcRt.EndDraw(out _, out _);
+        }
+        else
+        {
+            PatBlt(st.MemDc, 0, 0, st.MemW, st.MemH, BLACKNESS);
+        }
         // AlphaPresent pokes the band so the invisible frame is what gets
         // snapshotted, then give DWM a beat to present it before the window
         // (and its surface) disappears. No alpha floor: the ghost frame must
         // stay fully alpha-0 — invisible AND click-through.
-        AlphaPresent(st, st.Hwnd, hitFloor: false);
+        AlphaPresent(st, st.Hwnd);
         System.Threading.Thread.Sleep(120);
     }
 
@@ -1020,11 +1037,15 @@ public static class WidgetWindow
         try
         {
             var handle = device?.Handle ?? "";
-            // Offscreen 32bpp DIB render, then premultiplied-alpha upload.
-            // Falls back to direct window drawing if the surface failed. The
-            // embedded band child presents through the same ULW pipeline —
-            // AlphaPresent pokes a band rebuild so the frame goes live.
+            // Offscreen 32bpp DIB render (D2D writes premultiplied alpha
+            // directly), then UpdateLayeredWindow upload. The embedded band
+            // child presents through the same ULW pipeline — AlphaPresent
+            // pokes a band rebuild so the frame goes live.
             EnsureMemSurface(st, hwnd, w, h);
+            if (st.MemDc == 0 || st.DcRt == null)
+            {
+                return; // D2D unavailable this tick — next invalidate retries
+            }
             // Cross-fade on a displayed-device change: capture the
             // on-screen (already premultiplied) frame BEFORE PaintBody
             // overwrites it. Starting a new fade mid-animation blends
@@ -1032,26 +1053,44 @@ public static class WidgetWindow
             bool fade = cfg.FadeTransition
                 && st.OnScreenHandle is not null
                 && handle != st.OnScreenHandle
-                && st.MemDc != 0 && st.MemW == w && st.MemH == h;
+                && st.MemW == w && st.MemH == h;
             if (fade)
             {
                 st.FadePrev = SnapshotFrame(st);
             }
-            var target = st.MemDc != 0 ? st.MemDc : hdc;
-            PaintBody(hwnd, st, target, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel);
-            if (st.MemDc != 0)
+            PaintBody(hwnd, st, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel, shield);
+            // The body just measured the NEW content's natural size. When it
+            // outgrew the current rect, re-render at that size and apply the
+            // geometry in the SAME pass before presenting: presenting the
+            // old-rect frame first and letting the 1s poll resize afterwards
+            // leaves the old-sized surface scaled into the new rect until the
+            // repaint lands — and a band rebuild racing that gap freezes the
+            // stretched frame on screen for up to a second (the "update
+            // flash" on every ETA-width change).
+            if (!fade && st.NaturalW > 0 && (st.NaturalW != w || st.NaturalH != h))
             {
-                if (fade)
+                w = st.NaturalW;
+                h = st.NaturalH;
+                st.WidgetW = w;
+                st.WidgetH = h;
+                sig = new PaintSig(topLabel, bottomLabel ?? "", level, charging, saver, connected, w, h);
+                EnsureMemSurface(st, hwnd, w, h);
+                if (st.MemDc != 0 && st.DcRt != null)
                 {
-                    Premultiply(st);
-                    st.FadeNew = SnapshotFrame(st);
-                    st.FadeStart = Environment.TickCount64;
-                    SetTimer(st.MsgHwnd, TimerFade, FadeTickMs, 0);
+                    PaintBody(hwnd, st, sig, topLabel, device, scale, w, h, connected, level, charging, saver, bottomLabel, shield);
+                    st.LastLayout = null;
+                    PlaceWidgetCore(false); // SetWindowPos to the new rect now
                 }
-                else
-                {
-                    AlphaPresent(st, hwnd);
-                }
+            }
+            if (fade)
+            {
+                st.FadeNew = SnapshotFrame(st);
+                st.FadeStart = Environment.TickCount64;
+                SetTimer(st.MsgHwnd, TimerFade, FadeTickMs, 0);
+            }
+            else
+            {
+                AlphaPresent(st, hwnd);
             }
             st.OnScreenHandle = handle;
         }
@@ -1065,11 +1104,15 @@ public static class WidgetWindow
         }
     }
 
-    /// <summary>Offscreen 32bpp top-down DIB matching the widget size;
-    /// recreated only when the size changes. Widget-thread only.</summary>
+    /// <summary>Offscreen 32bpp top-down DIB + the D2D render target bound
+    /// to it; recreated only when the size changes. Widget-thread only.</summary>
     private static void EnsureMemSurface(WidgetState st, IntPtr hwnd, int w, int h)
     {
-        if (st.MemDc != 0 && st.MemW == w && st.MemH == h)
+        if (st.MemDc != 0 && st.DcRt != null && st.MemW == w && st.MemH == h)
+        {
+            return;
+        }
+        if (!D2d.EnsureGraphics())
         {
             return;
         }
@@ -1102,10 +1145,26 @@ public static class WidgetWindow
         SelectObject(st.MemDc, st.MemBmp);
         st.MemW = w;
         st.MemH = h;
+        try
+        {
+            st.DcRt = D2d.CreateRenderTarget();
+            var full = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
+            st.DcRt.BindDC(st.MemDc, ref full);
+            st.Brush = D2d.CreateBrush(st.DcRt);
+        }
+        catch (Exception e)
+        {
+            Log.Error("razer-taskbar: widget D2D render target creation failed", e);
+            DestroyMemSurface(st);
+        }
     }
 
     private static void DestroyMemSurface(WidgetState st)
     {
+        D2d.TryRelease(st.Brush);
+        st.Brush = null;
+        D2d.TryRelease(st.DcRt);
+        st.DcRt = null;
         if (st.MemDc != 0)
         {
             DeleteDC(st.MemDc);
@@ -1121,35 +1180,6 @@ public static class WidgetWindow
         st.MemH = 0;
     }
 
-    /// <summary>Convert the GDI render into premultiplied ARGB (in place):
-    /// the frame is drawn with solid colors over black, so each stored pixel
-    /// is color*coverage and the coverage (== premultiplied alpha) is
-    /// max(r,g,b). White text, gray icons and the tinted battery glyph all
-    /// then blend against the REAL backdrop instead of the old black key;
-    /// untouched black pixels become fully transparent. With
-    /// <paramref name="alphaFloor"/> those untouched pixels are lifted to
-    /// alpha 1 instead — premultiplied (0,0,0,1) composites as 0.4% black,
-    /// visually nothing, but ULW hit-testing is per pixel and waves alpha-0
-    /// pixels through to the window below no matter what WM_NCHITTEST
-    /// answers, so the click shield needs every pixel hit-testable.</summary>
-    private static void Premultiply(WidgetState st, bool alphaFloor = false)
-    {
-        int bytes = st.MemW * st.MemH * 4;
-        var buf = new byte[bytes];
-        System.Runtime.InteropServices.Marshal.Copy(st.MemBits, buf, 0, bytes);
-        for (int i = 0; i + 3 < bytes; i += 4)
-        {
-            byte b = buf[i], g = buf[i + 1], r = buf[i + 2];
-            byte a = Math.Max(b, Math.Max(g, r));
-            if (alphaFloor && a == 0)
-            {
-                a = 1;
-            }
-            buf[i + 3] = a;
-        }
-        System.Runtime.InteropServices.Marshal.Copy(buf, 0, st.MemBits, bytes);
-    }
-
     private static byte[] SnapshotFrame(WidgetState st)
     {
         int bytes = st.MemW * st.MemH * 4;
@@ -1163,8 +1193,7 @@ public static class WidgetWindow
 
     /// <summary>Linear per-byte blend of two premultiplied frames into the
     /// DIB — the mathematically correct cross-fade for this representation
-    /// (lerp of premultiplied values == premultiplied lerp). AlphaPresent
-    /// re-derives the alpha channel from the blended RGB.</summary>
+    /// (lerp of premultiplied values == premultiplied lerp).</summary>
     private static void WriteBlend(WidgetState st, byte[] from, byte[] to, double t)
     {
         int bytes = st.MemW * st.MemH * 4;
@@ -1229,12 +1258,11 @@ public static class WidgetWindow
     }
 
     /// <summary>Hand the current DIB frame to DWM via UpdateLayeredWindow.
-    /// `hitFloor: false` (ghost frames) keeps every pixel at alpha 0 —
-    /// invisible and click-through even under the click shield.</summary>
-    private static void AlphaPresent(WidgetState st, IntPtr hwnd, bool hitFloor = true)
+    /// Frames arrive premultiplied straight from D2D — nothing to derive.
+    /// The click shield's alpha floor lives in the painted frame instead
+    /// (PaintBody composites a 1/255 black under the content).</summary>
+    private static void AlphaPresent(WidgetState st, IntPtr hwnd)
     {
-        Premultiply(st, hitFloor && ClickShield(hwnd));
-
         var dst = new POINT();
         if (TaskbarLocator.WindowRect(hwnd) is { } wr)
         {
@@ -1269,199 +1297,233 @@ public static class WidgetWindow
         }
     }
 
-    private static void PaintBody(IntPtr hwnd, WidgetState st, IntPtr hdc, PaintSig sig, string topLabel,
+    private static void PaintBody(IntPtr hwnd, WidgetState st, PaintSig sig, string topLabel,
         RazerDevice? device, float scale, int w, int h,
-        bool connected, int level, bool charging, bool saver, string? bottomLabel)
+        bool connected, int level, bool charging, bool saver, string? bottomLabel, bool shield)
     {
         try
         {
-            // The color key is gone: the frame is drawn over black and its
-            // coverage becomes per-pixel alpha in AlphaPresent, so this fill
-            // only clears the previous frame.
-            var keyBrush = CreateSolidBrush(0x00000000);
-            var keyRect = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
-            FillRect(hdc, ref keyRect, keyBrush);
-            DeleteObject(keyBrush);
-            SetBkMode(hdc, TRANSPARENT);
+            var rt = st.DcRt!;
+            var brush = st.Brush!;
+            var full = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
+            rt.BindDC(st.MemDc, ref full);
+            rt.BeginDraw();
+            bool ok;
+            try
+            {
+                var transparent = new D2D1_COLOR_F(0f, 0f, 0f, 0f);
+                rt.Clear(ref transparent);
+                rt.SetAntialiasMode(D2D1Consts.AntialiasModePerPrimitive);
+                rt.SetTextAntialiasMode(D2D1Consts.TextAntialiasModeGrayscale);
 
-            // Palette: white glyph/text, dim gray secondary row.
-            const uint fgColor = 0x00FF_FFFF;
-            const uint dim = 0x00B0B0B0;
+                // Click shield: lift untouched pixels to alpha 1 by
+                // compositing an invisible floor under the content —
+                // premultiplied (0,0,0,1) is 0.4% black, visually nothing,
+                // but ULW hit-testing is per pixel and waves alpha-0 pixels
+                // through to the window below no matter what WM_NCHITTEST
+                // answers, so the shield needs every pixel hit-testable.
+                if (shield)
+                {
+                    var floor = new D2D1_COLOR_F(0f, 0f, 0f, 1f / 255f);
+                    brush.SetColor(ref floor);
+                    var rectF = new D2D1_RECT_F(0f, 0f, w, h);
+                    rt.FillRectangle(ref rectF, brush);
+                }
 
-            // Native Win11 glyphs: Segoe Fluent Icons battery; icon fonts
-            // render crisply only at Microsoft's recommended sizes
-            // (16/20/24/32/40/48/64 — off-size renders come out blurry, per
-            // the icon font docs), so every icon box height goes through
-            // SnapSize: the battery at 20px, the status/est icons and the
-            // type icon at 16px.
-            int iconH = DeviceIcons.SnapSize((int)MathF.Round(20.0f * scale));
-            var hiconFont = DeviceIcons.IconFont(iconH);
-            var hfont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_SEMIBOLD);
-            SelectObject(hdc, hfont);
+                // Palette: white glyph/text, dim gray secondary row.
+                var fg = D2D1.Color(0xFF, 0xFF, 0xFF, 1f);
+                var dim = D2D1.Color(0xB0, 0xB0, 0xB0, 1f);
 
-            // Rainbow option gates only the plain-discharge level gradient;
-            // the charging/saver/disconnected state colors always show.
-            bool colorize = AppState.Instance.ConfigSnapshot().ColorBatteryIcon;
-            var fill = BatteryColors.LevelFillColor(level, connected, saver, charging, colorize);
-            uint textColor = connected ? fgColor : dim;
-            var wide = topLabel.ToCharArray();
-            // Measure text first so the glyph+text group can be centered.
-            var measure = new RECT();
-            DrawTextW(hdc, wide, wide.Length, ref measure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
-            int textW = Math.Max(measure.Right - measure.Left, 1);
-            int textInk = GdiText.InkHeight(hdc, wide);
-            int textCellH = measure.Bottom - measure.Top;
-            // Two-layer battery icon: layer 1 is the ACTIVE series' level
-            // glyph (charging bolt E85A- / saver leaf E863-) tinted with
-            // the state color; layer 2 — the same series' 0% glyph drawn on
-            // top in the default color — masks the tinted outline and
-            // symbol, so only the fill is colored. Layer 1 must be the same
-            // series as the overlay: the status glyphs cut their outline
-            // where the bolt/leaf crosses it, and a normal-series outline
-            // underneath would peek through those gaps. Every connected
-            // device renders two-layer (plain discharge overlays the plain
-            // E850 outline, or a high charge would read as a solid colored
-            // blob); disconnected draws the gray level glyph only.
-            var iconCh = new[] { BatteryGlyphs.LevelGlyph(level, connected, saver, charging) };
-            var iconMeasure = new RECT();
-            SelectObject(hdc, hiconFont);
-            DrawTextW(hdc, iconCh, iconCh.Length, ref iconMeasure, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
-            int iconW = Math.Max(iconMeasure.Right - iconMeasure.Left, 1);
-            int glyphInk = GdiText.InkHeight(hdc, iconCh);
-            int glyphCellH = iconMeasure.Bottom - iconMeasure.Top;
-            SelectObject(hdc, hfont);
-            // Row split: two stacked half-height rows while a prediction
-            // shows, otherwise row 1 spans the full height.
-            bool twoRows = bottomLabel is not null;
-            var topRect = new RECT { Left = 0, Top = 0, Right = w, Bottom = twoRows ? h / 2 : h };
+                // Native Win11 glyphs: Segoe Fluent Icons battery; icon fonts
+                // render crisply only at Microsoft's recommended sizes
+                // (16/20/24/32/40/48/64 — off-size renders come out blurry, per
+                // the icon font docs), so every icon box height goes through
+                // SnapSize: the battery at 20px, the status/est icons and the
+                // type icon at 16px/14px.
+                // Fluent battery glyphs carry big side padding — ink height
+                // is only ~0.5em — so the em base is 24 (not the bare 20,
+                // which rendered a 10px-tall glyph) for ~12px of glyph ink
+                // at scale 1: clearly bigger than the 8px digits without
+                // crowding the row.
+                int iconH = DeviceIcons.SnapSize((int)MathF.Round(24.0f * scale));
+                var hiconFont = D2d.Format(iconH, DWriteConsts.TextAlignmentLeading, DWriteConsts.FontWeightNormal, icon: true);
+                var hfont = D2d.Format((int)MathF.Round(11.0f * scale), DWriteConsts.TextAlignmentLeading, DWriteConsts.FontWeightSemiBold);
 
-            // Row-2 content, measured up front: [status icon] [gap] [time].
-            var estCh = Array.Empty<char>();
-            var estWide = Array.Empty<char>();
-            int estIconW = 0;
-            int estW = 0;
-            int estIconInk = 0;
-            int estIconCellH = 0;
-            int estTextInk = 0;
-            int estTextCellH = 0;
-            var estIconFont = DeviceIcons.IconFont(DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale)));
-            var estFont = GdiText.CachedTextFont((int)MathF.Round(12.0f * scale), FW_NORMAL);
-            if (bottomLabel is { } estText)
-            {
-                estCh = new[] { charging ? '\uF607' : '\uE823' };
-                estWide = estText.ToCharArray();
-                SelectObject(hdc, estIconFont);
-                var m = new RECT();
-                DrawTextW(hdc, estCh, estCh.Length, ref m, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
-                estIconW = Math.Max(m.Right - m.Left, 1);
-                estIconInk = GdiText.InkHeight(hdc, estCh);
-                estIconCellH = m.Bottom - m.Top;
-                SelectObject(hdc, estFont);
-                var m2 = new RECT();
-                DrawTextW(hdc, estWide, estWide.Length, ref m2, DT_SINGLELINE | DT_CALCRECT | DT_LEFT);
-                estW = Math.Max(m2.Right - m2.Left, 1);
-                estTextInk = GdiText.InkHeight(hdc, estWide);
-                estTextCellH = m2.Bottom - m2.Top;
-                SelectObject(hdc, hfont);
-            }
+                // Rainbow option gates only the plain-discharge level gradient;
+                // the charging/saver/disconnected state colors always show.
+                bool colorize = AppState.Instance.ConfigSnapshot().ColorBatteryIcon;
+                var fill = BatteryColors.LevelFillColor(level, connected, saver, charging, colorize);
+                var textColor = connected ? fg : dim;
+                // Measure text first so the glyph+text group can be centered.
+                int textW = Math.Max(D2d.TextWidth(topLabel, hfont), 1);
+                int textInk = D2d.InkHeight(topLabel, hfont);
+                int textCellH = D2d.LineHeight(hfont);
+                // Two-layer battery icon: layer 1 is the ACTIVE series' level
+                // glyph (charging bolt E85A- / saver leaf E863-) tinted with
+                // the state color; layer 2 — the same series' 0% glyph drawn on
+                // top in the default color — masks the tinted outline and
+                // symbol, so only the fill is colored. Layer 1 must be the same
+                // series as the overlay: the status glyphs cut their outline
+                // where the bolt/leaf crosses it, and a normal-series outline
+                // underneath would peek through those gaps. Every connected
+                // device renders two-layer (plain discharge overlays the plain
+                // E850 outline, or a high charge would read as a solid colored
+                // blob); disconnected draws the gray level glyph only.
+                var iconGlyph = BatteryGlyphs.LevelGlyph(level, connected, saver, charging).ToString();
+                int iconW = Math.Max(D2d.TextWidth(iconGlyph, hiconFont), 1);
+                int glyphInk = D2d.InkHeight(iconGlyph, hiconFont);
+                int glyphCellH = D2d.LineHeight(hiconFont);
+                // Row split: two stacked half-height rows while a prediction
+                // shows, otherwise row 1 spans the full height.
+                bool twoRows = bottomLabel is not null;
+                int topH = twoRows ? h / 2 : h;
 
-            // Geometry: two rows share an icon column (battery glyph and the
-            // smaller status icon center on one vertical axis, both texts
-            // start at the same x). The type icon stands alone on the left,
-            // vertically centered across the FULL height. Omitted while no
-            // device is shown ("--").
-            int gap = (int)MathF.Round(5.0f * scale);
-            var kind = device?.Kind;
-            int kindH = DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale));
-            int kindW = kind is { } k ? DeviceIcons.WidthFor(hdc, kindH, k) : 0;
-            int kindGap = kind is not null ? gap : 0;
-            int groupX, iconX, textX, estIconX, estTextX;
-            int groupW;
-            if (twoRows)
-            {
-                int iconColW = Math.Max(iconW, estIconW);
-                int row1W = iconColW + gap + textW;
-                int row2W = iconColW + gap + estW;
-                groupW = kindW + kindGap + Math.Max(row1W, row2W);
-                int gx = (w - groupW) / 2;
-                int cx = gx + kindW + kindGap;
-                int tx = cx + iconColW + gap;
-                groupX = gx;
-                iconX = cx + ((iconColW - iconW) / 2);
-                textX = tx;
-                estIconX = cx + ((iconColW - estIconW) / 2);
-                estTextX = tx;
-            }
-            else
-            {
-                groupW = kindW + kindGap + iconW + gap + textW;
-                int gx = (w - groupW) / 2;
-                int ix = gx + kindW + kindGap;
-                groupX = gx;
-                iconX = ix;
-                textX = ix + iconW + gap;
-                estIconX = 0;
-                estTextX = 0;
-            }
-            if (kind is { } kindValue)
-            {
-                var kc = connected ? ((byte)0xFF, (byte)0xFF, (byte)0xFF) : ((byte)0x80, (byte)0x80, (byte)0x80);
-                int kindY = (h - kindH) / 2;
-                DeviceIcons.Draw(hdc, groupX, kindY, kindH, kindValue, kc);
-            }
-            // Battery glyph, two layers: the level glyph,
-            // then the status overlay in the default (foreground) color on
-            // top. Both share the LEVEL glyph's ink centering — the
-            // bolt/leaf glyph's own ink box is taller (the symbol pokes
-            // above the outline), and self-centering each layer would
-            // visibly misalign the coinciding outlines. Layer 1 takes the
-            // state/level color — the charging/saver/disconnected state
-            // colors always, the plain-discharge level gradient only when
-            // Settings → Colored battery icon is on (off: default white
-            // glyph; see LevelFillColor).
-            SelectObject(hdc, hiconFont);
-            int iconDy = GdiText.InkCenterDelta(hdc, iconCh);
-            uint iconColor = GdiText.ColorRef(fill.R, fill.G, fill.B);
-            GdiText.DrawInkText(hdc, hiconFont, iconCh, iconX, topRect, iconColor, iconDy);
-            if (BatteryGlyphs.StatusOverlayGlyph(connected, saver, charging) is { } statusGlyph)
-            {
-                GdiText.DrawInkText(hdc, hiconFont, new[] { statusGlyph }, iconX, topRect, fgColor, iconDy);
-            }
-            GdiText.DrawInkText(hdc, hfont, wide, textX, topRect, textColor);
+                // Row-2 content, measured up front: [status icon] [gap] [time].
+                var estGlyph = "";
+                var estText = "";
+                int estIconW = 0;
+                int estW = 0;
+                int estIconInk = 0;
+                int estIconCellH = 0;
+                int estTextInk = 0;
+                int estTextCellH = 0;
+                var estIconFont = D2d.Format(DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale)),
+                    DWriteConsts.TextAlignmentLeading, DWriteConsts.FontWeightNormal, icon: true);
+                var estFont = D2d.Format((int)MathF.Round(11.0f * scale),
+                    DWriteConsts.TextAlignmentLeading, DWriteConsts.FontWeightNormal);
+                if (bottomLabel is { } est)
+                {
+                    estGlyph = charging ? "\uF607" : "\uE823";
+                    estText = est;
+                    estIconW = Math.Max(D2d.TextWidth(estGlyph, estIconFont), 1);
+                    estIconInk = D2d.InkHeight(estGlyph, estIconFont);
+                    estIconCellH = D2d.LineHeight(estIconFont);
+                    estW = Math.Max(D2d.TextWidth(estText, estFont), 1);
+                    estTextInk = D2d.InkHeight(estText, estFont);
+                    estTextCellH = D2d.LineHeight(estFont);
+                }
 
-            // Row 2: the prediction with its status icon, dimmed while
-            // discharging (white while charging).
-            if (twoRows)
-            {
-                var estRect = new RECT { Left = 0, Top = h / 2, Right = w, Bottom = h };
-                uint estColor = charging ? fgColor : dim;
-                GdiText.DrawInkText(hdc, estIconFont, estCh, estIconX, estRect, estColor);
-                GdiText.DrawInkText(hdc, estFont, estWide, estTextX, estRect, estColor);
+                // Geometry: two rows share an icon column (battery glyph and the
+                // smaller status icon center on one vertical axis, both texts
+                // start at the same x). The type icon stands alone on the left,
+                // vertically centered across the FULL height. Omitted while no
+                // device is shown ("--").
+                int gap = (int)MathF.Round(5.0f * scale);
+                var kind = device?.Kind;
+                int kindH = DeviceIcons.SnapSize((int)MathF.Round(14.0f * scale));
+                int kindW = kind is { } k ? DeviceIcons.WidthFor(kindH, k) : 0;
+                int kindGap = kind is not null ? gap : 0;
+                int groupX, iconX, textX, estIconX, estTextX;
+                int groupW;
+                if (twoRows)
+                {
+                    int iconColW = Math.Max(iconW, estIconW);
+                    int row1W = iconColW + gap + textW;
+                    int row2W = iconColW + gap + estW;
+                    groupW = kindW + kindGap + Math.Max(row1W, row2W);
+                    int gx = (w - groupW) / 2;
+                    int cx = gx + kindW + kindGap;
+                    int tx = cx + iconColW + gap;
+                    groupX = gx;
+                    iconX = cx + ((iconColW - iconW) / 2);
+                    textX = tx;
+                    estIconX = cx + ((iconColW - estIconW) / 2);
+                    estTextX = tx;
+                }
+                else
+                {
+                    groupW = kindW + kindGap + iconW + gap + textW;
+                    int gx = (w - groupW) / 2;
+                    int ix = gx + kindW + kindGap;
+                    groupX = gx;
+                    iconX = ix;
+                    textX = ix + iconW + gap;
+                    estIconX = 0;
+                    estTextX = 0;
+                }
+                if (kind is { } kindValue)
+                {
+                    var kcol = connected ? fg : D2D1.Color(0x80, 0x80, 0x80, 1f);
+                    int kindY = (h - kindH) / 2;
+                    var kindFont = D2d.Format(kindH, DWriteConsts.TextAlignmentLeading,
+                        DWriteConsts.FontWeightNormal, icon: true);
+                    // Ink-origin draw: back the origin up by the glyph's left
+                    // bearing so the INK starts at groupX (same contract as
+                    // the old DeviceIcons.Draw); vertically line-box centered
+                    // in its box, like the old DT_VCENTER draw.
+                    int kindOff = D2d.InkLeft(DeviceIcons.GlyphFor(kindValue).ToString(), kindFont);
+                    D2d.DrawInkText(rt, brush, kindFont, DeviceIcons.GlyphFor(kindValue).ToString(),
+                        groupX - kindOff, kindY, kindY + kindH, kcol, inkDelta: 0);
+                }
+                // Battery glyph, two layers: the level glyph,
+                // then the status overlay in the default (foreground) color on
+                // top. Both share the LEVEL glyph's ink centering — the
+                // bolt/leaf glyph's own ink box is taller (the symbol pokes
+                // above the outline), and self-centering each layer would
+                // visibly misalign the coinciding outlines. Layer 1 takes the
+                // state/level color — the charging/saver/disconnected state
+                // colors always, the plain-discharge level gradient only when
+                // Settings → Colored battery icon is on (off: default white
+                // glyph; see LevelFillColor).
+                int iconDy = D2d.InkCenterDelta(iconGlyph, hiconFont);
+                var iconColor = D2D1.Color(fill.R, fill.G, fill.B, 1f);
+                D2d.DrawInkText(rt, brush, hiconFont, iconGlyph, iconX, 0, topH, iconColor, iconDy);
+                if (BatteryGlyphs.StatusOverlayGlyph(connected, saver, charging) is { } statusGlyph)
+                {
+                    D2d.DrawInkText(rt, brush, hiconFont, statusGlyph.ToString(), iconX, 0, topH, fg, iconDy);
+                }
+                D2d.DrawInkText(rt, brush, hfont, topLabel, textX, 0, topH, textColor);
+
+                // Row 2: the prediction with its status icon, dimmed while
+                // discharging (white while charging).
+                if (twoRows)
+                {
+                    var estColor = charging ? fg : dim;
+                    D2d.DrawInkText(rt, brush, estIconFont, estGlyph, estIconX, h / 2, h, estColor);
+                    D2d.DrawInkText(rt, brush, estFont, estText, estTextX, h / 2, h, estColor);
+                }
+                // Content-measured natural size: the window hugs the ink instead
+                // of the nominal 144x40 — under the widgets-space click shield
+                // the whole rect swallows clicks, so slack around the ink would
+                // swallow clicks too. Heights are ink-tight (scanned pixels,
+                // line-box height as fallback); PlaceWidget picks the size up
+                // via WidgetSize within a second, and the measurements do not
+                // depend on the current window size, so the resize converges.
+                int pad = (int)MathF.Round(2.0f * scale);
+                st.NaturalW = Math.Max(groupW + 2 * pad, 32);
+                int topInk = Math.Max(glyphInk > 0 ? glyphInk : glyphCellH,
+                    textInk > 0 ? textInk : textCellH);
+                if (twoRows)
+                {
+                    int bottomInk = Math.Max(estIconInk > 0 ? estIconInk : estIconCellH,
+                        estTextInk > 0 ? estTextInk : estTextCellH);
+                    int rowGap = (int)MathF.Round(3.0f * scale);
+                    st.NaturalH = Math.Max(topInk + rowGap + bottomInk + 2 * pad, 16);
+                }
+                else
+                {
+                    st.NaturalH = Math.Max(Math.Max(kindH, topInk) + 2 * pad, 16);
+                }
+                st.NaturalScale = scale;
+                ok = true;
             }
-            // Content-measured natural size: the window hugs the ink instead
-            // of the nominal 144x40 — under the widgets-space click shield
-            // the whole rect swallows clicks, so slack around the ink would
-            // swallow clicks too. Heights are ink-tight (GGO_METRICS union,
-            // line-box cell as fallback); PlaceWidget picks the size up via
-            // WidgetSize within a second, and the measurements do not depend
-            // on the current window size, so the resize converges.
-            int pad = (int)MathF.Round(2.0f * scale);
-            st.NaturalW = Math.Max(groupW + 2 * pad, 32);
-            int topInk = Math.Max(glyphInk > 0 ? glyphInk : glyphCellH,
-                textInk > 0 ? textInk : textCellH);
-            if (twoRows)
+            finally
             {
-                int bottomInk = Math.Max(estIconInk > 0 ? estIconInk : estIconCellH,
-                    estTextInk > 0 ? estTextInk : estTextCellH);
-                int rowGap = (int)MathF.Round(3.0f * scale);
-                st.NaturalH = Math.Max(topInk + rowGap + bottomInk + 2 * pad, 16);
+                int hr = rt.EndDraw(out _, out _);
+                if (hr != 0)
+                {
+                    Log.Error($"razer-taskbar: widget EndDraw failed: 0x{hr:X8}");
+                    if ((uint)hr == 0x88990010u)
+                    {
+                        DestroyMemSurface(st); // D2DERR_RECREATE_TARGET — rebuilt next tick
+                    }
+                    ok = false;
+                }
             }
-            else
+            if (ok)
             {
-                st.NaturalH = Math.Max(Math.Max(kindH, topInk) + 2 * pad, 16);
+                st.PaintedSig = sig;
             }
-            st.NaturalScale = scale;
-            st.PaintedSig = sig;
         }
         catch (Exception e)
         {

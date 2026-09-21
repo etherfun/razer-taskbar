@@ -3,6 +3,14 @@
 //! hover is detected by polling the cursor against the widget rect on the
 //! fast TIMER_HOVER tick (120ms). The panel is a topmost layered NOACTIVATE
 //! window that never takes focus and is itself click-through.
+//!
+//! Painting is Direct2D + DirectWrite through the shared D2d context (no
+//! GDI text): DWrite ink lands on a premultiplied-ARGB DIB through a DC
+//! render target, so every AA edge — text, glyphs, card corners, border —
+//! carries true partial alpha and composites with the real backdrop. The
+//! old GDI pipeline forced text AA pixels fully opaque over the translucent
+//! card (a color-key-style dirty fringe); the sentinel-color classification
+//! in Present is gone with it.
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -11,6 +19,7 @@ using static RazerTaskbar.Native.Interop.Gdi32;
 using RazerTaskbar.Native.Interop;
 using static RazerTaskbar.Native.Interop.User32;
 using static RazerTaskbar.Native.Interop.Win32Consts;
+using static RazerTaskbar.Native.Interop.DWriteConsts;
 
 namespace RazerTaskbar.Native;
 
@@ -46,14 +55,15 @@ public static class HoverPanel
     private static IntPtr _hoverWnd;
 
     // Offscreen 32bpp DIB the panel paints into before the per-pixel-alpha
-    // upload (see EnsureSurface / Present).
+    // upload (see EnsureSurface / Present) + its D2D render target.
     private static IntPtr _memDc;
     private static IntPtr _memBmp;
     private static IntPtr _memBits;
     private static int _memW;
     private static int _memH;
-    private static byte[] _buf = Array.Empty<byte>();
     private static bool _ulwFailLogged;
+    private static ID2D1DCRenderTarget? _rt;
+    private static ID2D1SolidColorBrush? _brush;
 
     /// <summary>Fast timer tick: show/hide/update the panel from cursor proximity.</summary>
     public static void Track(IntPtr widget, bool enabled)
@@ -74,6 +84,20 @@ public static class HoverPanel
         var pr = PanelRect();
         bool overPanel = _shown && PtInRect(ref pr, pt);
         if (!overWidget && !overPanel)
+        {
+            Hide();
+            return;
+        }
+        // Occlusion gate (widget path only): the widget rect survives a
+        // fullscreen video covering the auto-hidden taskbar, but the panel
+        // must not pop over the covering window. WindowFromPoint resolves
+        // the point through WM_NCHITTEST (skipping click-through overlays)
+        // — when the top-level window beneath the cursor is not the one the
+        // widget belongs to, the widget is covered: hide. Hovering the
+        // panel itself skips this gate (it floats above arbitrary
+        // backdrops and is HTTRANSPARENT anyway).
+        if (overWidget
+            && GetAncestor(WindowFromPoint(pt), GA_ROOT) != GetAncestor(widget, GA_ROOT))
         {
             Hide();
             return;
@@ -110,16 +134,6 @@ public static class HoverPanel
         _shown = false;
         _rows.Clear();
         DestroySurface();
-        foreach (var f in IconFontCache.Values)
-        {
-            DeleteObject(f);
-        }
-        foreach (var f in TextFontCache.Values)
-        {
-            DeleteObject(f);
-        }
-        IconFontCache.Clear();
-        TextFontCache.Clear();
         if (_hoverWnd != 0)
         {
             DestroyWindow(_hoverWnd);
@@ -176,105 +190,53 @@ public static class HoverPanel
         return dpi == 0 ? 1.0f : dpi / 96.0f;
     }
 
-    // Font caches, widget-thread only (same pattern as GdiText.CachedTextFont).
-    // Every Measure tick and every WM_PAINT used to create and delete a pair
-    // of fonts; heights are DPI-snapped so the key space stays tiny. Handles
-    // are shared — callers SelectObject but never delete.
-    private static readonly Dictionary<int, IntPtr> IconFontCache = new();
-    private static readonly Dictionary<int, IntPtr> TextFontCache = new();
-
-    private static IntPtr CachedIconFont(int h)
-    {
-        if (!IconFontCache.TryGetValue(h, out var f))
-        {
-            IconFontCache[h] = f = CreateIconFont(h);
-        }
-        return f;
-    }
-
-    private static IntPtr CachedPanelTextFont(int h)
-    {
-        if (!TextFontCache.TryGetValue(h, out var f))
-        {
-            TextFontCache[h] = f = CreateTextFont(h);
-        }
-        return f;
-    }
-
-    private static IntPtr CreateIconFont(int h)
-    {
-        // Snap to Microsoft's magic icon sizes (16/20/24/…) for crisp glyphs.
-        h = DeviceIcons.SnapSize(h);
-        var f = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, "Segoe Fluent Icons");
-        // Face-verified fallback for Win10 (no Fluent Icons font): a
-        // nonzero handle proves nothing — CreateFontW silently substitutes
-        // unknown faces (see GdiText.CreateTextFont).
-        if (!GdiText.FaceResolved(f, "Segoe Fluent Icons"))
-        {
-            DeleteObject(f);
-            f = CreateFontW(h, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE, "Segoe MDL2 Assets");
-        }
-        return f;
-    }
-
-    private static IntPtr CreateTextFont(int h)
-    {
-        var f = CreateFontW(h, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, "Segoe UI Variable Text");
-        if (!GdiText.FaceResolved(f, "Segoe UI Variable Text"))
-        {
-            DeleteObject(f);
-            f = CreateFontW(h, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-        }
-        return f;
-    }
-
-    /// <summary>Panel size for `rows` (measured with the real fonts, DPI-scaled).</summary>
-    private static (int W, int H) Measure(List<Row> rows)
+    /// <summary>Column widths shared by Measure and PaintD2D so the layout
+    /// math can never diverge between the two passes.</summary>
+    private static (int NameW, int PctW, int EtaW, int GlyphW, int KindW, bool AnyEta) Columns(List<Row> rows)
     {
         float scale = ScaleOf();
-        var hdc = GetDC(0);
-        int textH = (int)MathF.Round(14.0f * scale);
-        int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
-        var textFont = CachedPanelTextFont(textH);
-        var iconFont = CachedIconFont(iconH);
-        var old = SelectObject(hdc, textFont);
+        int textH = (int)MathF.Round(13.0f * scale);
+        int iconH = DeviceIcons.SnapSize((int)MathF.Round(20.0f * scale));
+        var textFont = D2d.Format(textH, TextAlignmentLeading, FontWeightSemiBold);
+        var iconFont = D2d.Format(iconH, TextAlignmentLeading, FontWeightNormal, icon: true);
         int nameW = 0, pctW = 0, etaW = 0;
         foreach (var r in rows)
         {
-            nameW = Math.Max(nameW, GdiText.TextWidth(hdc, r.Name));
-            pctW = Math.Max(pctW, GdiText.TextWidth(hdc, r.Pct));
-            etaW = Math.Max(etaW, GdiText.TextWidth(hdc, r.Eta));
+            nameW = Math.Max(nameW, D2d.TextWidth(r.Name, textFont));
+            pctW = Math.Max(pctW, D2d.TextWidth(r.Pct, textFont));
+            etaW = Math.Max(etaW, D2d.TextWidth(r.Eta, textFont));
         }
         bool anyEta = rows.Any(r => r.Eta.Length > 0);
         etaW = anyEta ? etaW : 0;
-        SelectObject(hdc, iconFont);
-        int glyphW = GdiText.TextWidth(hdc, "\uE85A"); // widest battery glyph
-        SelectObject(hdc, old);
-        // Device-type icon column: widest kind at this row height (must run
-        // while hdc is still valid).
-        int kindW = rows.Count > 0 ? rows.Max(r => DeviceIcons.WidthFor(hdc, iconH, r.Kind)) : 0;
-        ReleaseDC(0, hdc);
+        int glyphW = Math.Max(D2d.TextWidth("\uE85A", iconFont), 1); // widest battery glyph
+        int kindW = rows.Count > 0 ? rows.Max(r => DeviceIcons.WidthFor(iconH, r.Kind)) : 0;
+        return (nameW, pctW, etaW, glyphW, kindW, anyEta);
+    }
+
+    /// <summary>Panel size for `rows` (measured with the real formats, DPI-scaled).</summary>
+    private static (int W, int H) Measure(List<Row> rows)
+    {
+        if (!D2d.EnsureGraphics())
+        {
+            return (0, 0);
+        }
+        float scale = ScaleOf();
+        var cols = Columns(rows);
         int pad = (int)MathF.Round(10.0f * scale);
         int gap = (int)MathF.Round(6.0f * scale);
+        int textH = (int)MathF.Round(14.0f * scale);
+        int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
         int rowH = Math.Max(iconH, textH);
         int rowGap = (int)MathF.Round(3.0f * scale);
         int n = rows.Count;
         // Columns: [type icon] [glyph] [name] [eta?] [pct].
-        int cols = kindW + gap + glyphW + gap + nameW + gap;
-        if (etaW > 0)
+        int colsW = cols.KindW + gap + cols.GlyphW + gap + cols.NameW + gap;
+        if (cols.EtaW > 0)
         {
-            cols += etaW + gap;
+            colsW += cols.EtaW + gap;
         }
-        cols += pctW;
-        int w = Math.Max((pad * 2) + cols, (int)MathF.Round(150.0f * scale));
+        colsW += cols.PctW;
+        int w = Math.Max((pad * 2) + colsW, (int)MathF.Round(150.0f * scale));
         int h = (pad * 2) + (n * rowH) + (Math.Max(n - 1, 0) * rowGap);
         return (w, h);
     }
@@ -342,6 +304,10 @@ public static class HoverPanel
         // 120ms tick. Position still follows the cursor.
         bool sizeKnown = !rowsChanged && _panelSize.W > 0 && scale == _lastScale;
         var (w, h) = sizeKnown ? _panelSize : Measure(rows);
+        if (w <= 0 || h <= 0)
+        {
+            return; // graphics unavailable (see D2d.EnsureGraphics)
+        }
         var pos = Place(widget, wrect, w, h, cursor);
         bool geometryChanged = _panelPos != pos || _panelSize != (w, h) || !_shown;
         _rows = rows;
@@ -379,10 +345,10 @@ public static class HoverPanel
     }
 
     /// <summary>Columns: [type icon] [battery glyph] [name …] [eta] [pct].
-    /// Painted into a 32bpp DIB and presented with per-pixel alpha
-    /// (UpdateLayeredWindow, same technique as the widget): content pixels
-    /// carry full alpha and always render, the card body is 50% translucent,
-    /// and corners are anti-aliased by the presenter.</summary>
+    /// Painted into the 32bpp DIB and presented with per-pixel alpha
+    /// (UpdateLayeredWindow). D2D writes premultiplied alpha directly, so
+    /// content pixels keep real partial coverage — nothing is reclassified
+    /// after the fact.</summary>
     private static void Paint()
     {
         var hwnd = _hoverWnd;
@@ -400,15 +366,19 @@ public static class HoverPanel
             var rows = _rows;
             var (w, h) = _panelSize;
             EnsureSurface(w, h);
-            if (_memDc == 0)
+            if (_rt == null || _memDc == 0)
             {
-                // No offscreen surface this tick — skip rather than draw
-                // straight onto the ULW window, whose pixels would be
-                // replaced by the next upload anyway.
+                // No D2D surface this tick — skip rather than draw directly
+                // onto the ULW window, whose pixels would be replaced by the
+                // next upload anyway.
                 return;
             }
-            PaintBody(_memDc, rows, w, h);
+            PaintD2D(rows, w, h);
             Present(hwnd);
+        }
+        catch (Exception e)
+        {
+            Log.Error("hover panel paint failed", e);
         }
         finally
         {
@@ -416,65 +386,58 @@ public static class HoverPanel
         }
     }
 
-    private static void PaintBody(IntPtr hdc, List<Row> rows, int w, int h)
+    private static void PaintD2D(List<Row> rows, int w, int h)
     {
+        var rt = _rt!;
+        var brush = _brush!;
+        var full = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
+        rt.BindDC(_memDc, ref full);
+        rt.BeginDraw();
         try
         {
-            // Card base: opaque dark fill. The presenter turns bare-card
-            // pixels 50%-translucent (dimmed backdrop shows through) and
-            // content pixels fully opaque, with anti-aliased corners.
+            var transparent = new D2D1_COLOR_F(0f, 0f, 0f, 0f);
+            rt.Clear(ref transparent);
+            rt.SetAntialiasMode(D2D1Consts.AntialiasModePerPrimitive);
+            rt.SetTextAntialiasMode(D2D1Consts.TextAntialiasModeGrayscale);
+
             float scale = ScaleOf();
-            int radius = (int)MathF.Round(8.0f * scale);
-            var bg = CreateSolidBrush(0x00202020);
-            var keyRect = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
-            FillRect(hdc, ref keyRect, bg);
-            DeleteObject(bg);
-            var border = CreatePen(PS_SOLID, 1, 0x005A5A5A);
-            var oldPen = SelectObject(hdc, border);
-            var oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            RoundRect(hdc, 0, 0, w, h, radius * 2, radius * 2);
-            SelectObject(hdc, oldPen);
-            SelectObject(hdc, oldBrush);
-            DeleteObject(border);
-            SetBkMode(hdc, TRANSPARENT);
+            float radius = MathF.Round(8.0f * scale);
+            var rect = new D2D1_RECT_F(0f, 0f, w, h);
+            // Card base: real 50%-translucent dark rounded rect; corners are
+            // anti-aliased by D2D itself (no analytic coverage pass needed).
+            var cardColor = D2D1.Color(0x20, 0x20, 0x20, 0.5f);
+            brush.SetColor(ref cardColor);
+            rt.FillRoundedRectangle(new D2D1_ROUNDED_RECT { Rect = rect, RadiusX = radius, RadiusY = radius }, brush);
+            var inset = new D2D1_RECT_F(0.5f, 0.5f, w - 0.5f, h - 0.5f);
+            var borderColor = D2D1.Color(0x5A, 0x5A, 0x5A, 1f);
+            brush.SetColor(ref borderColor);
+            rt.DrawRoundedRectangle(new D2D1_ROUNDED_RECT { Rect = inset, RadiusX = radius, RadiusY = radius }, brush, 1f, IntPtr.Zero);
 
             int pad = (int)MathF.Round(10.0f * scale);
             int gap = (int)MathF.Round(6.0f * scale);
-            int textH = (int)MathF.Round(14.0f * scale);
-            int iconH = DeviceIcons.SnapSize((int)MathF.Round(15.0f * scale));
+            int textH = (int)MathF.Round(13.0f * scale);
+            int iconH = DeviceIcons.SnapSize((int)MathF.Round(20.0f * scale));
             int rowH = Math.Max(iconH, textH);
             int rowGap = (int)MathF.Round(3.0f * scale);
-            var iconFont = CachedIconFont(iconH);
-            var textFont = CachedPanelTextFont(textH);
-            var old = SelectObject(hdc, textFont);
+            var cols = Columns(rows);
+            var nameFormat = D2d.Format(textH, TextAlignmentLeading, FontWeightSemiBold, ellipsis: true);
+            var rightFormat = D2d.Format(textH, TextAlignmentTrailing, FontWeightSemiBold);
+            var glyphFormat = D2d.Format(iconH, TextAlignmentLeading, FontWeightNormal, icon: true);
+            var kindFormat = D2d.Format(iconH, TextAlignmentCenter, FontWeightNormal, icon: true);
 
-            int pctW = 0, etaW = 0;
-            foreach (var r in rows)
-            {
-                pctW = Math.Max(pctW, GdiText.TextWidth(hdc, r.Pct));
-                etaW = Math.Max(etaW, GdiText.TextWidth(hdc, r.Eta));
-            }
-            bool anyEta = rows.Any(r => r.Eta.Length > 0);
-            etaW = anyEta ? etaW : 0;
-            SelectObject(hdc, iconFont);
-            int glyphW = GdiText.TextWidth(hdc, "\uE85A");
-            SelectObject(hdc, old);
-
-            // Columns: [type icon] [battery glyph] [name …] [eta?] [pct].
-            int kindW = rows.Count > 0 ? rows.Max(r => DeviceIcons.WidthFor(hdc, iconH, r.Kind)) : 0;
-            int pctRight = w - pad;
-            int pctLeft = pctRight - pctW;
             // Columns grow leftward from the percentage: predicted time first.
+            int pctRight = w - pad;
+            int pctLeft = pctRight - cols.PctW;
             int left = pctLeft - gap;
             int etaLeft = 0, etaRight = 0;
-            if (anyEta)
+            if (cols.AnyEta)
             {
                 etaRight = left;
-                etaLeft = etaRight - etaW;
+                etaLeft = etaRight - cols.EtaW;
                 left = etaLeft - gap;
             }
-            int glyphX = pad + kindW + gap;
-            int nameLeft = glyphX + glyphW + gap;
+            int glyphX = pad + cols.KindW + gap;
+            int nameLeft = glyphX + cols.GlyphW + gap;
             int nameRight = Math.Max(left, nameLeft);
 
             // Coloring: the charging/saver/disconnected state colors always
@@ -489,20 +452,16 @@ public static class HoverPanel
                 int top = y;
                 int bottom = y + rowH;
                 var c = BatteryColors.LevelFillColor(r.Level, r.Connected, r.Saver, r.Charging, colorize);
-                uint levelColor = GdiText.ColorRef(c.R, c.G, c.B);
+                var levelColor = D2D1.Color(c.R, c.G, c.B, 1f);
+
                 // Device-type icon: light gray for connected, dim for not;
-                // centered in the kind column and the row.
-                var kindRgb = r.Connected ? ((byte)0xE8, (byte)0xE8, (byte)0xE8) : ((byte)0x78, (byte)0x78, (byte)0x78);
-                int ibh = Math.Min(rowH, iconH);
-                int iw = DeviceIcons.WidthFor(hdc, ibh, r.Kind);
-                DeviceIcons.Draw(
-                    hdc,
-                    // Round the leftover half-pixel up (mouse glyph centering).
-                    pad + ((kindW - iw + 1) / 2),
-                    top + ((rowH - ibh) / 2),
-                    ibh,
-                    r.Kind,
-                    kindRgb);
+                // centered in the kind column by the text format.
+                byte kc = r.Connected ? (byte)0xE8 : (byte)0x78;
+                Tint(brush, kc, kc, kc);
+                var kindRect = new D2D1_RECT_F(pad, top, pad + cols.KindW, bottom);
+                rt.DrawText(DeviceIcons.GlyphFor(r.Kind).ToString(), 1, kindFormat, ref kindRect, brush,
+                    D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
+
                 // Battery glyph, two layers: the ACTIVE series' level glyph
                 // tinted with the state color, then the same series' 0%
                 // glyph (plain outline, or outline + bolt/leaf) on top in
@@ -510,64 +469,73 @@ public static class HoverPanel
                 // so only the fill stays colored. Same series is required:
                 // the status glyphs cut their outline where the symbol
                 // crosses it.
-                var glyph = new[] { BatteryGlyphs.LevelGlyph(r.Level, r.Connected, r.Saver, r.Charging) };
-                var grc = new RECT { Left = glyphX, Top = top, Right = glyphX + glyphW + 4, Bottom = bottom };
-                SelectObject(hdc, iconFont);
-                // Layer 1: levelColor — the state colors always, the level
-                // gradient only while the option is on (see LevelFillColor;
-                // off + plain discharge is the default white).
-                SetTextColor(hdc, levelColor);
-                DrawTextW(hdc, glyph, glyph.Length, ref grc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                var glyphRect = new D2D1_RECT_F(glyphX, top, glyphX + cols.GlyphW + 4, bottom);
+                Tint(brush, c.R, c.G, c.B);
+                rt.DrawText(BatteryGlyphs.LevelGlyph(r.Level, r.Connected, r.Saver, r.Charging).ToString(),
+                    1, glyphFormat, ref glyphRect, brush,
+                    D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
                 if (BatteryGlyphs.StatusOverlayGlyph(r.Connected, r.Saver, r.Charging) is { } statusGlyph)
                 {
-                    var status = new[] { statusGlyph };
-                    var src = new RECT { Left = glyphX, Top = top, Right = glyphX + glyphW + 4, Bottom = bottom };
-                    SetTextColor(hdc, 0x00FF_FFFFu);
-                    DrawTextW(hdc, status, status.Length, ref src, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                    Tint(brush, 0xFF, 0xFF, 0xFF);
+                    rt.DrawText(statusGlyph.ToString(), 1, glyphFormat, ref glyphRect, brush,
+                        D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
                 }
+
                 // Name: displayed device bright white, connected dimmer,
                 // disconnected gray.
-                uint nameColor = r.Displayed ? 0x00FF_FFFFu
-                    : r.Connected ? 0x00D8D8D8u
-                    : 0x00909090u;
+                byte nc = r.Displayed ? (byte)0xFF : r.Connected ? (byte)0xD8 : (byte)0x90;
                 if (r.Name.Length > 0)
                 {
-                    var name = r.Name.ToCharArray();
-                    var nrc = new RECT { Left = nameLeft, Top = top, Right = Math.Max(nameRight, nameLeft), Bottom = bottom };
-                    SelectObject(hdc, textFont);
-                    SetTextColor(hdc, nameColor);
-                    DrawTextW(hdc, name, name.Length, ref nrc, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+                    Tint(brush, nc, nc, nc);
+                    var nameRect = new D2D1_RECT_F(nameLeft, top, Math.Max(nameRight, nameLeft), bottom);
+                    rt.DrawText(r.Name, (uint)r.Name.Length, nameFormat, ref nameRect, brush,
+                        D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
                 }
                 // Predicted usage time / time-to-full (right-aligned, dim).
-                if (anyEta && r.Eta.Length > 0)
+                if (cols.AnyEta && r.Eta.Length > 0)
                 {
-                    var eta = r.Eta.ToCharArray();
-                    var erc = new RECT { Left = etaLeft - 2, Top = top, Right = etaRight, Bottom = bottom };
-                    SelectObject(hdc, textFont);
-                    SetTextColor(hdc, 0x00B0B0B0u);
-                    DrawTextW(hdc, eta, eta.Length, ref erc, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+                    Tint(brush, 0xB0, 0xB0, 0xB0);
+                    var etaRect = new D2D1_RECT_F(etaLeft - 2, top, etaRight, bottom);
+                    rt.DrawText(r.Eta, (uint)r.Eta.Length, rightFormat, ref etaRect, brush,
+                        D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
                 }
                 // Percentage, state/level-colored, right-aligned.
-                var pct = r.Pct.ToCharArray();
-                var prc = new RECT { Left = pctLeft - 2, Top = top, Right = pctRight, Bottom = bottom };
-                SelectObject(hdc, textFont);
-                SetTextColor(hdc, levelColor);
-                DrawTextW(hdc, pct, pct.Length, ref prc, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+                Tint(brush, c.R, c.G, c.B);
+                var pctRect = new D2D1_RECT_F(pctLeft - 2, top, pctRight, bottom);
+                rt.DrawText(r.Pct, (uint)r.Pct.Length, rightFormat, ref pctRect, brush,
+                    D2D1Consts.DrawTextOptionsNone, MeasuringModeNatural);
                 y += rowH + rowGap;
             }
-            SelectObject(hdc, old);
         }
-        catch (Exception e)
+        finally
         {
-            Log.Error("hover panel paint body failed", e);
+            var hr = rt.EndDraw(out _, out _);
+            if (hr != 0)
+            {
+                Log.Error($"razer-taskbar: hover EndDraw failed: 0x{hr:X8}");
+                if ((uint)hr == 0x88990010u)
+                {
+                    DestroySurface(); // D2DERR_RECREATE_TARGET — rebuilt next tick
+                }
+            }
         }
     }
 
-    /// <summary>Offscreen 32bpp top-down DIB matching the panel size;
-    /// recreated only when the size changes. Widget-thread only.</summary>
+    private static void Tint(ID2D1SolidColorBrush b, byte r, byte g, byte bl)
+    {
+        var c = D2D1.Color(r, g, bl, 1f);
+        b.SetColor(ref c);
+    }
+
+    /// <summary>Offscreen 32bpp top-down DIB + the DC render target bound to
+    /// it; recreated only when the size changes. Widget-thread only.</summary>
     private static void EnsureSurface(int w, int h)
     {
-        if (_memDc != 0 && _memW == w && _memH == h)
+        if (_memDc != 0 && _rt != null && _memW == w && _memH == h)
+        {
+            return;
+        }
+        if (!D2d.EnsureGraphics())
         {
             return;
         }
@@ -600,10 +568,26 @@ public static class HoverPanel
         SelectObject(_memDc, _memBmp);
         _memW = w;
         _memH = h;
+        try
+        {
+            _rt = D2d.CreateRenderTarget();
+            var full = new RECT { Left = 0, Top = 0, Right = w, Bottom = h };
+            _rt.BindDC(_memDc, ref full);
+            _brush = D2d.CreateBrush(_rt);
+        }
+        catch (Exception e)
+        {
+            Log.Error("razer-taskbar: hover D2D render target creation failed", e);
+            DestroySurface();
+        }
     }
 
     private static void DestroySurface()
     {
+        D2d.TryRelease(_brush);
+        _brush = null;
+        D2d.TryRelease(_rt);
+        _rt = null;
         if (_memDc != 0)
         {
             DeleteDC(_memDc);
@@ -619,69 +603,11 @@ public static class HoverPanel
         _memH = 0;
     }
 
-    /// <summary>Turn the GDI render into premultiplied ARGB and upload.
-    /// Analytic rounded-rect coverage zeroes the outside and anti-aliases the
-    /// corners; bare-card pixels (exact body fill) become 50%-translucent so
-    /// the DWM blur-behind shows through, while drawn content — text, glyphs,
-    /// border — keeps full alpha and always renders.</summary>
+    /// <summary>Hand the painted DIB frame to DWM via UpdateLayeredWindow.
+    /// The D2D frame already carries correct premultiplied alpha — nothing
+    /// to recompute here.</summary>
     private static void Present(IntPtr hwnd)
     {
-        int bytes = _memW * _memH * 4;
-        if (_buf.Length != bytes)
-        {
-            _buf = new byte[bytes];
-        }
-        System.Runtime.InteropServices.Marshal.Copy(_memBits, _buf, 0, bytes);
-        float scale = ScaleOf();
-        int radius = (int)MathF.Round(8.0f * scale);
-        float cx = (_memW - 1) / 2f, cy = (_memH - 1) / 2f;
-        float innerX = _memW / 2f - radius, innerY = _memH / 2f - radius;
-        for (int y = 0; y < _memH; y++)
-        {
-            float dy = MathF.Abs(y - cy) - innerY;
-            if (dy < 0)
-            {
-                dy = 0;
-            }
-            for (int x = 0; x < _memW; x++)
-            {
-                int i = (y * _memW + x) * 4;
-                float dx = MathF.Abs(x - cx) - innerX;
-                if (dx < 0)
-                {
-                    dx = 0;
-                }
-                float d = MathF.Sqrt(dx * dx + dy * dy);
-                float cov = Math.Clamp(radius - d + 0.5f, 0f, 1f);
-                if (cov <= 0)
-                {
-                    _buf[i] = 0;
-                    _buf[i + 1] = 0;
-                    _buf[i + 2] = 0;
-                    _buf[i + 3] = 0;
-                    continue;
-                }
-                if (_buf[i] == 0x20 && _buf[i + 1] == 0x20 && _buf[i + 2] == 0x20)
-                {
-                    // Bare card: 50% translucent dark over the blur.
-                    _buf[i] = 0x10;
-                    _buf[i + 1] = 0x10;
-                    _buf[i + 2] = 0x10;
-                    _buf[i + 3] = (byte)MathF.Round(0x80 * cov);
-                }
-                else
-                {
-                    // Content: opaque, premultiplied by the corner coverage.
-                    float k = cov;
-                    _buf[i] = (byte)MathF.Round(_buf[i] * k);
-                    _buf[i + 1] = (byte)MathF.Round(_buf[i + 1] * k);
-                    _buf[i + 2] = (byte)MathF.Round(_buf[i + 2] * k);
-                    _buf[i + 3] = (byte)MathF.Round(255f * k);
-                }
-            }
-        }
-        System.Runtime.InteropServices.Marshal.Copy(_buf, 0, _memBits, bytes);
-
         var dst = new POINT();
         if (TaskbarLocator.WindowRect(hwnd) is { } wr)
         {

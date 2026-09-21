@@ -162,7 +162,7 @@ public static class TrayIcon
     /// edges. Alpha comes from drawn-pixel coverage. Returns 0 on GDI
     /// failure (handle exhaustion): the caller's NIM_ADD/NIM_MODIFY then
     /// degrades to an icon-less registration, same silent-failure rule as
-    /// the other DIB sites (GdiText/DeviceIcons/WidgetWindow/HoverPanel).
+    /// the other DIB sites (WidgetWindow/HoverPanel/D2d scanner).
     /// A nonzero result is owned by the <see cref="Icons"/> cache (the shell
     /// copies the image at NIM_ADD/NIM_MODIFY time) and lives until
     /// Destroy().</summary>
@@ -210,7 +210,7 @@ public static class TrayIcon
 
         static int S(int v) => v * 2;
         var white = CreateSolidBrush(0x00FF_FFFF);
-        var fill = CreateSolidBrush(GdiText.ColorRef(fr.R, fr.G, fr.B));
+        var fill = CreateSolidBrush(ColorRef(fr.R, fr.G, fr.B));
         var pen = CreatePen(PS_SOLID, 2, 0x00FF_FFFF);
         var oldPen = SelectObject(mem, pen);
         SelectObject(mem, GetStockObject(NULL_BRUSH));

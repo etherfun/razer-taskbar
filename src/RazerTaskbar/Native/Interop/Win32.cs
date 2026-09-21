@@ -9,6 +9,11 @@ namespace RazerTaskbar.Native.Interop;
 
 public static class Win32Consts
 {
+    /// <summary>GDI COLORREF packing (0x00BBGGRR) — tray icon HICON work
+    /// and any other brush-color site outside the D2D pipeline.</summary>
+    public static uint ColorRef(byte r, byte g, byte b)
+        => (uint)(r | (g << 8) | (b << 16));
+
     // Window styles
     public const uint WS_POPUP = 0x8000_0000;
     public const uint WS_CHILD = 0x4000_0000;
@@ -40,6 +45,7 @@ public static class Win32Consts
     // GetWindow / GetAncestor
     public const uint GW_HWNDPREV = 3;
     public const uint GA_PARENT = 1;
+    public const uint GA_ROOT = 2;
 
     // Messages
     public const uint WM_DESTROY = 2;
@@ -361,6 +367,12 @@ public static class User32
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    /// <summary>Top-level (hit-test effective) window at the point — sends
+    /// WM_NCHITTEST and skips HTTRANSPARENT windows, so a click-through
+    /// overlay resolves to whatever is actually beneath it.</summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT pt);
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetWindow(IntPtr hWnd, uint nCmd);
