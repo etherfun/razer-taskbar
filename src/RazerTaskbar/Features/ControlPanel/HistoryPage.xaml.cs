@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using RazerTaskbar.Core;
 using RazerTaskbar.Host;
+using RazerTaskbar.Native;
 
 namespace RazerTaskbar.Features.ControlPanel;
 
@@ -15,17 +16,20 @@ namespace RazerTaskbar.Features.ControlPanel;
 public sealed class CycleItem
 {
     public bool Charge { get; init; }
+    /// <summary>Cycle opened by a battery swap rather than by a charge
+    /// session (<see cref="Span.SwapStart"/>).</summary>
+    public bool Swap { get; init; }
     public string Start { get; init; } = "";
     public string Dur { get; init; } = "";
     public string Levels { get; init; } = "";
 
-    public string PillText() => I18n.Tr(Charge ? "CHARGE" : "USE");
+    public string PillText() => I18n.Tr(Swap ? "SWAP" : Charge ? "CHARGE" : "USE");
 
-    public SolidColorBrush PillBackground() => Solid(Charge ? 0x2A4026 : 0x2B2B2B);
+    public SolidColorBrush PillBackground() => Solid(Swap ? 0x3A3524 : Charge ? 0x2A4026 : 0x2B2B2B);
 
-    public SolidColorBrush PillBorderBrush() => Solid(Charge ? 0x6CCB5F : 0x5A5A5A);
+    public SolidColorBrush PillBorderBrush() => Solid(Swap ? 0xC9A227 : Charge ? 0x6CCB5F : 0x5A5A5A);
 
-    public SolidColorBrush PillForeground() => Solid(Charge ? 0x6CCB5F : 0xB0B0B0);
+    public SolidColorBrush PillForeground() => Solid(Swap ? 0xE3C46A : Charge ? 0x6CCB5F : 0xB0B0B0);
 
     public SolidColorBrush DurBrush() => Solid(Charge ? 0x6CCB5F : 0xE8E8E8);
 
@@ -53,6 +57,13 @@ public sealed partial class HistoryPage : Page
     private List<Sample> _currentSamples = new();
     /// <summary>Compare-series device ("" = none) for the chart overlay.</summary>
     private string _compareHandle = "";
+    /// <summary>Battery-type setting for the shown device (Auto = model table)
+    /// and the types it resolves to for the shown / compare device (see
+    /// <see cref="BatteryTypes"/>). Resolved on the UI thread in Reload, read
+    /// by the background span pass.</summary>
+    private BatteryType _batteryType = BatteryType.Auto;
+    private BatteryType _resolvedBatteryType = BatteryType.Rechargeable;
+    private BatteryType _resolvedCompareType = BatteryType.Rechargeable;
     /// <summary>Reload generation: a slow background load finishing after a
     /// newer selection change must not render stale data.</summary>
     private int _reloadGen;
@@ -81,6 +92,8 @@ public sealed partial class HistoryPage : Page
         LegendDischarging.Text = I18n.Tr("discharging");
         LegendOff.Text = I18n.Tr("off");
         CompareLabel.Text = I18n.Tr("compare device");
+        BatteryTypeLabel.Text = I18n.Tr("Battery type");
+        ToolTipService.SetToolTip(BatteryTypeCombo, I18n.Tr("Which battery the device uses. Auto matches the model against the AA/AAA list openrazer uses (Atheris, Orochi, HyperSpeed models, Pro Click Mini); a replaceable cell never charges, so its level jumps read as battery swaps and charge statistics are skipped."));
         ShowOffCheck.Content = I18n.Tr("Show off periods");
         // Stat card captions (values render in Reload).
         StatCyclesCaption.Text = I18n.Tr("discharge cycles");
@@ -126,6 +139,20 @@ public sealed partial class HistoryPage : Page
                 30 => 1,
                 _ => 2,
             };
+            // Battery-type combo: same rebuild/restore dance; the current
+            // selection is re-applied by Reload below.
+            BatteryTypeCombo.ItemsSource = new List<string>
+            {
+                I18n.Tr("Auto"),
+                I18n.Tr("Built-in rechargeable"),
+                I18n.Tr("Replaceable battery (AA/AAA)"),
+            };
+            BatteryTypeCombo.SelectedIndex = _batteryType switch
+            {
+                BatteryType.Rechargeable => 1,
+                BatteryType.Replaceable => 2,
+                _ => 0,
+            };
         }
         finally
         {
@@ -135,6 +162,7 @@ public sealed partial class HistoryPage : Page
         AutomationProperties.SetName(DeviceCombo, I18n.Tr("Shown device"));
         AutomationProperties.SetName(ExportButton, I18n.Tr("Export"));
         AutomationProperties.SetName(RangeCombo, I18n.Tr("Time range"));
+        AutomationProperties.SetName(BatteryTypeCombo, I18n.Tr("Battery type"));
         AutomationProperties.SetName(CompareCombo, I18n.Tr("compare"));
         AutomationProperties.SetName(ShowOffCheck, I18n.Tr("Show off periods"));
         AutomationProperties.SetName(Chart, I18n.Tr("Battery level"));
@@ -173,6 +201,44 @@ public sealed partial class HistoryPage : Page
             return;
         }
         Reload();
+    }
+
+    /// <summary>Battery-type setting changed for the shown device: persist the
+    /// per-device override (Auto drops it, so the model table decides again)
+    /// and re-interpret the recorded series.</summary>
+    private void BatteryType_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection)
+        {
+            return;
+        }
+        _batteryType = BatteryTypeCombo.SelectedIndex switch
+        {
+            1 => BatteryType.Rechargeable,
+            2 => BatteryType.Replaceable,
+            _ => BatteryType.Auto,
+        };
+        var handle = SelectedHandle();
+        if (handle.Length > 0)
+        {
+            var picked = _batteryType;
+            // The authoritative config copy lives on the widget thread.
+            AppState.PostModifyConfig(cfg =>
+            {
+                if (picked == BatteryType.Auto)
+                {
+                    cfg.DeviceBatteryTypes.Remove(handle);
+                }
+                else
+                {
+                    cfg.DeviceBatteryTypes[handle] = picked.ToConfig();
+                }
+            });
+        }
+        // Pass the pick through: the posted config edit has not reached the
+        // published snapshot yet, so a plain Reload() would read the old type
+        // and snap the combo back (the "click it twice" bug).
+        Reload(_batteryType);
     }
 
     private void BottomBar_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -279,7 +345,7 @@ public sealed partial class HistoryPage : Page
         return _devices.Count > 0 ? _devices[0].Handle : "";
     }
 
-    private async void Reload()
+    private async void Reload(BatteryType? batteryTypeOverride = null)
     {
         int gen = ++_reloadGen;
 
@@ -312,9 +378,39 @@ public sealed partial class HistoryPage : Page
 
         // Range (viewer.rs: since = now - range_days*86400, 0 = all).
         var handle = SelectedHandle();
+        // Battery type of the shown device: the per-device override from
+        // settings, else the openrazer-derived model table (BatteryTypes).
+        // Resolved on this (UI) thread — the background span pass below needs
+        // the answer, and the config snapshot is a lock-free read. The config
+        // edit itself is posted to the widget thread, so the published
+        // snapshot lags a beat behind a just-picked type; the picker passes
+        // its value in (batteryTypeOverride) instead of re-reading it here,
+        // otherwise Reload would dial the combo straight back to the old one.
+        var typeMap = AppState.Instance.ConfigSnapshot().DeviceBatteryTypes;
+        _batteryType = batteryTypeOverride ?? BatteryTypes.Parse(
+            handle.Length > 0 && typeMap.TryGetValue(handle, out var configured) ? configured : null);
+        _resolvedBatteryType = BatteryTypes.Resolve(
+            _batteryType, roster.FirstOrDefault(r => r.Handle == handle).Name ?? "");
+        _suppressSelection = true;
+        try
+        {
+            BatteryTypeCombo.SelectedIndex = _batteryType switch
+            {
+                BatteryType.Rechargeable => 1,
+                BatteryType.Replaceable => 2,
+                _ => 0,
+            };
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long since = _rangeDays > 0 ? now - (_rangeDays * 86400) : 0;
         var requestedCompare = _compareHandle;
+        _resolvedCompareType = BatteryTypes.Resolve(
+            BatteryTypes.Parse(typeMap.TryGetValue(requestedCompare, out var compareCfg) ? compareCfg : null),
+            roster.FirstOrDefault(r => r.Handle == requestedCompare).Name ?? "");
 
         // Reads and statistics off the UI thread: an "All" range pulls the
         // whole series and one Deflate+ComputeSpans pass feeds the stat
@@ -328,15 +424,38 @@ public sealed partial class HistoryPage : Page
                 var samples = handle.Length > 0
                     ? HistoryService.SamplesInRange(handle, since)
                     : new List<Sample>();
+                // A replaceable cell has no charging hardware: drop whatever
+                // charge flag the reading carried, so neither a bogus status
+                // nor the swap jump can be read as a charge session.
+                bool replaceable = _resolvedBatteryType == BatteryType.Replaceable;
+                if (replaceable && samples.Count > 0)
+                {
+                    samples = BatteryTypes.AsReplaceable(samples);
+                }
                 var (discharge, charge) = HistoryService.ComputeSpans(ReboundFilter.Deflate(samples));
                 var stats = HistoryService.CycleStatsOfSpans(discharge, charge);
-                var health = HistoryService.HealthStatsOfSpans(charge);
+                // No charge sessions → no charge-speed signal → no fade
+                // estimate worth showing (the card says so instead).
+                var health = replaceable ? null : HistoryService.HealthStatsOfSpans(charge);
                 List<Sample>? compareSamples = null;
                 if (requestedCompare.Length > 0 && requestedCompare != handle)
                 {
                     compareSamples = HistoryService.SamplesInRange(requestedCompare, since);
+                    if (_resolvedCompareType == BatteryType.Replaceable && compareSamples.Count > 0)
+                    {
+                        compareSamples = BatteryTypes.AsReplaceable(compareSamples);
+                    }
                 }
-                var est = handle.Length > 0 ? HistoryService.EstimateFor(handle) : null;
+                // Remaining time for a replaceable cell is a pure discharge
+                // prediction off the corrected series (the cached estimate
+                // would still count the noise charge flag).
+                Estimate? est = null;
+                if (handle.Length > 0)
+                {
+                    est = replaceable
+                        ? (samples.Count > 0 ? HistoryService.Predict(samples, samples[^1].Level, false) : null)
+                        : HistoryService.EstimateFor(handle);
+                }
                 return (samples, discharge, charge, stats, health, compareSamples, est);
             });
         }
@@ -399,8 +518,15 @@ public sealed partial class HistoryPage : Page
         StatNowCaption.Text = I18n.Tr(est2 is { Charging: true } ? "until full (now)" : "time remaining now");
 
         // Battery health (computed over ALL recorded data, not range-limited:
-        // fade is a years-scale trend).
-        if (data.health is { } h)
+        // fade is a years-scale trend). A replaceable cell cannot have one —
+        // the estimate reads charge speed, which only a charging pack shows.
+        if (_resolvedBatteryType == BatteryType.Replaceable)
+        {
+            HealthSohValue.Text = I18n.Tr("n/a (replaceable battery)");
+            HealthFadeValue.Text = "--";
+            HealthEolValue.Text = "--";
+        }
+        else if (data.health is { } h)
         {
             HealthSohValue.Text = $"≈{Math.Round(h.SohPct)}%";
             HealthFadeValue.Text = h.FadePerMonthPct >= 0.1 ? $"−{h.FadePerMonthPct:0.0}%" : I18n.Tr("stable");
@@ -465,6 +591,9 @@ public sealed partial class HistoryPage : Page
             items.Add((s.EndTs, new CycleItem
             {
                 Charge = false,
+                // A cycle the device started on a freshly inserted cell reads
+                // as a swap, not as a charge session (see Span.SwapStart).
+                Swap = s.SwapStart,
                 Start = $"{BatteryChart.FormatStamp(s.StartTs)} → {BatteryChart.FormatStamp(s.EndTs)}",
                 Dur = HistoryService.FormatDuration(s.ActiveSecs),
                 Levels = $"{s.LevelStart}→{s.LevelEnd}%",

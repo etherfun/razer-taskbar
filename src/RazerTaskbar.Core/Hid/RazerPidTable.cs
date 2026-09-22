@@ -3,7 +3,11 @@
 // `charge_status`). Old firmware (~2019-) silently ignores queries with a
 // wrong transaction id, so known devices go straight to their id; unknown
 // PIDs probe the fallback list — newer generations accept any id, validated
-// by echo + CRC.
+// by echo + CRC. The id itself is not a magic address: on a multi-device
+// dongle its top bit picks the sub-device slot (0x00-0x7F → primary,
+// 0x80-0xFF → secondary, 2026-09-22 full-sweep measurement) and the low 7
+// bits are a free transaction sequence number — the table values are the
+// conventional representatives kept for cross-implementation parity.
 
 namespace RazerTaskbar.Core;
 

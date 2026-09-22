@@ -1098,16 +1098,30 @@ public static class HidProbe
     {
         AttachParentConsole();
         var scanMode = args.Contains("--hid-scan");
+        var powerMode = args.Contains("--hid-power");
+        var txMode = args.Contains("--hid-tx");
+        var deepMode = args.Contains("--hid-deep");
         var lines = new List<string>();
         StreamWriter? stream = null;
         var dir = Path.Combine(
             string.IsNullOrEmpty(Environment.GetEnvironmentVariable("APPDATA")) ? "." : Environment.GetEnvironmentVariable("APPDATA")!,
             "razer-taskbar");
         Directory.CreateDirectory(dir);
-        var logPath = Path.Combine(dir, scanMode ? "hid-scan.log" : "hid-probe.log");
+        // --hid-power takes a label so the A/B runs (Synapse setting at A vs
+        // B) land in two files that can be diffed against each other.
+        var label = args.FirstOrDefault(a => a.StartsWith("--label=", StringComparison.OrdinalIgnoreCase))
+            is { } labelled
+            ? new string(labelled["--label=".Length..]
+                .Where(c => char.IsLetterOrDigit(c) || c is '-' or '_').ToArray())
+            : "";
+        var logPath = Path.Combine(dir, scanMode ? "hid-scan.log"
+            : powerMode ? $"hid-power-{(label.Length > 0 ? label : DateTime.Now.ToString("yyyyMMdd-HHmmss"))}.log"
+            : txMode ? "hid-tx.log"
+            : deepMode ? "hid-deep.log"
+            : "hid-probe.log");
         // The scan runs for minutes: stream every line to the file so
         // progress is observable while it runs.
-        if (scanMode)
+        if (scanMode || powerMode || txMode || deepMode)
         {
             stream = new StreamWriter(logPath, append: false) { AutoFlush = true };
         }
@@ -1118,7 +1132,7 @@ public static class HidProbe
             stream?.WriteLine(s);
         }
 
-        Out($"hid-probe {DateTime.Now:yyyy-MM-dd HH:mm:ss}{(scanMode ? " [get-half scan]" : "")}");
+        Out($"hid-probe {DateTime.Now:yyyy-MM-dd HH:mm:ss}{(scanMode ? " [get-half scan]" : powerMode ? $" [power sweep{(label.Length > 0 ? " " + label : "")}]" : txMode ? " [tx sweep]" : deepMode ? " [deep dump]" : "")}");
         var paths = HidWatcher.EnumerateRazerInterfacePaths();
         Out($"razer HID collections: {paths.Count}");
 
@@ -1132,6 +1146,18 @@ public static class HidProbe
             // undocumented get-mirrors of the pairing commands (0x00/0xC1,
             // 0xC2, 0xC6). All probes carry zero arguments, data_size 2.
             GetHalfScan(paths, Out);
+        }
+        else if (powerMode)
+        {
+            PowerSweep(paths, Out);
+        }
+        else if (txMode)
+        {
+            TxSweep(paths, Out);
+        }
+        else if (deepMode)
+        {
+            DeepDump(paths, Out);
         }
         else
         {
@@ -1169,6 +1195,357 @@ public static class HidProbe
         }
         Console.WriteLine($"[written to {logPath}]");
         return 0;
+    }
+
+    /// <summary>Read-only probe of the BATTERY class (0x07) get-half, made to
+    /// answer one question: which of these registers carries a <em>setting</em>
+    /// (e.g. the battery-type choice Synapse offers on AA-powered mice)
+    /// rather than a live reading? Method: read every id of the classes that
+    /// answer on this hardware several times per slot, print the argument
+    /// bytes, and mark each register stable or varying. Run it twice — once
+    /// with the Synapse setting at A, once at B (`--hid-power --label=nimh` /
+    /// `--label=alkaline`) — then diff the logs: the id whose arguments moved
+    /// is the carrier. Live readings (level, voltage, idle countdown) move too,
+    /// so an A→B→A round trip is what separates "setting" from "drifting
+    /// measurement". Every id probed is in the get half (0x80+): nothing is
+    /// written.</summary>
+    private static void PowerSweep(List<(string Path, int Pid)> paths, Action<string> out_)
+    {
+        const int Rounds = 3;
+        // Classes the get-half scan found readable on this hardware
+        // (docs/agent-hid.md); 0x00's 0xC1/0xC2/0xC6 are the undocumented
+        // mirrors of the pairing commands and stay excluded.
+        byte[] classes = { 0x00, 0x02, 0x05, 0x07, 0x0B };
+        var any = false;
+        foreach (var entry in paths.OrderBy(p => p.Path, StringComparer.OrdinalIgnoreCase))
+        {
+            var path = entry.Path;
+            var handle = HidApi.OpenForFeature(path, out _);
+            if (!HidApi.IsValid(handle) || HidWatcher.DescribeHandle(handle, path, 0) is not { } caps
+                || caps.FeatureLength < RazerReport.HidBufferSize)
+            {
+                continue;
+            }
+            if (QueryRaw(handle, RazerReport.BuildBatteryQuery(0x1F), out _) != RazerResponseKind.Success)
+            {
+                HidApi.CloseHandle(handle);
+                continue;
+            }
+            any = true;
+            out_($"— power sweep on …{path[^48..]} —");
+            out_($"  pid=0x{entry.Pid:X4} rounds={Rounds} classes={string.Join(" ", classes.Select(c => $"0x{c:X2}"))} (args = arguments[0..7])");
+            foreach (var tx in new byte[] { 0x1F, 0x9F })
+            {
+                var sKind = QueryRaw(handle, RazerReport.BuildSerialQuery(tx), out var sRecv);
+                var serial = sKind == RazerResponseKind.Success && RazerReport.TryGetSerial(sRecv, tx, out var s)
+                    ? s
+                    : "";
+                out_($"  tx=0x{tx:X2} serial: {sKind}{(serial.Length > 0 ? $" \"{serial}\"" : "")}");
+                if (sKind != RazerResponseKind.Success)
+                {
+                    continue; // empty slot on a combo dongle
+                }
+                foreach (var cls in classes)
+                {
+                    for (int id = 0x80; id <= 0xFF; id++)
+                    {
+                        if (cls == 0x00 && id is 0xC1 or 0xC2 or 0xC6)
+                        {
+                            continue; // pairing-command get-mirrors
+                        }
+                        var perRound = new List<string>();
+                        var kinds = new List<RazerResponseKind>();
+                        for (int r = 0; r < Rounds; r++)
+                        {
+                            var kind = QueryRaw(handle, RazerReport.BuildQuery(tx, cls, (byte)id, 0x02),
+                                out var recv, attempts: r == 0 ? 1 : 2, waitMs: r == 0 ? 80 : 200);
+                            kinds.Add(kind);
+                            if (kind != RazerResponseKind.Success)
+                            {
+                                perRound.Add(kind.ToString());
+                                break;
+                            }
+                            perRound.Add(ArgsHex(recv));
+                            Thread.Sleep(30);
+                        }
+                        if (kinds[0] != RazerResponseKind.Success)
+                        {
+                            continue; // silent register: no signal, keep the log small
+                        }
+                        bool stable = perRound.Count == Rounds && perRound.All(a => a == perRound[0]);
+                        var note = (cls, id) switch
+                        {
+                            (0x07, 0x80) => "  <- battery level",
+                            (0x07, 0x81) => "  <- low-battery threshold",
+                            (0x07, 0x83) => "  <- idle time",
+                            (0x07, 0x84) => "  <- charging status",
+                            (0x00, 0x82) => "  <- serial",
+                            (0x00, 0x92) => "  <- paired-device serial",
+                            _ => "",
+                        };
+                        out_($"    cls=0x{cls:X2} id=0x{id:X2} {string.Join(" | ", perRound)}" +
+                             $"{(stable ? " [stable]" : "")}{note}");
+                    }
+                }
+            }
+            HidApi.CloseHandle(handle);
+        }
+        if (!any)
+        {
+            out_("— power sweep: no talking collection found —");
+        }
+    }
+
+    /// <summary>Sweep the transaction-id byte (report offset 1) across its
+    /// full 0x00-0xFF range. Every prior probe only ever used the six values
+    /// {0x0F,0x1F,0x2F,0x3F,0x9F,0xFF}; on a combo dongle that byte is the
+    /// sub-device route, so unexplored values could address further slots
+    /// (a third paired device, a config plane). Only get commands travel
+    /// here (serial 0x00/0x82, battery 0x07/0x80, then firmware/charging on
+    /// confirmed responders) — the danger list in docs/agent-hid.md is all
+    /// set-half ids and stays untouched. A responder must echo the exact tx
+    /// through echo+CRC validation, so a Success is a real route, not a
+    /// stale answer drifting in from the previous command.</summary>
+    private static void TxSweep(List<(string Path, int Pid)> paths, Action<string> out_)
+    {
+        foreach (var path in paths.Select(p => p.Path).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            var handle = HidApi.OpenForFeature(path, out _);
+            if (!HidApi.IsValid(handle) || HidWatcher.DescribeHandle(handle, path, 0) is not { } caps
+                || caps.FeatureLength < RazerReport.HidBufferSize)
+            {
+                continue;
+            }
+            if (QueryRaw(handle, RazerReport.BuildBatteryQuery(0x1F), out _) != RazerResponseKind.Success)
+            {
+                HidApi.CloseHandle(handle);
+                continue;
+            }
+            out_($"— tx sweep on …{path[^48..]} (pid 0x{paths.First(p => p.Path == path).Pid:X4}) —");
+            var answered = new SortedSet<byte>();
+            var apiFail = 0;
+            var pending = Enumerable.Range(0, 0x100).Select(i => (byte)i).ToList();
+            // Two passes: the wireless link sleeps when idle, so the first
+            // minutes of queries come back NoResponse regardless of route.
+            // Pass 2 re-probes only the tx values that stayed silent.
+            for (int pass = 1; pass <= 2 && pending.Count > 0; pass++)
+            {
+                out_($"  pass {pass}: probing {pending.Count} tx values (serial 0x00/0x82 + battery 0x07/0x80)");
+                var stillSilent = new List<byte>();
+                foreach (var tx in pending)
+                {
+                    var sKind = QueryRaw(handle, RazerReport.BuildSerialQuery(tx), out var sRecv, attempts: 1, waitMs: 60);
+                    var bKind = QueryRaw(handle, RazerReport.BuildBatteryQuery(tx), out var bRecv, attempts: 1, waitMs: 60);
+                    if (sKind == RazerResponseKind.BadLength || bKind == RazerResponseKind.BadLength)
+                    {
+                        apiFail++;
+                    }
+                    if (sKind == RazerResponseKind.Success || bKind == RazerResponseKind.Success)
+                    {
+                        answered.Add(tx);
+                        var serial = sKind == RazerResponseKind.Success && RazerReport.TryGetSerial(sRecv, tx, out var s) ? s : "";
+                        out_($"    tx=0x{tx:X2} answers (serial {sKind}{(serial.Length > 0 ? $" \"{serial}\"" : "")}, battery {bKind}{(bKind == RazerResponseKind.Success ? $" raw={bRecv[10]}" : "")})");
+                    }
+                    else
+                    {
+                        stillSilent.Add(tx);
+                    }
+                }
+                out_($"  pass {pass}: {pending.Count - stillSilent.Count} newly answering, {stillSilent.Count} silent, {apiFail} api failures");
+                pending = stillSilent;
+            }
+            out_($"  confirming {answered.Count} responders with patient queries:");
+            foreach (var tx in answered)
+            {
+                var sKind = QueryRaw(handle, RazerReport.BuildSerialQuery(tx), out var sRecv, attempts: 3);
+                var serial = sKind == RazerResponseKind.Success && RazerReport.TryGetSerial(sRecv, tx, out var s) ? s : "";
+                var bKind = QueryRaw(handle, RazerReport.BuildBatteryQuery(tx), out var bRecv, attempts: 3);
+                var cKind = QueryRaw(handle, RazerReport.BuildChargingQuery(tx), out var cRecv, attempts: 2);
+                var fKind = QueryRaw(handle, RazerReport.BuildQuery(tx, 0x00, 0x81), out var fRecv, attempts: 2);
+                out_($"    tx=0x{tx:X2}: serial={sKind}{(serial.Length > 0 ? $" \"{serial}\"" : "")} battery={bKind}{(bKind == RazerResponseKind.Success ? $" raw={bRecv[10]}" : "")} " +
+                     $"charging={cKind}{(cKind == RazerResponseKind.Success ? $" flag={cRecv[10]}" : "")} firmware={fKind}{(fKind == RazerResponseKind.Success ? $" {ArgsHex(fRecv)}" : "")}");
+            }
+            HidApi.CloseHandle(handle);
+            return;
+        }
+        out_("— tx sweep: no talking collection —");
+    }
+
+    /// <summary>Re-read every readable get-half register and dump the FULL
+    /// 91-byte answer. The 2026-09-07 scan printed only the first 16 buffer
+    /// bytes; several registers (class 0x0F's list replies, 0x00/0xA4)
+    /// declare data_size up to 0x0E, so payload beyond byte 16 has never
+    /// been seen. Additionally sweeps arguments[0] = 0..8 across class
+    /// 0x0F's readable ids: its answers are length-prefixed lists, so the
+    /// argument may be a page/index selector into a larger table — another
+    /// private addressing dimension. Read-only throughout.</summary>
+    private static void DeepDump(List<(string Path, int Pid)> paths, Action<string> out_)
+    {
+        foreach (var path in paths.Select(p => p.Path).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            var handle = HidApi.OpenForFeature(path, out _);
+            if (!HidApi.IsValid(handle) || HidWatcher.DescribeHandle(handle, path, 0) is not { } caps
+                || caps.FeatureLength < RazerReport.HidBufferSize)
+            {
+                continue;
+            }
+            if (QueryRaw(handle, RazerReport.BuildBatteryQuery(0x1F), out _) != RazerResponseKind.Success)
+            {
+                HidApi.CloseHandle(handle);
+                continue;
+            }
+            out_($"— deep dump on …{path[^48..]} —");
+            foreach (var tx in new byte[] { 0x1F, 0x9F })
+            {
+                var sKind = QueryRaw(handle, RazerReport.BuildSerialQuery(tx), out var sRecv, attempts: 2);
+                if (sKind != RazerResponseKind.Success)
+                {
+                    out_($"  tx=0x{tx:X2}: silent slot ({sKind})");
+                    continue;
+                }
+                var serial = RazerReport.TryGetSerial(sRecv, tx, out var s) ? s : "";
+                out_($"  tx=0x{tx:X2}: full-payload dump{(serial.Length > 0 ? $" (serial \"{serial}\")" : "")}");
+                foreach (var cls in AliveClasses(handle, tx, out_))
+                {
+                    // classes 0x04/0x0A on the keyboard slot answer every id
+                    // with Success+zeros (fake echo, docs/agent-hid.md) —
+                    // detect that here and skip instead of dumping 256 lines
+                    // of nothing.
+                    if (cls is 0x04 or 0x0A && IsFakeEchoClass(handle, tx, cls))
+                    {
+                        out_($"  tx=0x{tx:X2} cls 0x{cls:X2}: fake echo class, skipped");
+                        continue;
+                    }
+                    var found = 0;
+                    for (int id = 0x80; id <= 0xFF; id++)
+                    {
+                        if (cls == 0x00 && id is 0xC1 or 0xC2 or 0xC6)
+                        {
+                            continue; // pairing-command get-mirrors
+                        }
+                        var kind = QueryRaw(handle, RazerReport.BuildQuery(tx, cls, (byte)id, 0x02), out var recv, attempts: 2);
+                        if (kind != RazerResponseKind.Success)
+                        {
+                            continue;
+                        }
+                        found++;
+                        var text = FullPrintable(recv);
+                        out_($"    cls 0x{cls:X2} id 0x{id:X2} ds={recv[6]:X2}: {Convert.ToHexString(recv)}{(text.Length > 0 ? $" \"{text}\"" : "")}");
+                    }
+                    out_($"    cls 0x{cls:X2}: {found} readable ids");
+                }
+                Args0Sweep(handle, tx, out_);
+            }
+            HidApi.CloseHandle(handle);
+            return;
+        }
+        out_("— deep dump: no talking collection —");
+    }
+
+    /// <summary>Probe which classes answer on this slot (id 0x80, falling
+    /// back to 0x84 — the 2026-09-07 scan's method), excluding the fake
+    /// echo classes and the pairing mirrors.</summary>
+    private static List<byte> AliveClasses(IntPtr handle, byte tx, Action<string> out_)
+    {
+        var alive = new List<byte>();
+        for (int cls = 0; cls <= 0xFF; cls++)
+        {
+            foreach (var probeId in new byte[] { 0x80, 0x84 })
+            {
+                if (cls == 0x00 && probeId is 0xC1 or 0xC2 or 0xC6)
+                {
+                    continue;
+                }
+                var kind = QueryRaw(handle, RazerReport.BuildQuery(tx, (byte)cls, probeId, 0x02), out _, attempts: 1, waitMs: 80);
+                if (kind != RazerResponseKind.NotSupported)
+                {
+                    alive.Add((byte)cls);
+                    break;
+                }
+            }
+        }
+        out_($"  tx=0x{tx:X2} alive classes: {(alive.Count == 0 ? "(none)" : string.Join(" ", alive.Select(c => $"0x{c:X2}")))}");
+        return alive;
+    }
+
+    /// <summary>A fake echo class answers id 0x81 with Success and an
+    /// all-zero payload; real classes either reject 0x81 or carry data
+    /// (mouse 0x04/0x80 = DPI stage count, nonzero).</summary>
+    private static bool IsFakeEchoClass(IntPtr handle, byte tx, byte cls)
+    {
+        var a = QueryRaw(handle, RazerReport.BuildQuery(tx, cls, 0x80, 0x02), out var ra, attempts: 2);
+        var b = QueryRaw(handle, RazerReport.BuildQuery(tx, cls, 0x81, 0x02), out var rb, attempts: 2);
+        return a == RazerResponseKind.Success && b == RazerResponseKind.Success
+            && ra.Skip(9).Take(80).All(b2 => b2 == 0) && rb.Skip(9).Take(80).All(b2 => b2 == 0);
+    }
+
+    /// <summary>class 0x0F replies are length-prefixed lists; sweep
+    /// arguments[0] as a candidate page/index selector. Only registers that
+    /// answer at args0=0 get probed with other values, and every probe is a
+    /// get-half read.</summary>
+    private static void Args0Sweep(IntPtr handle, byte tx, Action<string> out_)
+    {
+        var kind = QueryRaw(handle, RazerReport.BuildQuery(tx, 0x0F, 0x80, 0x02), out _, attempts: 1, waitMs: 80);
+        if (kind == RazerResponseKind.NotSupported)
+        {
+            return; // class 0x0F not present on this slot
+        }
+        out_($"  tx=0x{tx:X2} class 0x0F arguments[0] sweep:");
+        foreach (var id in new byte[] { 0x80, 0x81, 0x82, 0x84, 0x86, 0x90 })
+        {
+            for (byte arg0 = 0; arg0 <= 8; arg0++)
+            {
+                var req = RazerReport.BuildQuery(tx, 0x0F, id);
+                req[9] = arg0;
+                req[89] = RazerReport.CalculateCrc(req);
+                var k = QueryRaw(handle, req, out var recv, attempts: 2);
+                if (k == RazerResponseKind.Success)
+                {
+                    out_($"    id 0x{id:X2} args0=0x{arg0:X2}: {ArgsHex(recv)}");
+                }
+                else if (k != RazerResponseKind.NotSupported)
+                {
+                    out_($"    id 0x{id:X2} args0=0x{arg0:X2}: {k}");
+                }
+            }
+        }
+    }
+
+    /// <summary>All printable runs (>=3 chars) of the 90-byte payload,
+    /// dot-separated — catches serials/names hiding beyond byte 16.</summary>
+    private static string FullPrintable(byte[] recv)
+    {
+        var runs = new List<string>();
+        var cur = new List<char>();
+        for (int i = 1; i < 89; i++)
+        {
+            if (recv[i] >= 0x20 && recv[i] <= 0x7e)
+            {
+                cur.Add((char)recv[i]);
+            }
+            else
+            {
+                if (cur.Count >= 3)
+                {
+                    runs.Add(new string(cur.ToArray()));
+                }
+                cur.Clear();
+            }
+        }
+        if (cur.Count >= 3)
+        {
+            runs.Add(new string(cur.ToArray()));
+        }
+        return string.Join(".", runs);
+    }
+
+    /// <summary>arguments[0..7] of a response as spaced hex, plus the decimal
+    /// values — the form that makes two A/B logs easy to diff by eye.</summary>
+    private static string ArgsHex(byte[] recv)
+    {
+        var args = recv.Skip(1 + 8).Take(8).ToArray();
+        return $"args=[{string.Join(" ", args.Select(b => b.ToString("X2")))}] " +
+               $"vals=({string.Join(",", args)})";
     }
 
     /// <summary>Two-stage read-only sweep: probe every class with two common

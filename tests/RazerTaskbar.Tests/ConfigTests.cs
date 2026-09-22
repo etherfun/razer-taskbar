@@ -81,4 +81,43 @@ public sealed class ConfigTests
             try { Directory.Delete(scratch, true); } catch (IOException) { }
         }
     }
+
+    [Fact]
+    public void BatteryTypeOverridesLoadAndFilterUnknownSpellings()
+    {
+        var scratch = WithScratchAppData(out var old);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigService.ConfigPath)!);
+            // Legacy file: the key does not exist yet, and a hand-edited file
+            // may spell it as null. Both must load as an empty (never null)
+            // lookup.
+            File.WriteAllText(ConfigService.ConfigPath, "{\"polling_throttle_secs\": 9}");
+            var legacy = ConfigService.Load();
+            Assert.Equal(9ul, legacy.PollingThrottleSecs);
+            Assert.Empty(legacy.DeviceBatteryTypes);
+
+            File.WriteAllText(ConfigService.ConfigPath, "{\"device_battery_types\": null}");
+            Assert.Empty(ConfigService.Load().DeviceBatteryTypes);
+
+            // Round trip, with one unreadable value dropped on load (Parse
+            // would read it back as auto, so keeping it only hides the real
+            // setting from the history page).
+            var cfg = ConfigService.Load();
+            cfg.DeviceBatteryTypes["HID:1532:0094"] = BatteryType.Replaceable.ToConfig();
+            cfg.DeviceBatteryTypes["SI-1"] = "bogus";
+            ConfigService.Save(cfg);
+
+            var loaded = ConfigService.Load();
+            Assert.Equal(
+                BatteryType.Replaceable,
+                BatteryTypes.Parse(loaded.DeviceBatteryTypes["HID:1532:0094"]));
+            Assert.False(loaded.DeviceBatteryTypes.ContainsKey("SI-1"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("APPDATA", old);
+            try { Directory.Delete(scratch, true); } catch (IOException) { }
+        }
+    }
 }

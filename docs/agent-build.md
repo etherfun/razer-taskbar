@@ -42,7 +42,10 @@ dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj   # 勿加 --quie
 | 命令 | 用途 |
 |---|---|
 | `razer-taskbar.exe --hid-probe` | HID 全枚举 + 电量/充电查询 + GATT 全 dump |
+| `razer-taskbar.exe --hid-power [--label=N]` | class 0x07 电源寄存器只读扫描（0x80-0x8F × 3 轮，标稳定/变化）→ `hid-power-<N>.log`；**A/B 用**：改 Synapse 设置前后各跑一次再 diff，定位哪条寄存器随设置变化（见 agent-hid.md） |
 | `razer-taskbar.exe --hid-scan` | get 半区只读全段扫描（分钟级） |
+| `razer-taskbar.exe --hid-tx` | transaction_id 0x00-0xFF 全空间只读路由扫描（~3 分钟）→ `hid-tx.log`；实测 tx 位 7 选子设备槽（见 agent-hid.md 2026-09-22 节） |
+| `razer-taskbar.exe --hid-deep` | 可读寄存器 91 字节全载荷 dump + class 0x0F args0 扫描（~10 分钟）→ `hid-deep.log`；查"载荷深部还藏了什么"用 |
 | `razer-taskbar.exe --ble-vendor` | Razer BLE 厂商 GATT 通道重放（观测查询基线） |
 | `… --ble-vendor --sweep` | 厂商通道 page 01/05 × id 0x80-0xFF 只读枚举 |
 | `… --ble-vendor --raw=LEN:PAGE:ID:PARAM[:hex]` | 单发命令（LEN≠0=写，需 `--yes-i-know`；set 半区 id 拒绝） |

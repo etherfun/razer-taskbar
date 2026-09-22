@@ -13,7 +13,12 @@ public readonly record struct Span(
     int LevelStart,
     int LevelEnd,
     /// <summary>Percent points moved during counted (active) intervals only.</summary>
-    int MovedPct)
+    int MovedPct,
+    /// <summary>The cycle opened on a battery swap (a rise of at least
+    /// `SwapJumpPct` while discharging) rather than on the device's own
+    /// discharge: this is the freshly inserted cell's first cycle, not a
+    /// charge session. Only ever set on discharge spans.</summary>
+    bool SwapStart = false)
 {
     public bool Qualifies(int minDropPct, long minActiveSecs)
         => MovedPct >= minDropPct && ActiveSecs >= minActiveSecs;

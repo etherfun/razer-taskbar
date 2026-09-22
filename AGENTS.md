@@ -65,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 ## 配置速览
 
 - 路径：`%APPDATA%\razer-taskbar\settings.json`，缺失键由 `ConfigService` 默认值回填，旧配置文件始终可加载。
-- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`display_mode`（fixed/drop_swap/rotate，默认 fixed；drop_swap=其他设备电量下降（如 100→99）时临时替换显示 `swap_display_secs` 秒（默认 30），rotate=全部在线设备按名称轮播、每台 `rotate_interval_secs` 秒（默认 30）；决策器 `Core/Models/DisplayMode.cs`，模式/参数变更需重置运行态）、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：**按设备**沿 有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志 取值——USB 直读，蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS），本轮没被直接读到的设备才由日志解析补齐；被直接读到的设备日志不覆盖也不判离线；胜出链路记入 `RazerDevice.Transport` 并持久化到 `devices.source`，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`embed_into_widgets_space`（默认 false；开启后挂件嵌入任务栏小组件按钮内部空位并忽略 widget_side，旧值 widget_side=widgets 载入时自动归一为本开关，同时整块拦截鼠标——挂件区域吞掉点击不再触发小组件面板，WM_NCHITTEST + alpha 底板双闸）、`embed_into_taskbar`（默认 false；嵌入 v2：销毁重建为任务栏带真正子窗口，ULW+重建 poke 呈现、锚窗口承载线程绑定，可与 widgets_space 组合，见 `docs/agent-embed.md`）、`avoid_overlap_with_widgets`、`show_tray_icon`、`show_widget`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，双层字形渲染）、`fade_transition`、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
+- 关键字段：`polling_throttle_secs`、`shown_device_handle`、`display_mode`（fixed/drop_swap/rotate，默认 fixed；drop_swap=其他设备电量下降（如 100→99）时临时替换显示 `swap_display_secs` 秒（默认 30），rotate=全部在线设备按名称轮播、每台 `rotate_interval_secs` 秒（默认 30）；决策器 `Core/Models/DisplayMode.cs`，模式/参数变更需重置运行态）、`synapse_version`（auto/v3/v4）、`battery_source`（auto/hid/log，默认 auto：**按设备**沿 有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志 取值——USB 直读，蓝牙设备走 Razer 厂商 GATT 通道（电量+充电，被占用时回退 BAS），本轮没被直接读到的设备才由日志解析补齐；被直接读到的设备日志不覆盖也不判离线；胜出链路记入 `RazerDevice.Transport` 并持久化到 `devices.source`，见 `docs/agent-hid.md`）、`widget_side`（left/right）、`embed_into_widgets_space`（默认 false；开启后挂件嵌入任务栏小组件按钮内部空位并忽略 widget_side，旧值 widget_side=widgets 载入时自动归一为本开关，同时整块拦截鼠标——挂件区域吞掉点击不再触发小组件面板，WM_NCHITTEST + alpha 底板双闸）、`embed_into_taskbar`（默认 false；嵌入 v2：销毁重建为任务栏带真正子窗口，ULW+重建 poke 呈现、锚窗口承载线程绑定，可与 widgets_space 组合，见 `docs/agent-embed.md`）、`avoid_overlap_with_widgets`、`show_tray_icon`、`show_widget`、`hover_devices`、`window_offset_*`、`taskbar_*_space_win11`、`record_battery_history`（默认 true）、`device_battery_types`（每台设备的电池类型覆盖，handle → `rechargeable`/`replaceable`，缺省按型号自动判定——openrazer 的 AA/AAA 名单；可更换电池从不充电，其读数跃升按换电而非充电会话处理，设置入口在历史页设备选择旁，见 `docs/agent-battery-type.md`）、`show_estimated_time`（默认 true，挂件第二行显示预计时间）、`color_battery_icon`（默认 false，充电/省电/离线状态色常显，开启后普通模式电量按绿→红渐变，双层字形渲染）、`fade_transition`、`history_poll_interval_secs`（默认 5）、`language`（auto/en/zh）。
 - 电量历史库：`%APPDATA%\razer-taskbar\battery.db`（SQLite/WAL，永久保留，表 `samples`/`devices`）。
 - 自启动：`HKCU\...\Run\RazerTaskbar`，由设置页开关同步。
 
@@ -76,7 +76,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
   Win32 元数据）；Win32 调用失败路径只记日志（`Log`），消息循环/回调内禁止未捕获异常。
 - 日志解析改动必须同步更新 `tests/RazerTaskbar.Tests`（`WatcherV3Tests`/`WatcherV4Tests`）；显示选择改动
   必须覆盖 `BatteryTests`/`DisplayModeTests`；协议改动同步 `HidTests`；历史/过滤改动同步
-  `HistoryTests`/`ReboundFilterTests` 等（见各 agent 文档"测试锚点"节）。
+  `HistoryTests`/`ReboundFilterTests` 等；电池类型名单/判定改动同步 `BatteryTypeTests`（见各 agent 文档"测试锚点"节）。
 - 任务栏定位改动先读 `docs/agent-taskbar.md`：小组件板（天气）硬保留、UIA 缓存失效路径必须维持；不重新
   引入反应式第三方避让（设计决定见该文档）。
 - 配置新增字段必须带默认值（`ConfigService`），保持旧配置文件可加载。
@@ -104,6 +104,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 [-Test] [-Run] [-NoRun]      
 - 日志解析与设备选择：`docs/agent-watcher.md`
 - 任务栏挂载/共存避让/UI 绘制：`docs/agent-taskbar.md`
 - 电量历史与预测（采样/切分/三层预测/防伪过滤）：`docs/agent-history.md`
+- 电池类型（AA/AAA vs 内置充电）：`docs/agent-battery-type.md`（含 HID 实测结论与自动检测路径）
 - HID 直读电量（协议/Windows 坑/探针）：`docs/agent-hid.md`
 - 核心宿主与功能挂载（core/features 结构、窗口生命周期、保活窗口、新增功能清单）：`docs/agent-architecture.md`
 - C# 实现总览（线程模型/模块映射/冒烟记录/已知差异）：`docs/agent-csharp.md`

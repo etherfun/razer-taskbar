@@ -339,6 +339,41 @@ public sealed class HistoryTests
         Assert.Equal(5, dis[0].MovedPct);
         Assert.Equal((1800L, 2700L), (dis[1].StartTs, dis[1].EndTs));
         Assert.Equal((80, 75), (dis[1].LevelStart, dis[1].LevelEnd));
+        // The fresh cell's cycle is flagged: the UI lists it as a swap rather
+        // than letting the rise look like a charge session.
+        Assert.False(dis[0].SwapStart);
+        Assert.True(dis[1].SwapStart);
+    }
+
+    [Fact]
+    public void ReplaceableCellNeverProducesChargeSessions()
+    {
+        // An AA mouse whose readings carry a bogus charge flag: the level
+        // creeps up while "charging", then jumps on a battery swap. Seen as
+        // a replaceable cell (BatteryTypes.AsReplaceable) neither shape may
+        // become a charge session — the swap splits the discharge cycles.
+        List<Sample> samples =
+        [
+            S(0, 20, false, true),
+            S(900, 15, false, true),
+            S(1800, 20, true, true),   // noise: a cell cannot charge
+            S(2700, 95, true, true),   // battery swapped
+            S(3600, 90, false, true),
+        ];
+        // Baseline: taken at face value the series does mint a charge session
+        // (and with it a charge-rate statistic) — that is what the setting
+        // exists to prevent.
+        Assert.Single(HistoryService.ComputeSpans(samples).Charge);
+
+        var (dis, chg) = HistoryService.ComputeSpans(BatteryTypes.AsReplaceable(samples));
+        Assert.Empty(chg);
+        Assert.Equal(2, dis.Count);
+        Assert.False(dis[0].SwapStart);
+        Assert.True(dis[1].SwapStart);
+        Assert.Equal((20, 20), (dis[0].LevelStart, dis[0].LevelEnd));
+        Assert.Equal((95, 90), (dis[1].LevelStart, dis[1].LevelEnd));
+        // No charge sessions → no charge-speed signal → no fade estimate.
+        Assert.Null(HistoryService.HealthStatsOfSpans(chg));
     }
 
     [Fact]

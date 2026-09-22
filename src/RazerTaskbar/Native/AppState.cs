@@ -195,5 +195,8 @@ public static class ConfigExt
         HistoryPollIntervalSecs = c.HistoryPollIntervalSecs,
         Language = c.Language,
         EmbedIntoTaskbar = c.EmbedIntoTaskbar,
+        // The one reference-typed member: the published snapshot must not
+        // share the mutable dictionary with the authoritative copy.
+        DeviceBatteryTypes = new Dictionary<string, string>(c.DeviceBatteryTypes),
     };
 }

@@ -52,6 +52,7 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |
 | watcher.rs | Core/Services/WatcherService.cs | V3/V4 正则逐字保留;V4 camelCase + 显式 null→默认;FileSystemWatcher + 1s 去抖;V4 首读走尾部(agent-watcher.md);按设备的日志兜底(agent-hid.md);V3 解析单测 WatcherV3Tests |
 | battery.rs | Core/Models + DeviceSelector + DisplayModeResolver | 选择规则/字形/五段色;链路来源 `BatteryTransport`(Wired/Receiver/Ble/Log)+优先级(见 agent-hid.md);显示模式扩展(无 Rust 对应):fixed/drop_swap(电量下降临时替换 30s)/rotate(30s 名称轮播),测试 DisplayModeTests |
+| (新增) | Core/Models/BatteryType.cs | 电池类型(内置充电/可更换 AA-AAA):按 openrazer `charge_status` 的 "Use AA batteries" 名单**按型号**判定,可由 `device_battery_types` 覆盖;历史页设备选择旁设置,可更换电池的序列清充电旗(见 agent-history.md) |
 | history.rs | Core/Services/HistoryService.cs | 同 schema/WAL;span 切分/instant 兜底逐条移植;预测为 C# 侧扩展(无 Rust 对应):EWMA 周期权重(30d 半衰期/180d 截断)+ 当前会话融合 + 逐级迁移剖面非线性外推(部分会话也计入,缺失档用速率填充)+ 充电速率健康度/寿命估算(History 页)+ ReboundFilter 弛豫回弹剔除(读路径包络,见"已知差异") |
 | config.rs | Core/Services/ConfigService.cs | 同一路径/字段/默认值;Run 键自启 |
 | i18n.rs | Core/Services/I18n.cs | 英文 key→zh 表 + LanguageChanged 事件热切换 |

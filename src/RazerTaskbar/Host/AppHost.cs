@@ -47,10 +47,11 @@ public static class AppHost
     {
         Log.Install();
 
-        // Standalone diagnostics (--hid-probe / --hid-scan / --ble-vendor)
-        // run before the single-instance guard: the app may be running
-        // concurrently and these never touch the UI.
-        if (args.Contains("--hid-probe") || args.Contains("--hid-scan"))
+        // Standalone diagnostics (--hid-probe / --hid-scan / --hid-power /
+        // --hid-tx / --hid-deep / --ble-vendor) run before the single-instance
+        // guard: the app may be running concurrently and these never touch the UI.
+        if (args.Contains("--hid-probe") || args.Contains("--hid-scan") || args.Contains("--hid-power")
+            || args.Contains("--hid-tx") || args.Contains("--hid-deep"))
         {
             return HidProbe.Run(args);
         }

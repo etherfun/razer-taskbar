@@ -997,6 +997,8 @@ public static class HistoryService
         public int Last;
         public long Active;
         public int Moved;
+        /// <summary>The run opened on a battery swap (see <see cref="Span.SwapStart"/>).</summary>
+        public bool Swapped;
     }
 
     /// <summary>Split a sample series into discharge cycles and charge sessions.
@@ -1016,7 +1018,7 @@ public static class HistoryService
             {
                 // Charge state flipped between open.Last and i: close at
                 // open.Last — the boundary interval belongs to neither run.
-                CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, discharge, charge);
+                CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, open.Swapped, discharge, charge);
                 open = new OpenRun { Charging = s.Charging, Start = i, Last = i };
             }
             else if (open is not null)
@@ -1041,15 +1043,17 @@ public static class HistoryService
                 if (jump)
                 {
                     // Close at the pre-swap sample; the new battery starts a
-                    // fresh cycle at the jumped-up level.
-                    CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, discharge, charge);
-                    open = new OpenRun { Charging = s.Charging, Start = i, Last = i };
+                    // fresh cycle at the jumped-up level (flagged as such —
+                    // for a rechargeable device this is a swap too, e.g. a
+                    // hot-swapped pack, and it is never a charge session).
+                    CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, open.Swapped, discharge, charge);
+                    open = new OpenRun { Charging = s.Charging, Start = i, Last = i, Swapped = true };
                 }
                 else if (!s.Charging && s.Level == 0)
                 {
                     // Battery empty: the cycle ends here even if charging
                     // never starts (device powered off dead).
-                    CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, i, discharge, charge);
+                    CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, i, open.Swapped, discharge, charge);
                     open = null;
                 }
                 else
@@ -1064,7 +1068,7 @@ public static class HistoryService
         }
         if (open is not null)
         {
-            CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, discharge, charge);
+            CloseSpan(samples, open.Charging, open.Start, open.Active, open.Moved, open.Last, open.Swapped, discharge, charge);
         }
         return (discharge, charge);
     }
@@ -1076,12 +1080,13 @@ public static class HistoryService
         long active,
         int moved,
         int endIdx,
+        bool swapStart,
         List<Span> discharge,
         List<Span> charge)
     {
         var s0 = samples[startIdx];
         var s1 = samples[endIdx];
-        var span = new Span(s0.Ts, s1.Ts, active, s0.Level, s1.Level, moved);
+        var span = new Span(s0.Ts, s1.Ts, active, s0.Level, s1.Level, moved, swapStart && !charging);
         if (charging)
         {
             charge.Add(span);

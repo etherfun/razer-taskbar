@@ -116,6 +116,14 @@ public sealed class Config
     [JsonPropertyName("language")]
     public string Language { get; set; } = "auto";
 
+    /// <summary>Per-device battery-type overrides, keyed by device handle:
+    /// "rechargeable" | "replaceable" (see <see cref="BatteryTypes"/>). A
+    /// handle with no entry keeps the openrazer-derived model-name detection
+    /// — a replaceable cell never charges, so its level rises are read as
+    /// battery swaps instead of charge sessions.</summary>
+    [JsonPropertyName("device_battery_types")]
+    public Dictionary<string, string> DeviceBatteryTypes { get; set; } = new();
+
     /// <summary>Experimental: parent the widget into the taskbar band as a
     /// WS_CHILD instead of a topmost overlay.</summary>
     [JsonPropertyName("embed_into_taskbar")]
@@ -190,6 +198,18 @@ public static class ConfigService
         {
             cfg.WidgetSide = "right";
             cfg.EmbedIntoWidgetsSpace = true;
+        }
+        // A hand-edited `"device_battery_types": null` must not null-ref the
+        // per-device lookups (the initializer only covers a missing key).
+        cfg.DeviceBatteryTypes ??= new Dictionary<string, string>();
+        // Drop entries whose spelling we do not know: Parse would read them
+        // back as auto, so keeping them only hides the real setting.
+        foreach (var handle in cfg.DeviceBatteryTypes
+                     .Where(kv => BatteryTypes.Parse(kv.Value) == BatteryType.Auto)
+                     .Select(kv => kv.Key)
+                     .ToList())
+        {
+            cfg.DeviceBatteryTypes.Remove(handle);
         }
         return cfg;
     }

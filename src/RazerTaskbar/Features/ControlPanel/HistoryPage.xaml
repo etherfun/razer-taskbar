@@ -69,12 +69,14 @@
             <!-- Export feedback -->
             <InfoBar x:Name="ExportInfoBar" Grid.Row="0" IsOpen="False" Severity="Informational" />
 
-            <!-- Toolbar: device picker + range selector + export. Star/auto
-                 columns — the combo yields width to the right group instead
-                 of colliding with it on narrow windows. -->
+            <!-- Toolbar: device picker + battery type + range selector +
+                 export. Star/auto columns — the combo yields width to the
+                 right groups instead of colliding with them on narrow
+                 windows. -->
             <Grid Grid.Row="1" ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <ComboBox
@@ -84,7 +86,21 @@
                     VerticalAlignment="Center"
                     DisplayMemberPath="Name"
                     SelectionChanged="Device_SelectionChanged" />
-                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="12">
+                <!-- Battery type of the SHOWN device: how it is powered.
+                     Auto = the openrazer-derived model table (a replaceable
+                     cell never charges, so its rises read as battery swaps). -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <TextBlock
+                        x:Name="BatteryTypeLabel"
+                        Style="{StaticResource CardCaptionStyle}"
+                        VerticalAlignment="Center" />
+                    <ComboBox
+                        x:Name="BatteryTypeCombo"
+                        Width="150"
+                        VerticalAlignment="Center"
+                        SelectionChanged="BatteryType_SelectionChanged" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="12">
                     <ComboBox
                         x:Name="RangeCombo"
                         Width="130"

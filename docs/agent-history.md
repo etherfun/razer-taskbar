@@ -22,7 +22,8 @@
 ## 周期切分（`ComputeSpans`）
 
 - 放电/充电会话按 `(level, charging, connected)` 切分；**跨省电关机延续**：断连静默 >30 分钟（`GapBreakSecs`）不计活跃时间但**不结束**周期（图表用同一阈值画暗带，排除出统计）。
-- 放电中上升 ≥30 点（`SwapJumpPct`）= 换电，当前周期结束、从新电平另起；跳后立即回落的是报告毛刺，整段丢弃（防伪见下）。
+- 放电中上升 ≥30 点（`SwapJumpPct`）= 换电，当前周期结束、从新电平另起（新周期带 `Span.SwapStart`，列表按"换电"而非"充电"展示）；跳后立即回落的是报告毛刺，整段丢弃（防伪见下）。
+- **电池类型**（`Core/Models/BatteryType.cs`，完整交接见 `docs/agent-battery-type.md`）：openrazer 在 `razermouse_driver.c: razer_attr_read_charge_status` 里用一张 **PID 名单**把 Atheris/Orochi/HyperSpeed 等机型直接短路成 `charge_status = 0`（注释"Use AA batteries"）——即**按机型**判电池类型，而不是读设备上的某个值。同样的"按型号判"名单移植在 `BatteryTypes.Detect`（型号名不区分大小写包含匹配；HyperSpeed 后缀写全，避免误伤同为 HyperSpeed 的键盘与 V3 Pro / Naga V2 Pro 等内置电池机型），`Resolve` 先看用户设置。可更换电池的读数只有**换电池**时才会跃升，且根本没有充电硬件：`BatteryTypes.AsReplaceable` 把序列的充电旗强制清零后再进 `Deflate`/`ComputeSpans`，否则一个假充电旗 + 换电跃升会被当成一次真正的充电会话（`ChargeHoursPerPct`、容量衰减都会被污染）。**作用范围仅限历史页读路径**（`HistoryPage.Reload` 及其对比序列）：HID/日志采集与挂件/托盘显示仍按设备上报原样工作——若要连显示一起纠正，入口在 `HidWatcher.ToRazerDevice`。**HID 直读电池类型已实测证伪**（设备固件只把它用在百分比换算上，无寄存器承载），可行的自动判定路径是 Synapse 的 `products_*.log`，见 `docs/agent-battery-type.md`。
 - History 页"充放电循环"计数是**等效满充放循环**（行业口径，`CycleStatsOfSpans`）：合格放电段（`Qualifies`）的 `MovedPct` 累计 ÷ 100——一次完整"充满→放空→再充满"计为 1 次循环，不完整会话按比例累计（每天 5 次 20% 的外出 = 1 而非 5）；低于 5 点/60s 门槛的 flicker 段不计。`CycleStats.Cycles` 为 double，UI 按 1~2 位小数显示。
 
 ## 三层数据防伪
@@ -45,6 +46,12 @@
 
 充电速率是干净的容量衰减代理：充电电流由充电座决定，与使用习惯无关（放电速率则随负载波动）。SOH = 近期 EWMA 充电速率相对最早记录会话的比值；最小二乘衰减趋势外推到行业 80% 寿命终点。
 
+**可更换电池（AA/AAA）不适用**：它没有充电会话，充电速率这个代理不存在（且换电池跃升不是充电）。判定为 `Replaceable` 时历史页直接让健康卡片显示"不适用"，`HealthStatsOfSpans` 拿到空充电列表自然返回 null（两条路一致，不靠"数据不足"朦胧处理）；同一台设备的"当前剩余"也改走 `Predict`（`chargingNow = false`）而不是缓存里那份带着噪声充电旗的估计。
+
+## 电池类型设置（历史页）
+
+设备选择右侧的"电池类型"下拉：自动（型号名单）/ 内置充电电池 / 可更换电池（AA/AAA），选择写入 `settings.json` 的 `device_battery_types`（handle → `rechargeable`|`replaceable`，选"自动"则删键）。下拉旁的灰色小字回显**实际生效**的类型，避免"自动"变成黑箱。落盘走 `AppState.PostModifyConfig`（配置权威副本在挂件线程）；`Load` 会丢弃拼写无法识别的值（`Parse` 会读回 auto，留着只会掩盖真实设置），并兼容 `"device_battery_types": null` 的手改文件。对比设备各自按自己的类型处理（图表充电色块不会给 AA 设备涂绿）。
+
 ## 关键常量
 
 | 常量 | 值 | 语义 |
@@ -63,4 +70,6 @@
 - `HistoryScrubTests`：启动回溯清洗。
 - `HistoryAliasTests`：合成句柄（`HID:{pid}`/`BLE:{mac}`）别名合并。
 - `TransportPriorityTests`：`devices.source` 的 upsert/读回与旧库补列（`EnsureTables` 的迁移分支）。
+- `BatteryTypeTests`：型号名单（AA/AAA 机型 vs HyperSpeed 键盘/V3 Pro 等内置电池机型）、设置优先级、配置拼写往返、`AsReplaceable` 只清充电旗。
+- `ConfigTests.BatteryTypeOverridesLoadAndFilterUnknownSpellings`：`device_battery_types` 的缺键/`null`/未知拼写与往返。
 - 改动切分/加权/过滤规则必须保持对应用例全绿；ReboundFilter 的"原始序列恰好一次"契约勿破坏。

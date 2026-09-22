@@ -101,6 +101,13 @@ public static class I18n
         ["usable per 100% charge"] = "每 100% 电量可用",
         ["compare device"] = "对比设备",
         ["Show off periods"] = "显示关机时段",
+        // Battery type (history page, next to the device picker)
+        ["Battery type"] = "电池类型",
+        ["Built-in rechargeable"] = "内置充电电池",
+        ["Replaceable battery (AA/AAA)"] = "可更换电池（AA/AAA）",
+        ["Which battery the device uses. Auto matches the model against the AA/AAA list openrazer uses (Atheris, Orochi, HyperSpeed models, Pro Click Mini); a replaceable cell never charges, so its level jumps read as battery swaps and charge statistics are skipped."] = "设备使用的电池类型。自动 = 按 openrazer 的 AA/AAA 机型名单（Atheris、Orochi、HyperSpeed 系列、Pro Click Mini）由型号判定；可更换电池不会充电，因此电量跃升按换电池处理，并跳过充电相关统计。",
+        ["n/a (replaceable battery)"] = "不适用（可更换电池）",
+        ["SWAP"] = "换电",
         ["Equivalent full cycles completed within the selected range: total discharged percent divided by 100, so one complete charge-empty-recharge sequence counts as one cycle and partial sessions add up fractionally. Off periods are not counted."] = "所选范围内完成的等效完整循环数：累计放电量 ÷ 100%——一次完整的充满、放空、再充满计为一次循环，不完整的充放电按比例累计。关机时段不计入。",
         ["Estimated usable time per 100% of charge, from the discharge cycles in range. Recent cycles count most — weight decays with a 30-day half-life (tracking battery aging and habit changes)."] = "按范围内放电周期估算的每 100% 电量可用时长。近期周期权重更高——按 30 天半衰期衰减（贴合电池老化与使用习惯变化）。",
         ["Estimated time to fully charge the device, from the charge sessions in range."] = "按范围内充电会话估算的充满设备所需时长。",
