@@ -4,6 +4,10 @@
 // battery-swap dots, and five local-time axis ticks. Theme-reactive:
 // re-renders on ActualThemeChanged with a light/dark palette.
 //
+// Compressed axis (off bands hidden): off stretches collapse to one x and
+// the resulting run ends are joined by neutral vertical connectors, so the
+// level line reads as one continuous curve across hidden time.
+//
 // P2 additions: an optional second (compare) series drawn in accent on the
 // same absolute-time axis (shutdown stretches bridged by a dim dashed
 // connector), and a hover readout (vertical line + nearest-point
@@ -188,7 +192,11 @@ public sealed class BatteryChart : Canvas
             var prev = main[i - 1];
             var cur = main[i];
             long gap = cur.Ts - prev.Ts;
-            bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
+            // Compressed mode: an interval whose left end is the stale
+            // disconnect row spans the whole off period — it must not paint
+            // a charge band across it.
+            bool active = cur.Connected && gap <= HistoryService.GapBreakSecs
+                && (showOffBands || prev.Connected);
             Brush? band = active ? (cur.Charging ? greenBandBrush : null)
                 : showOffBands ? offBandBrush
                 : null;
@@ -224,6 +232,14 @@ public sealed class BatteryChart : Canvas
         // next run's head — a chord across the whole other-color phase (a
         // white line crossing the green charge hump).
         bool? lastCharging = null;
+        // Compressed mode: the run's last point, and the run end awaiting a
+        // connector across a collapsed off stretch. An off period collapses
+        // to a single x, so consecutive runs meet at the same x with the
+        // level in between unplotted — a vertical connector (neutral line
+        // color, it spans neither charge nor discharge) joins them into the
+        // one continuous curve this mode promises.
+        Windows.Foundation.Point? lastCurvePoint = null;
+        Windows.Foundation.Point? pendingJoin = null;
 
         void FlushArea()
         {
@@ -275,9 +291,17 @@ public sealed class BatteryChart : Canvas
             var prev = main[i - 1];
             var cur = main[i];
             long gap = cur.Ts - prev.Ts;
-            bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
+            // Same compressed-mode rule as the bands: the reconnect interval
+            // starts at the stale disconnect row and spans the off period —
+            // drawing it would fake a straight line across hidden time.
+            bool active = cur.Connected && gap <= HistoryService.GapBreakSecs
+                && (showOffBands || prev.Connected);
             if (!active)
             {
+                if (lastCurvePoint is { } end)
+                {
+                    pendingJoin = end;
+                }
                 FlushArea();
                 FlushLine();
                 lastCharging = null;
@@ -290,6 +314,23 @@ public sealed class BatteryChart : Canvas
             lastCharging = cur.Charging;
             var pc = new Windows.Foundation.Point(X(cur.Ts), Y(cur.Level));
             var pp = new Windows.Foundation.Point(X(prev.Ts), Y(prev.Level));
+            if (!showOffBands && pendingJoin is { } join && areaPoints.Count == 0)
+            {
+                pendingJoin = null;
+                if (Math.Abs(join.Y - pp.Y) >= 0.5 || Math.Abs(join.X - pp.X) >= 0.5)
+                {
+                    Children.Add(new Line
+                    {
+                        X1 = join.X,
+                        Y1 = join.Y,
+                        X2 = pp.X,
+                        Y2 = pp.Y,
+                        Stroke = lineBrush,
+                        StrokeThickness = 2,
+                        StrokeLineJoin = PenLineJoin.Round,
+                    });
+                }
+            }
             if (areaPoints.Count == 0 || areaPoints[^1] != pp)
             {
                 areaPoints.Add(pp);
@@ -297,6 +338,7 @@ public sealed class BatteryChart : Canvas
             areaPoints.Add(pc);
             (cur.Charging ? charge : discharge).Add(pp);
             (cur.Charging ? charge : discharge).Add(pc);
+            lastCurvePoint = pc;
         }
         FlushArea();
         FlushLine();
@@ -353,7 +395,8 @@ public sealed class BatteryChart : Canvas
                 var prev = _compare[i - 1];
                 var cur = _compare[i];
                 long gap = cur.Ts - prev.Ts;
-                bool active = cur.Connected && gap <= HistoryService.GapBreakSecs;
+                bool active = cur.Connected && gap <= HistoryService.GapBreakSecs
+                    && (showOffBands || prev.Connected);
                 if (!active)
                 {
                     FlushCompare();
@@ -431,8 +474,12 @@ public sealed class BatteryChart : Canvas
     }
 
     /// <summary>Build the ts→x breakpoint list from the main series. With
-    /// off bands hidden only ACTIVE intervals (connected, gap within the
-    /// break threshold) advance x, collapsing everything else.</summary>
+    /// off bands hidden only intervals with BOTH endpoints connected (and
+    /// within the break threshold) advance x — counting the reconnect
+    /// interval's gap would re-inflate every off period to full width right
+    /// after collapsing its first half, so the whole off stretch collapses
+    /// to one x instead. Run ends are joined by vertical connectors (see
+    /// the render loop).</summary>
     private void BuildAxis(IReadOnlyList<Sample> main, bool showOffBands)
     {
         _axis.Clear();
@@ -449,7 +496,8 @@ public sealed class BatteryChart : Canvas
         for (int i = 1; i < main.Count; i++)
         {
             long gap = main[i].Ts - main[i - 1].Ts;
-            bool active = main[i].Connected && gap <= HistoryService.GapBreakSecs;
+            bool active = main[i].Connected && main[i - 1].Connected
+                && gap <= HistoryService.GapBreakSecs;
             if (showOffBands || active)
             {
                 acc += gap;
