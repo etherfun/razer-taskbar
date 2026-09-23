@@ -83,6 +83,16 @@ public sealed partial class HistoryPage : Page
         Localize();
     }
 
+    /// <summary>The page tree is cached (Required), so the ctor runs once
+    /// per window: a language switched while the OTHER tab was open would
+    /// otherwise surface here as stale strings — re-localize on every
+    /// navigation into this page.</summary>
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+        Localize();
+    }
+
     /// <summary>Re-localize every label (language switch) and reload the data.</summary>
     public void Localize()
     {

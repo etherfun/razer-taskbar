@@ -35,6 +35,16 @@ public sealed partial class SettingsPage : Page
         Localize();
     }
 
+    /// <summary>The page tree is cached (Required), so the ctor runs once
+    /// per window: a language switched while the OTHER tab was open would
+    /// otherwise surface here as stale strings — re-localize on every
+    /// navigation into this page.</summary>
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+        Localize();
+    }
+
     /// <summary>Re-localize and re-sync all controls (open + language switch).</summary>
     public void Localize()
     {
