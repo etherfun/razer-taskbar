@@ -890,4 +890,77 @@ public sealed class HistoryTests
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
+
+    [Fact]
+    public void BridgeDropoutsFoldsShortBoundedDropout()
+    {
+        // A ≤5 min dropout bounded by connected samples is an enumeration
+        // flicker: rows become connected and carry the run's charging flag.
+        var s = new List<Sample>
+        {
+            S(0, 80, charging: true, connected: true),
+            S(10, 80, charging: false, connected: false),
+            S(20, 79, charging: false, connected: false),
+            S(30, 79, charging: true, connected: true),
+        };
+        HistoryService.BridgeDropouts(s);
+        Assert.All(s, x => Assert.True(x.Connected));
+        // The charging flag of the surrounding run is carried through.
+        Assert.True(s[1].Charging);
+        Assert.True(s[2].Charging);
+        // Levels are untouched.
+        Assert.Equal(79, s[2].Level);
+    }
+
+    [Fact]
+    public void BridgeDropoutsKeepsLongAbsence()
+    {
+        // > 5 min is a real absence: rows stay disconnected.
+        var s = new List<Sample>
+        {
+            S(0, 80, charging: false, connected: true),
+            S(10, 80, charging: false, connected: false),
+            S(700, 78, charging: false, connected: true),
+        };
+        HistoryService.BridgeDropouts(s);
+        Assert.False(s[1].Connected);
+    }
+
+    [Fact]
+    public void BridgeDropoutsKeepsLongRun()
+    {
+        // > 3 consecutive off rows: a genuine absence even when short.
+        var s = new List<Sample>
+        {
+            S(0, 80, charging: false, connected: true),
+            S(10, 80, charging: false, connected: false),
+            S(20, 80, charging: false, connected: false),
+            S(30, 80, charging: false, connected: false),
+            S(40, 80, charging: false, connected: false),
+            S(50, 78, charging: false, connected: true),
+        };
+        HistoryService.BridgeDropouts(s);
+        Assert.Equal(4, s.Count(x => !x.Connected));
+    }
+
+    [Fact]
+    public void BridgeDropoutsKeepsUnboundedRuns()
+    {
+        // A dropout at the series start or end has no connected anchor on
+        // one side and must stay off.
+        var s = new List<Sample>
+        {
+            S(0, 80, charging: false, connected: false),
+            S(10, 80, charging: false, connected: false),
+            S(20, 79, charging: false, connected: true),
+            S(30, 78, charging: false, connected: true),
+            S(40, 78, charging: false, connected: false),
+        };
+        HistoryService.BridgeDropouts(s);
+        Assert.False(s[0].Connected);
+        Assert.False(s[1].Connected);
+        Assert.False(s[4].Connected);
+        Assert.True(s[2].Connected);
+        Assert.True(s[3].Connected);
+    }
 }

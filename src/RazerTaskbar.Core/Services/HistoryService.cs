@@ -1005,6 +1005,45 @@ public static class HistoryService
     /// An open run at the end is kept (a real, still-growing observation).
     /// Level movement is accumulated per counted interval (connected + short
     /// gap) rather than taken from the endpoints.</summary>
+    /// <summary>Fold reporting flickers into the run they interrupt: a short
+    /// disconnected stretch bounded by connected samples on both sides is an
+    /// enumeration hiccup, not a power-off — the field DB holds ~470 bounded
+    /// dropouts ≤ 5 min (spans 14 s … 5 min, almost always a single row)
+    /// against 500+ genuine absences > 2 h. Bridged rows carry the run's
+    /// charging flag, so the chart line, the off bands and the session spans
+    /// all treat the device as continuously present. Longer or unbounded
+    /// dropouts stay untouched: they are real absences and keep their band
+    /// and session split. In place, before Deflate/ComputeSpans/render.</summary>
+    public static void BridgeDropouts(List<Sample> s)
+    {
+        const int maxRows = 3;
+        const long maxSpanSecs = 5 * 60;
+        int i = 1;
+        while (i < s.Count)
+        {
+            if (s[i].Connected)
+            {
+                i++;
+                continue;
+            }
+            int j = i;
+            while (j < s.Count && !s[j].Connected)
+            {
+                j++;
+            }
+            if (j < s.Count && j - i <= maxRows
+                && s[i - 1].Connected
+                && s[j].Ts - s[i - 1].Ts <= maxSpanSecs)
+            {
+                for (int k = i; k < j; k++)
+                {
+                    s[k] = s[k] with { Charging = s[i - 1].Charging, Connected = true };
+                }
+            }
+            i = j;
+        }
+    }
+
     public static (List<Span> Discharge, List<Span> Charge) ComputeSpans(IReadOnlyList<Sample> samples)
     {
         var discharge = new List<Span>();

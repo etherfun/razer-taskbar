@@ -437,6 +437,10 @@ public sealed partial class HistoryPage : Page
                 var samples = handle.Length > 0
                     ? HistoryService.SamplesInRange(handle, since)
                     : new List<Sample>();
+                // Enumeration flickers (short bounded dropouts) must not split
+                // the run: bridge before deflate/spans/render so the chart
+                // line, off bands and the session stats all agree.
+                HistoryService.BridgeDropouts(samples);
                 // A replaceable cell has no charging hardware: drop whatever
                 // charge flag the reading carried, so neither a bogus status
                 // nor the swap jump can be read as a charge session.
@@ -454,6 +458,7 @@ public sealed partial class HistoryPage : Page
                 if (requestedCompare.Length > 0 && requestedCompare != handle)
                 {
                     compareSamples = HistoryService.SamplesInRange(requestedCompare, since);
+                    HistoryService.BridgeDropouts(compareSamples);
                     if (_resolvedCompareType == BatteryType.Replaceable && compareSamples.Count > 0)
                     {
                         compareSamples = BatteryTypes.AsReplaceable(compareSamples);
