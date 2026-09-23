@@ -53,18 +53,27 @@ dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj
 
 ## Using the widget
 
-The widget itself is click-through, so the tray icon (if enabled) carries the right-click
-menu — kept deliberately small: the device list (*Lowest battery device* or one connected
-device), *Settings…*, *Battery history…* and *Exit*.
+The widget itself is click-through, so the right-click menu lives on the tray icon (if
+enabled). It is deliberately small:
+
+* The device list — *Lowest battery device*, or any single connected device.
+* *Settings…* / *Battery history…* — open the control panel.
+* *Exit*.
+
+Double-clicking the tray icon opens the Battery history window directly.
 
 Everything else lives in the **Settings** window, grouped into *Widget*, *History* and
-*General*: display mode (fixed / temporarily swap on a battery drop / rotate all devices),
-widget side, embedding options (into the taskbar itself, or into the widgets button's free
-space), time remaining, colored battery icon, fade transition, hover list, recording
-intervals, language (Auto / English / 中文) and run at startup. Every change applies and
-persists immediately — nothing needs a restart.
+*General*:
 
-Settings live in `%APPDATA%\razer-taskbar\settings.json`; battery history is recorded to a
+* Display mode — fixed, temporarily swap on a battery drop, or rotate all devices.
+* Widget side, plus the embedding options (into the taskbar itself, or into the widgets
+  button's free space).
+* Time remaining, colored battery icon, fade transition, hover device list.
+* History recording interval.
+* Language (Auto / English / 中文) and run at startup.
+
+Every change applies and persists immediately — nothing needs a restart. Settings are
+stored in `%APPDATA%\razer-taskbar\settings.json`, and battery history is recorded to a
 `battery.db` database next to it. Both stay on your machine.
 
 ### Battery history & predictions
@@ -86,9 +95,11 @@ cycle/session list.
 ## Supported hardware
 
 * Potentially any wireless Razer device compatible with Razer Synapse 3 or 4.
-* Tested with: Razer BlackShark V2 Pro (2023) headset (via Synapse logs), Razer Joro
-  keyboard (dongle, cable and Bluetooth) and Razer Viper V3 HyperSpeed mouse (dongle and
-  cable).
+* Tested with: Razer Joro keyboard (dongle, cable and Bluetooth) and Razer Viper V3
+  HyperSpeed mouse (2.4G dongle).
+* **Untested**: gamepads and wireless headsets — the author has neither on hand, so these
+  device types could not be verified. If you own one and it misbehaves, please open an
+  issue with the device model and the log file.
 
 What each connection mode provides — plain-language version; the full protocol notes live
 in [docs/agent-hid.md](docs/agent-hid.md):
@@ -96,14 +107,14 @@ in [docs/agent-hid.md](docs/agent-hid.md):
 | | 2.4G dongle | USB cable | Bluetooth |
 |---|---|---|---|
 | Battery level | ✅ | ✅ | ✅ |
-| Charging status | via Synapse only | ✅ | ✅ (when Razer's own tools aren't holding the channel) |
-| Device identity (serial) | ✅ | ✅ | ✅ via the vendor channel or Synapse (else a MAC-based id) |
-| Works without Synapse running | ✅ | ✅ | ✅ |
+| Charging status | via Synapse | ✅ | ✅ (if the channel is free) |
+| Device identity | ✅ | ✅ | ✅ (or via Synapse, else a MAC-based id) |
+| Works without Synapse | ✅ | ✅ | ✅ |
 
 All three modes share one device identity, so the widget and its history follow the
 physical device, not how it happens to be connected. Devices the direct queries can't
-reach (headsets) fall back to Synapse logs; a power-saving state is not reportable by the
-hardware.
+reach (headsets) fall back to Synapse logs, and hardware in a power-saving state can't be
+queried at all.
 
 ## How it works
 
@@ -114,8 +125,8 @@ A few notes for the curious — full design notes live in [docs/](docs):
 * **The widget is an overlay**: a small always-on-top, click-through window above the
   taskbar — not a child of it — so it stays visible even with TranslucentTB-style taskbar
   mods and never intercepts a click. It re-anchors itself whenever the taskbar changes
-  (tray icons appearing/disappearing, an explorer restart) and always keeps clear of the
-  Win11 widgets (weather) button. See [docs/agent-taskbar.md](docs/agent-taskbar.md).
+  (tray icons appearing or disappearing, an explorer restart) and keeps clear of the Win11
+  widgets (weather) button. See [docs/agent-taskbar.md](docs/agent-taskbar.md).
 * **Predictions** are learned per device from its recorded history (recency-weighted
   cycles plus per-level charge/discharge profiles), with reporting glitches, battery
   swaps and idle stretches filtered out along the way. See
@@ -159,10 +170,14 @@ tool works with.
 The app icon (`assets/app.ico`) incorporates the Razer snake logo, which
 remains the property of Razer Inc.; it is used without permission, for
 personal, non-commercial use only, and the icon's inclusion in this repository
-does not constitute a challenge to any Razer trademark or copyright. If you
-redistribute the project or prefer to avoid the trademark entirely, delete
-`assets/app.ico` (or replace it with your own) and drop the
-`<ApplicationIcon>` / `AppWindow.SetIcon` references in
-`src/RazerTaskbar/RazerTaskbar.csproj` and
-`src/RazerTaskbar/Features/ControlPanel/ControlPanelWindow.xaml.cs` — the app
-builds and runs fine without it.
+does not constitute a challenge to any Razer trademark or copyright.
+
+If you redistribute the project, or simply prefer to avoid the trademark, the
+icon is easy to remove:
+
+1. Delete or replace `assets/app.ico`.
+2. Remove the `<ApplicationIcon>` reference in `src/RazerTaskbar/RazerTaskbar.csproj`.
+3. Remove the `AppWindow.SetIcon` call in
+   `src/RazerTaskbar/Features/ControlPanel/ControlPanelWindow.xaml.cs`.
+
+The app builds and runs fine without it.
