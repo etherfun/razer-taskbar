@@ -37,7 +37,28 @@ public sealed class BatteryChart : Canvas
     private double _plotW;
     private double _plotH;
 
-    private readonly List<UIElement> _hoverElements = new();
+    // — Hover readout (main series) — persistent elements, created once and
+    // repositioned per PointerMoved: removing and re-adding three elements
+    // (plus a full Measure) on every move made the readout stutter on
+    // dense ranges. _hoverAttached guards the case where Render's
+    // Children.Clear() took them out of the tree.
+    private Line? _hoverLine;
+    private Ellipse? _hoverDot;
+    private Border? _hoverBorder;
+    private TextBlock? _hoverLabel;
+    private bool _hoverAttached;
+    private bool _hoverDark = true;
+    private double _hoverBorderW;
+    private string _hoverStamp = "";
+
+    // Coalesced re-render for resize: a window-resize drag fires SizeChanged
+    // per pixel step and each Render rebuilds the whole shape tree; the timer
+    // renders once, 40ms after the last change.
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _renderDelay;
+    // Span ≤ 36h → axis ticks read "HH:mm" (date prefix is noise) and the
+    // hover readout drops the date too; longer spans use "MM-dd" ticks and a
+    // full "MM-dd HH:mm" hover. Shared by the render path and the hover.
+    private bool _shortSpan;
 
     public BatteryChart()
     {
@@ -48,7 +69,15 @@ public sealed class BatteryChart : Canvas
         // hit-testable, so the whole plot surface tracks the pointer.
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         ActualThemeChanged += (_, _) => Render(_main, _compare, _compareName, _showOffBands);
-        SizeChanged += (_, _) => Render(_main, _compare, _compareName, _showOffBands);
+        _renderDelay = DispatcherQueue.CreateTimer();
+        _renderDelay.IsRepeating = false;
+        _renderDelay.Interval = TimeSpan.FromMilliseconds(40);
+        _renderDelay.Tick += (_, _) => Render(_main, _compare, _compareName, _showOffBands);
+        SizeChanged += (_, _) =>
+        {
+            _renderDelay.Stop();
+            _renderDelay.Start();
+        };
         PointerMoved += OnPointerMoved;
         PointerExited += (_, _) => ClearHover();
     }
@@ -67,6 +96,7 @@ public sealed class BatteryChart : Canvas
         _showOffBands = showOffBands;
         ClearHover();
         Children.Clear();
+        _hoverAttached = false;
         if (ActualWidth < 40 || ActualHeight < 40)
         {
             return;
@@ -100,6 +130,7 @@ public sealed class BatteryChart : Canvas
 
         // Plot rect: extra left room for the y labels, bottom for the time
         // axis (pad 12 / y-axis 26 / bottom 24 in the GDI original).
+        _shortSpan = main[main.Count - 1].Ts - main[0].Ts <= 36 * 3600;
         double pad = 12, left = 26, bottom = 24, top = 8;
         _x0 = left;
         _y0 = top;
@@ -364,10 +395,13 @@ public sealed class BatteryChart : Canvas
         // Time axis: 5 evenly spaced local-time ticks (first left-aligned,
         // last right-aligned, rest centered). Ticks read the MAPPED axis, so
         // compressed mode labels the collapsed positions with the timestamp
-        // each x position actually corresponds to. Skipped entirely on the
-        // compressed axis: with off stretches collapsed, the ticks no longer
-        // measure real elapsed time and only mislead — the pure-line chart
-        // carries no time labels.
+        // each x position actually corresponds to. Granularity follows the
+        // span (FormatTick): a 24h chart labels "HH:mm" — the "MM-dd" prefix
+        // is noise at that scale — and day-plus spans label "MM-dd", which
+        // also keeps the labels narrow enough for the 5-tick row. Skipped
+        // entirely on the compressed axis: with off stretches collapsed, the
+        // ticks no longer measure real elapsed time and only mislead — the
+        // pure-line chart carries no time labels.
         if (showOffBands)
         {
             for (int k = 0; k <= 4; k++)
@@ -375,7 +409,7 @@ public sealed class BatteryChart : Canvas
                 double x = _x0 + (_plotW * k / 4);
                 var tb = new TextBlock
                 {
-                    Text = FormatStamp(TsAtX(x)),
+                    Text = FormatTick(TsAtX(x)),
                     Foreground = labelBrush,
                     FontSize = 11,
                 };
@@ -509,6 +543,46 @@ public sealed class BatteryChart : Canvas
 
     // — Hover readout (main series) —
 
+    /// <summary>Create the three hover elements once, with brushes matching
+    /// the current theme, and (re)attach them above everything Render drew.
+    /// Re-created on theme flip so a flip mid-hover doesn't leave stale
+    /// colors until the next Render.</summary>
+    private void EnsureHoverElements(bool dark)
+    {
+        if (_hoverLine is null || _hoverDark != dark)
+        {
+            var accent = Solid(dark ? 0x60CDFF : 0x0078D4);
+            _hoverLine = new Line
+            {
+                Stroke = accent,
+                StrokeThickness = 1,
+                StrokeDashArray = new DoubleCollection { 2, 2 },
+                IsHitTestVisible = false,
+            };
+            _hoverDot = new Ellipse { Width = 7, Height = 7, Fill = accent, IsHitTestVisible = false };
+            _hoverLabel = new TextBlock { FontSize = 11, Foreground = Solid(dark ? 0xF3F3F3 : 0x1B1B1B) };
+            _hoverBorder = new Border
+            {
+                Background = Solid(dark ? 0x2B2B2B : 0xF7F7F7),
+                BorderBrush = accent,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(6, 2, 6, 2),
+                Child = _hoverLabel,
+                IsHitTestVisible = false,
+            };
+            _hoverDark = dark;
+            _hoverStamp = "";
+        }
+        if (!_hoverAttached)
+        {
+            Children.Add(_hoverLine);
+            Children.Add(_hoverDot);
+            Children.Add(_hoverBorder);
+            _hoverAttached = true;
+        }
+    }
+
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
         if (_main.Count < 2 || _plotW <= 0)
@@ -544,55 +618,31 @@ public sealed class BatteryChart : Canvas
         double x = XOf(nearest.Ts);
         double y = LevelY(nearest.Level);
 
-        bool dark = ActualTheme == ElementTheme.Dark;
-        var accent = Solid(dark ? 0x60CDFF : 0x0078D4);
-        var labelBg = Solid(dark ? 0x2B2B2B : 0xF7F7F7);
-        var labelFg = Solid(dark ? 0xF3F3F3 : 0x1B1B1B);
-
-        ClearHover();
-        var vline = new Line
-        {
-            X1 = x,
-            Y1 = _y0,
-            X2 = x,
-            Y2 = _y0 + _plotH,
-            Stroke = accent,
-            StrokeThickness = 1,
-            StrokeDashArray = new DoubleCollection { 2, 2 },
-            IsHitTestVisible = false,
-        };
-        Children.Add(vline);
-        _hoverElements.Add(vline);
-        var dot = new Ellipse { Width = 7, Height = 7, Fill = accent, IsHitTestVisible = false };
-        Children.Add(dot);
+        EnsureHoverElements(ActualTheme == ElementTheme.Dark);
+        var line = _hoverLine!;
+        var dot = _hoverDot!;
+        var border = _hoverBorder!;
+        var label = _hoverLabel!;
+        line.X1 = x;
+        line.Y1 = _y0;
+        line.X2 = x;
+        line.Y2 = _y0 + _plotH;
         Canvas.SetLeft(dot, x - 3.5);
         Canvas.SetTop(dot, y - 3.5);
-        _hoverElements.Add(dot);
-        var label = new TextBlock
-        {
-            Text = $"{FormatStamp(nearest.Ts)}  {nearest.Level}%",
-            FontSize = 11,
-            Foreground = labelFg,
-            IsHitTestVisible = false,
-        };
-        var border = new Border
-        {
-            Background = labelBg,
-            BorderBrush = accent,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(6, 2, 6, 2),
-            Child = label,
-            IsHitTestVisible = false,
-        };
-        Children.Add(border);
         // Keep the tooltip inside the chart: near the right edge it flips to
         // the LEFT of the cursor (the overlay scrollbar would otherwise clip
         // it), and x is clamped by the border's own measured width.
-        border.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
-        double bw = border.DesiredSize.Width > 0
-            ? border.DesiredSize.Width
-            : label.Text.Length * 6.2 + 16;
+        string text = $"{FormatHoverStamp(nearest.Ts)}  {nearest.Level}%";
+        if (text != _hoverStamp)
+        {
+            _hoverStamp = text;
+            label.Text = text;
+            border.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            _hoverBorderW = border.DesiredSize.Width > 0
+                ? border.DesiredSize.Width
+                : text.Length * 6.2 + 16;
+        }
+        double bw = _hoverBorderW;
         double bx = x + 8;
         if (bx + bw > ActualWidth - 2)
         {
@@ -602,16 +652,19 @@ public sealed class BatteryChart : Canvas
         double by = Math.Clamp(_y0 + 4, 0, Math.Max(ActualHeight - 28, 0));
         Canvas.SetLeft(border, bx);
         Canvas.SetTop(border, by);
-        _hoverElements.Add(border);
+        line.Visibility = Visibility.Visible;
+        dot.Visibility = Visibility.Visible;
+        border.Visibility = Visibility.Visible;
     }
 
     private void ClearHover()
     {
-        foreach (var el in _hoverElements)
+        if (_hoverAttached)
         {
-            Children.Remove(el);
+            _hoverLine!.Visibility = Visibility.Collapsed;
+            _hoverDot!.Visibility = Visibility.Collapsed;
+            _hoverBorder!.Visibility = Visibility.Collapsed;
         }
-        _hoverElements.Clear();
     }
 
     /// <summary>Local-time "MM-dd HH:mm" — the year is noise for a chart
@@ -620,17 +673,31 @@ public sealed class BatteryChart : Canvas
     public static string FormatStamp(long ts)
         => DateTimeOffset.FromUnixTimeSeconds(ts).LocalDateTime.ToString("MM-dd HH:mm");
 
+    /// <summary>Span-aware stamp granularities, driven by _shortSpan set in
+    /// Render: a ≤36h chart reads "HH:mm" on the axis (the date prefix is
+    /// noise at that scale) and drops the date from the hover too; longer
+    /// spans label the axis "MM-dd" only and keep the full stamp on the
+    /// hover. The public FormatStamp stays full-grain for the cycle list.</summary>
+    private string FormatTick(long ts)
+        => DateTimeOffset.FromUnixTimeSeconds(ts).LocalDateTime.ToString(_shortSpan ? "HH:mm" : "MM-dd");
+
+    private string FormatHoverStamp(long ts)
+        => DateTimeOffset.FromUnixTimeSeconds(ts).LocalDateTime.ToString(_shortSpan ? "HH:mm" : "MM-dd HH:mm");
+
     /// <summary>Drop run points that moved less than a pixel in BOTH axes
     /// from the last kept point: invisible detail, but a long history built
     /// XAML point collections with one entry per sample. Run endpoints always
-    /// survive, so lines and areas still begin/end exactly at run bounds.</summary>
+    /// survive, so lines and areas still begin/end exactly at run bounds.
+    /// Output capacity starts bounded: reserving pts.Count up front on a
+    /// huge connected run allocates an LOH block (>85 KB) for an output that
+    /// decimates down to a few hundred points.</summary>
     private static List<Windows.Foundation.Point> Decimate(List<Windows.Foundation.Point> pts)
     {
         if (pts.Count <= 2)
         {
             return pts;
         }
-        var outPts = new List<Windows.Foundation.Point>(pts.Count) { pts[0] };
+        var outPts = new List<Windows.Foundation.Point>(Math.Min(pts.Count, 1024)) { pts[0] };
         for (int i = 1; i < pts.Count - 1; i++)
         {
             var last = outPts[^1];
