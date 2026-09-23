@@ -12,6 +12,39 @@
              and waste the rest of the window). -->
         <StackPanel Margin="16,8,16,16" Spacing="4">
 
+            <!-- ============ General ============ -->
+            <TextBlock x:Name="HeaderGeneral" Style="{StaticResource SettingsSectionStyle}" />
+            <Border Style="{StaticResource CardStyle}">
+                <StackPanel Spacing="2">
+                    <!-- Language -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblLang" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescLang" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboLang" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboLang_SelectionChanged" />
+                    </Grid>
+                    <!-- Run at startup -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblAutostart" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescAutostart" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchAutostart" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchAutostart_Toggled" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- ============ Widget ============ -->
             <TextBlock x:Name="HeaderWidget" Style="{StaticResource SettingsSectionStyle}" />
             <Border Style="{StaticResource CardStyle}">
@@ -234,38 +267,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- ============ General ============ -->
-            <TextBlock x:Name="HeaderGeneral" Style="{StaticResource SettingsSectionStyle}" />
-            <Border Style="{StaticResource CardStyle}">
-                <StackPanel Spacing="2">
-                    <!-- Language -->
-                    <Grid Style="{StaticResource SettingRowStyle}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
-                            <TextBlock x:Name="LblLang" Style="{StaticResource SettingTitleStyle}" />
-                            <TextBlock x:Name="DescLang" Style="{StaticResource SettingDescStyle}" />
-                        </StackPanel>
-                        <ComboBox x:Name="ComboLang" Grid.Column="1" Width="140" VerticalAlignment="Center"
-                                  SelectionChanged="ComboLang_SelectionChanged" />
-                    </Grid>
-                    <!-- Run at startup -->
-                    <Grid Style="{StaticResource SettingRowStyle}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
-                            <TextBlock x:Name="LblAutostart" Style="{StaticResource SettingTitleStyle}" />
-                            <TextBlock x:Name="DescAutostart" Style="{StaticResource SettingDescStyle}" />
-                        </StackPanel>
-                        <ToggleSwitch x:Name="SwitchAutostart" Grid.Column="1" VerticalAlignment="Center"
-                                      Toggled="SwitchAutostart_Toggled" />
-                    </Grid>
-                </StackPanel>
-            </Border>
         </StackPanel>
     </ScrollViewer>
 </Page>
