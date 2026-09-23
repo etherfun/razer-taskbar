@@ -1,0 +1,74 @@
+# Build (Release x64), run the unit tests, then attach the dist/ output as a
+# zip to a **draft** GitHub release. Publishing the draft — and thereby
+# creating the tag for dispatch runs — stays a manual step for the maintainer.
+#
+# Triggers:
+#   - pushing a tag like v1.2.3  -> draft release named after the tag
+#   - workflow_dispatch          -> draft release tagged draft-<shortsha>;
+#                                   the tag name is just a placeholder and
+#                                   can be renamed before publishing
+name: build & draft release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  draft-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Unit tests
+        run: dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj --nologo
+
+      - name: Publish (Release x64)
+        run: dotnet publish src/RazerTaskbar/RazerTaskbar.csproj -c Release -p:Platform=x64 -o dist --nologo
+
+      # The exe is an apphost shell; a successful deploy shows on the dll
+      # (same check as build.ps1).
+      - name: Verify deploy
+        run: |
+          if (-not (Test-Path dist/razer-taskbar.dll)) {
+            throw 'deploy failed: dist/razer-taskbar.dll missing'
+          }
+
+      - name: Pick a version string
+        id: ver
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = $env:GITHUB_REF_NAME
+          } else {
+            $v = 'draft-' + $env:GITHUB_SHA.Substring(0, 7)
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Zip dist under a top-level folder
+        run: |
+          New-Item -ItemType Directory -Path stage/razer-taskbar | Out-Null
+          Copy-Item dist/* stage/razer-taskbar/ -Recurse
+          Compress-Archive -Path stage/razer-taskbar -DestinationPath "razer-taskbar-${{ steps.ver.outputs.version }}-x64.zip" -Force
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          @'
+          Unzip anywhere and run `razer-taskbar.exe` — no installer. Close a running instance before replacing its files (the process locks `razer-taskbar.dll`).
+
+          Requirements: Windows 10/11 x64, .NET 8 Desktop Runtime, and the Windows App SDK Runtime (without it the app still runs, but limited to widget-only mode).
+          '@ | Set-Content -Path notes.md
+          gh release create "$v" --draft --target "$env:GITHUB_SHA" --title "razer-taskbar $v" --notes-file notes.md "razer-taskbar-$v-x64.zip"
