@@ -402,8 +402,14 @@ public static class BleVendorProbe
                     Sweep(write, ref seq);
                     continue;
                 }
+                if (arg == "--pages")
+                {
+                    PageSweep(write, ref seq);
+                    continue;
+                }
             }
-            if (!args.Any(a => a.StartsWith("--raw=", StringComparison.OrdinalIgnoreCase) || a == "--sweep"))
+            if (!args.Any(a => a.StartsWith("--raw=", StringComparison.OrdinalIgnoreCase)
+                || a == "--sweep" || a == "--pages"))
             {
                 _out("— replay of observed queries —");
                 foreach (var (page, id, param) in ObservedQueries)
@@ -485,6 +491,98 @@ public static class BleVendorProbe
                     0x0000, waitMs: 900, quiet: true);
                 _out($"   page {page:X2} id {id:X2}: {(kind == "" ? "no response" : kind == "ok" ? $"ok {Convert.ToHexString(data)}" : "err")}");
             }
+        }
+    }
+
+    /// <summary>Full page-space sweep. The 2026-09-07 probe only ever
+    /// touched pages 01/05 — the two Synapse used in the HCI capture; every
+    /// other page is unmapped. Pass structure: wake the link with the
+    /// known-good battery query, then ask every page 0x00-0xFF for its id
+    /// list via the discovery register (page,0x80,param 0000) — the command
+    /// that returned `40 81 C2 C3 C6` on page 01 — re-probing silent pages
+    /// once (BT links drop single exchanges), then sweep the get-half ids
+    /// (0x80-0xFF) of every alive page under both observed params (0000 and
+    /// 0001 — the verified commands use both shapes). Queries only:
+    /// payload_len stays 0, ids below 0x80 (the set-half mirrors) are never
+    /// sent.</summary>
+    private static void PageSweep(GattCharacteristic write, ref byte seq)
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            var (kind, data) = Exchange(write, ref seq, 0x00, 0x05, 0x81, 0x0001, waitMs: 900, quiet: true);
+            if (kind == "ok")
+            {
+                _out($"link awake (battery 0x{(data.Length > 0 ? data[0] : 0):X2} = {BleVendor.BatteryPercent(data.Length > 0 ? data[0] : (byte)0)}%)");
+                break;
+            }
+            Thread.Sleep(300);
+        }
+        var alive = new List<byte>();
+        var pending = Enumerable.Range(0, 0x100).Select(i => (byte)i).ToList();
+        var errPages = 0;
+        for (int pass = 1; pass <= 2 && pending.Count > 0; pass++)
+        {
+            _out($"— pass {pass}: discovery (page,80,param 0000) on {pending.Count} pages —");
+            var silent = new List<byte>();
+            foreach (var page in pending)
+            {
+                var (kind, data) = Exchange(write, ref seq, 0x00, page, 0x80, 0x0000, waitMs: 900, quiet: true);
+                switch (kind)
+                {
+                    case "ok":
+                        alive.Add(page);
+                        _out($"   page {page:X2} id list: {Convert.ToHexString(data)}");
+                        break;
+                    case "err":
+                        if (pass == 1)
+                        {
+                            errPages++;
+                        }
+                        break;
+                    default:
+                        silent.Add(page);
+                        break;
+                }
+            }
+            _out($"   pass {pass}: {pending.Count - silent.Count} answered ({alive.Count} alive so far), {silent.Count} silent, {errPages} unknown-command");
+            pending = silent;
+        }
+        _out($"— id sweep on {alive.Count} alive pages (ids 0x80-0xFF, params 0000/0001) —");
+        foreach (var page in alive)
+        {
+            var found = 0;
+            for (int id = 0x80; id <= 0xFF; id++)
+            {
+                string? r0 = null, r1 = null;
+                var (k0, d0) = Exchange(write, ref seq, 0x00, page, (byte)id, 0x0000, waitMs: 900, quiet: true);
+                if (k0 == "ok")
+                {
+                    found++;
+                    r0 = Convert.ToHexString(d0);
+                }
+                var k1 = "err"; // unknown-command is param-independent — skip the second shot when k0 already says err
+                if (k0 != "err")
+                {
+                    (k1, var d1) = Exchange(write, ref seq, 0x00, page, (byte)id, 0x0001, waitMs: 900, quiet: true);
+                    if (k1 == "ok")
+                    {
+                        r1 = Convert.ToHexString(d1);
+                        if (r0 is null)
+                        {
+                            found++;
+                        }
+                    }
+                }
+                if (r0 is not null || r1 is not null)
+                {
+                    _out($"   page {page:X2} id {id:X2}:{(r0 is not null ? $" p0={r0}" : "")}{(r1 is not null && r1 != r0 ? $" p1={r1}" : "")}");
+                }
+                else if (k0 == "" && k1 == "")
+                {
+                    _out($"   page {page:X2} id {id:X2}: no response (both params)");
+                }
+            }
+            _out($"   page {page:X2}: {found} readable ids");
         }
     }
 }

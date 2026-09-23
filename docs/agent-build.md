@@ -48,6 +48,7 @@ dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj   # 勿加 --quie
 | `razer-taskbar.exe --hid-deep` | 可读寄存器 91 字节全载荷 dump + class 0x0F args0 扫描（~10 分钟）→ `hid-deep.log`；查"载荷深部还藏了什么"用 |
 | `razer-taskbar.exe --ble-vendor` | Razer BLE 厂商 GATT 通道重放（观测查询基线） |
 | `… --ble-vendor --sweep` | 厂商通道 page 01/05 × id 0x80-0xFF 只读枚举 |
+| `… --ble-vendor --pages` | 全 page 发现（(page)/80/0000，256 页）+ 活页 get 半区扫描（~10 分钟）→ 完整 page/id 地图（2026-09-22：6 个活页，见 agent-hid.md） |
 | `… --ble-vendor --raw=LEN:PAGE:ID:PARAM[:hex]` | 单发命令（LEN≠0=写，需 `--yes-i-know`；set 半区 id 拒绝） |
 | `… --ble-vendor --power` | 生产路径 `BleVendor.TryReadPower` 自检（电量/充电/回退） |
 
