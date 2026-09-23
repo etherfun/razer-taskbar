@@ -139,15 +139,17 @@ public sealed partial class HistoryPage : Page
         {
             RangeCombo.ItemsSource = new List<string>
             {
+                I18n.Tr("24 hours"),
                 I18n.Tr("7 days"),
                 I18n.Tr("30 days"),
                 I18n.Tr("All"),
             };
             RangeCombo.SelectedIndex = _rangeDays switch
             {
-                7 => 0,
-                30 => 1,
-                _ => 2,
+                1 => 0,
+                7 => 1,
+                30 => 2,
+                _ => 3,
             };
             // Battery-type combo: same rebuild/restore dance; the current
             // selection is re-applied by Reload below.
@@ -196,8 +198,9 @@ public sealed partial class HistoryPage : Page
         }
         _rangeDays = RangeCombo.SelectedIndex switch
         {
-            0 => 7,
-            1 => 30,
+            0 => 1,
+            1 => 7,
+            2 => 30,
             _ => 0, // All
         };
         Reload();

@@ -86,6 +86,7 @@ public static class I18n
         ["full in {}"] = "充满还需 {}",
         // History page
         ["Battery history — Razer Taskbar"] = "电量历史 — Razer Taskbar",
+        ["24 hours"] = "24 小时",
         ["7 days"] = "7 天",
         ["30 days"] = "30 天",
         ["All"] = "全部",
