@@ -25,6 +25,12 @@ Free and open source (GPLv3), built with C# / WinUI 3.
   English and 中文.
 * **No images, no installer** — the widget is drawn natively and stays crisp at any DPI.
 
+## Screenshots
+
+![Widget and hover device list](docs/images/1790411982784.png)
+
+![Battery history](docs/images/history.png)
+
 ## Requirements
 
 * Windows 10 or 11
@@ -104,12 +110,12 @@ cycle/session list.
 What each connection mode provides — plain-language version; the full protocol notes live
 in [docs/agent-hid.md](docs/agent-hid.md):
 
-| | 2.4G dongle | USB cable | Bluetooth |
-|---|---|---|---|
-| Battery level | ✅ | ✅ | ✅ |
-| Charging status | via Synapse | ✅ | ✅ (if the channel is free) |
-| Device identity | ✅ | ✅ | ✅ (or via Synapse, else a MAC-based id) |
-| Works without Synapse | ✅ | ✅ | ✅ |
+|                       | 2.4G dongle | USB cable | Bluetooth                                |
+| --------------------- | ----------- | --------- | ---------------------------------------- |
+| Battery level         | ✅          | ✅        | ✅                                       |
+| Charging status       | via Synapse | ✅        | ✅ (if the channel is free)              |
+| Device identity       | ✅          | ✅        | ✅ (or via Synapse, else a MAC-based id) |
+| Works without Synapse | ✅          | ✅        | ✅                                       |
 
 All three modes share one device identity, so the widget and its history follow the
 physical device, not how it happens to be connected. Devices the direct queries can't
