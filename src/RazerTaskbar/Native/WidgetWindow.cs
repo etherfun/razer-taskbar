@@ -53,6 +53,13 @@ public static class WidgetWindow
     /// <summary>Cross-fade duration and tick for device-switch transitions.</summary>
     private const int FadeMs = 300;
     private const uint FadeTickMs = 16;
+    /// <summary>Embedded band children present only through band rebuilds —
+    /// every poke is a full band re-snapshot on explorer's clock, so the fade
+    /// steps at the "rare paint" cadence the band was validated for. Ticking
+    /// at the overlay's 16ms outpaces the rebuild pipeline: the intermediate
+    /// blends never get snapshotted and the switch reads as hide-then-show
+    /// (docs/agent-embed.md).</summary>
+    private const uint FadeTickEmbedMs = 50;
     /// <summary>Log a "covered" event at most this often.</summary>
     private static readonly TimeSpan CoveredLogEvery = TimeSpan.FromSeconds(30);
     private const uint HoverPollMs = 120;
@@ -524,7 +531,12 @@ public static class WidgetWindow
             return;
         }
         var hwnd = st.Hwnd;
-        if (hwnd != 0 && IsWindow(hwnd))
+        // Mid-fade the widget keeps its current rect: WidgetSize would pick up
+        // the natural size the fade's PaintBody just measured for the NEW
+        // device, resizing the surface mid-animation and forcing FadeTick to
+        // drop the blend (snapshot byte-count mismatch) — the animation dies
+        // half-drawn. The first pass after EndFade applies the new size.
+        if (hwnd != 0 && IsWindow(hwnd) && st.FadePrev is null)
         {
             (st.WidgetW, st.WidgetH) = WidgetSize(hwnd);
         }
@@ -1090,7 +1102,7 @@ public static class WidgetWindow
             {
                 st.FadeNew = SnapshotFrame(st);
                 st.FadeStart = Environment.TickCount64;
-                SetTimer(st.MsgHwnd, TimerFade, FadeTickMs, 0);
+                SetTimer(st.MsgHwnd, TimerFade, st.Embedded ? FadeTickEmbedMs : FadeTickMs, 0);
             }
             else
             {
