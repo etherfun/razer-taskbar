@@ -242,12 +242,47 @@ internal static class D2d
     // — ink scanning (rendered-pixel truth) —
 
     private static readonly object ScanLock = new();
+    /// <summary>Log a scan failure once — a persistent device fault would
+    /// otherwise write a stack per uncached text measurement.</summary>
+    private static bool _scanFailLogged;
     private static IntPtr _scanDc;
     private static IntPtr _scanBmp;
     private static IntPtr _scanBits;
     private static ID2D1DCRenderTarget? _scanRt;
     private static ID2D1SolidColorBrush? _scanBrush;
     private const int ScanW = 384, ScanH = 192;
+
+    /// <summary>D2DERR_RECREATE_TARGET: the D3D device backing every DC render
+    /// target is gone (GPU driver reset/TDR, display-mode change, session
+    /// switch). All targets must be recreated; the widget surface and this
+    /// shared scratch target die together.</summary>
+    public const uint D2DERR_RECREATE_TARGET = 0x8899000Cu;
+
+    /// <summary>True when `e` is the device-loss HRESULT. BindDC is declared
+    /// without PreserveSig, so a lost target surfaces as a COMException.</summary>
+    public static bool IsDeviceLost(Exception e)
+        => e is System.Runtime.InteropServices.COMException ce
+            && (uint)ce.HResult == D2DERR_RECREATE_TARGET;
+
+    /// <summary>HRESULT form (EndDraw is PreserveSig and returns the code).</summary>
+    public static bool IsDeviceLost(int hr) => (uint)hr == D2DERR_RECREATE_TARGET;
+
+    /// <summary>Drop the scratch target so the next scan recreates it on the
+    /// current device. Called by the widget when a paint reports device loss:
+    /// the scan target is process-shared, so rebuilding only the widget
+    /// surface would leave every uncached ink scan throwing at BindDC
+    /// (2026-11-09 live incident: exactly that, ~1/s forever).</summary>
+    public static void OnDeviceLost()
+    {
+        lock (ScanLock)
+        {
+            DestroyScanSurface();
+            // Measurements are device-independent, but entries saved as null
+            // by a failed scan (device gone) would keep the line-box fallback
+            // for the process lifetime; drop the map and re-measure.
+            InkCache.Clear();
+        }
+    }
 
     private sealed record InkBox(int Top, int Height, int Left, int Width);
 
@@ -288,7 +323,13 @@ internal static class D2d
                 InkCache.Clear();
             }
             var scanned = ScanInkUncached(text, f);
-            InkCache[key] = scanned;
+            if (scanned is not null)
+            {
+                // Only real measurements are cached: a null from a failed scan
+                // (device lost / scratch target gone) must be retried, or the
+                // line-box fallback would stick for the process lifetime.
+                InkCache[key] = scanned;
+            }
             return scanned;
         }
     }
@@ -309,10 +350,11 @@ internal static class D2d
         var rt = _scanRt!;
         var brush = _scanBrush!;
         var full = new RECT { Left = 0, Top = 0, Right = ScanW, Bottom = ScanH };
-        rt.BindDC(_scanDc, ref full);
-        rt.BeginDraw();
+        int hr;
         try
         {
+            rt.BindDC(_scanDc, ref full);
+            rt.BeginDraw();
             var transparent = new D2D1_COLOR_F(0f, 0f, 0f, 0f);
             rt.Clear(ref transparent);
             rt.SetTextAntialiasMode(D2D1Consts.TextAntialiasModeGrayscale);
@@ -321,10 +363,30 @@ internal static class D2d
             var rect = new D2D1_RECT_F(slack, 0, slack + Math.Max(TextWidth(text, f), 1), boxH);
             rt.DrawText(text, (uint)text.Length, f, ref rect, brush,
                 D2D1Consts.DrawTextOptionsNone, DWriteConsts.MeasuringModeNatural);
+            hr = rt.EndDraw(out _, out _);
         }
-        finally
+        catch (Exception e)
         {
-            rt.EndDraw(out _, out _);
+            // A lost device kills this process-shared target too — drop it so
+            // the next scan recreates it on the fresh device; callers fall back
+            // to line-box metrics meanwhile.
+            DestroyScanSurface();
+            if (!IsDeviceLost(e) && !_scanFailLogged)
+            {
+                _scanFailLogged = true;
+                Log.Error("razer-taskbar: ink scan failed", e);
+            }
+            return null;
+        }
+        if (hr != 0)
+        {
+            DestroyScanSurface();
+            if (!IsDeviceLost(hr) && !_scanFailLogged)
+            {
+                _scanFailLogged = true;
+                Log.Error($"razer-taskbar: ink scan EndDraw failed: 0x{hr:X8}");
+            }
+            return null;
         }
 
         int top = -1, bot = -1, minX = -1, maxX = -1;

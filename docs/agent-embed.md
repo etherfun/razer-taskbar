@@ -80,6 +80,9 @@ explorer 重启（TaskbarCreated）：IsChildOf 失败 → 销毁重建子窗口
 - 挂件的绘制频率极低（PaintSig 去重，电量/设备变化才出帧），poke 的资源消耗
   可忽略；期间其它工具（Lyricify 等）的帧也被顺带刷新，无害。
 - 淡入淡出（FadeTransition）因共用 `AlphaPresent` 而在嵌入态自动可用。
+- **ULW 的 `pptDst` 语义（2026-11-09 实测）**：对带内 `WS_CHILD`，ULW 按**父客户区
+  坐标**定位，不是屏幕坐标——`AlphaPresent` 必须传父客户区矩形，否则每次出帧都会
+  把窗口再平移一个任务栏原点、poke 随即快照到出屏的挂件（详见 §6.1）。
 
 **可选优化（未采用）**：key 色采样任务栏底色——需要解决 PrintWindow/CopyFromScreen
 的自反馈（我们的窗口就盖在采样点上）与底色渐变问题；ULW+poke 无这些妥协。
@@ -135,3 +138,96 @@ explorer 重启（TaskbarCreated）：IsChildOf 失败 → 销毁重建子窗口
 - 实验产生的带内幽灵快照（1450–1910 区域品红/绿/黄框）已通过重启 explorer 清除。
 - `%APPDATA%\razer-taskbar\settings.json.bak-embedtest` 为实验前的配置备份，可删。
 - 全部截图证据在 `~/.zcode/cli/artifacts/`（`probe*.png`、`f1..f5*.png`、`n*.png` 等）。
+
+## 6. 2026-11-09 实测：数据更新时整块闪空的根因与修复
+
+> 现场：`embed_into_taskbar=true` + `embed_into_widgets_space=true` +
+> `fade_transition=true`，`display_mode=drop_swap`，Windows 11，2560×1600 100%，
+> 任务栏高 48px。用户报告"挂件在更新数据时完全清除再绘制"。
+> 全部结论来自 PrintWindow 高频采集 + 临时诊断插桩（实测后已移除），不是推测。
+
+### 6.1 机制 A：ULW 在带内子窗口上按父客户区坐标定位（闪空主因）
+
+`AlphaPresent` 原先把 `GetWindowRect` 的**屏幕坐标**直接交给 `UpdateLayeredWindow`
+的 `pptDst`。实测：对 `Shell_TrayWnd` 的 `WS_CHILD`，ULW 把 `pptDst` 解释为**父客户区
+坐标**，于是每次呈现都把窗口再向下平移"任务栏屏幕原点（本机 1552px）"：
+
+| 时刻 | present 前窗口矩形 | ULW pptDst | present 后窗口矩形 |
+|---|---|---|---|
+| 普通出帧 | (1976,1559) | (1976,1559)（屏幕坐标） | **(1976,3111)** |
+| 淡入 tick 2 | (1976,3111) | (1976,3111) | (1976,4663) |
+| tick 3 | (1976,4663) | … | (1976,6215) |
+| tick 4/tick 5 | … | … | (1976,7774) → (1976,9326) |
+
+链条：一次数据更新 → `PaintBody` 出帧 → 淡入每 50ms 一个 tick，每个 tick 都
+`AlphaPresent` → ULW 每 tick 把窗口再推低 1552px（5 个 tick 后完全出屏）→ 紧随其后的
+`PokeBandRebuild` 触发带重建，快照的是**已出屏的窗口** → 带上的挂件整块变空
+（= "完全清除"）。1s 兜底定位会把窗口搬回原位，但**带快照不会因此刷新**；要等下一次
+自身 poke 或任务栏其它重建才会重新拍到帧，而下一次 present 又会先把窗口推出屏，
+于是表现为清空、偶发重绘。
+
+同一 25fps PrintWindow 采集（rotate 模式每 10s 一次设备切换，强制走更新路径）：
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 挂件表面空帧（`PrintWindow(PW_RENDERFULLCONTENT)`） | 123 / 669 = **18.4%**，每 10s 一段，最长 1.28s | **0 / 387** |
+| 带合成里挂件区域空帧（`PrintWindow(Shell_TrayWnd)` 裁切） | 与上段同步的约 2s 交替空白 | **0 / 250** |
+| present 前后窗口矩形 | 每次 +1552px 漂移 | 完全一致 |
+
+修复（`WidgetWindow.AlphaPresent`，`Native/WidgetWindow.cs:1349`）：嵌入态先把
+`GetWindowRect` 的屏幕矩形换算成父客户区坐标（`TaskbarLocator.ClientOrigin(GetAncestor(hwnd, GA_PARENT))`）
+再交给 ULW，窗口不再被 ULW 移动；覆盖层是顶层窗口，仍传屏幕坐标、行为不变。
+尺寸与帧依旧在同一次 Paint 里提交（`PlaceWidgetCore` 的 SetWindowPos 先于
+`AlphaPresent`），淡入淡出照旧（采集到的淡入逐帧可见 53%↔87% 双影）。
+
+### 6.2 机制 B：D2D 设备丢失后永不恢复（同日 20:15 的实况叠加）
+
+本机 20:14:58 / 20:15:12 `nvlddmkm` 报 ID 14/153（GPU 驱动复位/TDR）。此后
+`csharp-debug.log` 每秒一条（`.old` 5,076 条 + 当前 1,507 条，全部 0x8899000C、零成功出帧）：
+
+```
+[ERROR] paint body failed: COMException ... (0x8899000C)
+  at ID2D1DCRenderTarget.BindDC  ... D2d.cs:312
+  at D2d.ScanInk                 ... PaintBody
+```
+
+三处缺口：
+
+1. `PaintBody` 的 EndDraw 分支比较的是 `0x88990010`（其实是
+   D2DERR_UNSUPPORTED_VERSION），**不是** `D2DERR_RECREATE_TARGET = 0x8899000C`，
+   所以设备丢失后表面永不重建；
+2. `D2d.ScanInkUncached` 的进程级 scratch 目标（`_scanRt`/`_scanBrush`）同样随设备
+   死亡、也不重建——即使主目标重建，下一次未缓存的墨迹扫描仍会在
+   `rt.BindDC(_scanDc, …)` 抛出；
+3. `PaintBody` 先 `rt.Clear(transparent)` 再测文本；异常被内部 catch 后 `Paint` 仍
+   调用 `AlphaPresent`，把**已清空的整帧**上传并 poke——每次重试再清一次，
+   这正是"完全清除后不再回来"。
+
+修复：
+
+- `D2d`：新增 `D2DERR_RECREATE_TARGET` / `IsDeviceLost(Exception|int)` /
+  `OnDeviceLost()`（`Native/D2d.cs:259`）；`ScanInkUncached` 在 `BindDC`/`BeginDraw`
+  异常或 EndDraw 失败时销毁 scratch 目标并返回 null（调用方回退行盒度量），
+  失败的扫描不再写缓存，恢复后可重新量到真值。
+- `WidgetWindow.PaintBody`（`Native/WidgetWindow.cs:1403`）改为两阶段：
+  **Phase 1 量测**（只碰共享扫描目标，不写 `MemBits`）→ **Phase 2 清屏+绘制**；
+  任何阶段失败都返回 false，`Paint` 在 false 时**不** AlphaPresent、不 poke，
+  已上屏的旧帧原样保留（`Native/WidgetWindow.cs:1080`）。
+- 设备丢失统一走 `RecoverFromDeviceLoss`（`Native/WidgetWindow.cs:1633`）：
+  销毁挂件表面 + `D2d.OnDeviceLost()`，下一次 Paint 在恢复后的设备上重建；
+  同一次丢失只记一行日志（现场是 1/s 刷屏），`first paint` 也改为每窗口一次。
+- `SilentFrame`（退出幽灵协议）改用 `PatBlt(BLACKNESS)` 清帧：D2D 设备丢失时
+  teardown 也能走完。
+
+**验证（故障注入）**：diag 构建让前 6 次出帧在 Clear 之后抛 0x8899000C（模拟设备
+丢失窗口）——带合成空帧 **0/200**、挂件表面仅 1 帧启动期空帧，日志恰好一行
+`D2D device lost`，注入结束后自动恢复出帧；对照修复前同一路径（真实日志）：
+每次失败都 AlphaPresent 清空帧。
+
+### 6.3 复测口径
+
+采集 Harness 在 `%TEMP%\razer-diag\`（`pwcapture.ps1` / `bandcapture.ps1`）：
+全屏游戏盖住任务栏时 `CopyFromScreen` 只能拿到游戏画面，改用
+`PrintWindow(PW_RENDERFULLCONTENT)`——对挂件窗口得到其 ULW 表面（呈现帧），
+对 `Shell_TrayWnd` 得到带合成（含挂件）的像素。证据目录：
+`pwcapture\`、`bandcapture\`、`fadeseries\`（淡入逐帧）。
