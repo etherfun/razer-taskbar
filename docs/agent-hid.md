@@ -257,13 +257,12 @@ Joro 切蓝牙并配对后走 **BTHLE**（HID-over-GATT，服务 UUID `{00001812
 - **传输切换无缝**：USB 拔线到 BLE 读数接上仅 ~14s（同一串号条目先判离线再由 BLE 复联，
   30s 墙钟下限正好吸收交接窗，历史无离线样本）。身份升级有 ~1 分钟滞后（心跳节奏）：
   首轮以厂商通道原始名落地。
-- **BLE:{mac} 假身份残留（已修）**：身份升级那一轮只写串号条目，旧 MAC 条目成为孤儿——
-  原代码只回收 `HID:{pid}` 形态，BLE 回退"靠名字折叠"，但解析后不再有回退轮，且首尾
-  名字不同（厂商通道 "Joro" vs 心跳 "Razer Joro"），启动自愈 `AliasPairs`（精确同名）
-  也配不上对。修复：Commit 实时折叠——本轮解析出真串号时，回收**同 pid**（pid 钉死型号，
-  包含匹配不跨型号）且名字相等/互相包含的 `:` 形态回退行（`_fallbackPid` 记录根落时的
-  pid），走 `MergeAlias` 历史无缝。两个同型号单元不会误折叠：心跳匹配歧义时两边都解析
-  不出来，pid 形态回退在 pid 已解析时根本不落根。
+- **BLE:{mac} 假身份残留（2026-09-11 首修，2026-11-10 补修）**：身份升级那一轮只写串号条目，旧 MAC 条目成为孤儿——原代码只回收 `HID:{pid}` 形态，BLE 回退"靠名字折叠"，但解析后不再有回退轮，且首尾名字不同（厂商通道 "Joro" vs 心跳 "Razer Joro"），启动自愈 `AliasPairs`（当时是**精确同名**）也配不上对。09-11 的修复：Commit 实时折叠——本轮解析出真串号时，回收**同 pid**（pid 钉死型号，包含匹配不跨型号）且名字相等/互相包含的 `:` 形态回退行（`_fallbackPid` 记录根落时的 pid），走 `MergeAlias` 历史无缝。
+  2026-11-10 实测补修（用户报"同时用过蓝牙与 2.4G 后出现不会归档的幽灵蓝牙设备"）：`%APPDATA%\razer-taskbar\battery.db` 里 `BLE:CF4FCB85ADF3 | Joro | Ble`（169 行，Nov 4-6，恒 10%/断连）与 `SI2522F18701637 | Razer Joro | Receiver` 并存；日志里 8 次 `hid: identity resolved, folding rooted fallback BLE:CF4FCB85ADF3 -> SI2522F18701637` 之后幽灵仍在。三条同时成立的缺口：
+  ① 启动自愈只认精确同名，`Joro` / `Razer Joro` 永远配不上 → 幽灵撑过每次重启；
+  ② `ResolveIdentity` 的 exact-name 桥只把 store 里的回退条目删掉、**不给 `aliases` 加对**，DB 半边从没执行过——UI 看起来干净，库里的行留着；
+  ③ pid 钉型号的折叠要求"本轮有个串号读数、且回退条目本轮不答题"，而 `keep_recorded_devices` 会把回退行当恢复行种进 store 并**永远不答题**，`_fallbackPid` 为空 → 折叠不可达；`Commit` 同一轮里回退读数自己也在 `seen` 里，也折不了。
+  现规则（见 `docs/agent-history.md`「身份别名自愈」，按证据分两档）：**无 pid 证据**的启动自愈 `AliasPairs` / 实时 `PendingAliases()` 用**规范化名字相等**（trim + 空白折叠 + 大小写不敏感 + 去掉一个前导 `Razer`，`Joro` == `Razer Joro`），**不用子串包含**——`DeathAdder V2` 嵌套在 `DeathAdder V2 Pro` 里但是不同型号，无 pid 时包含匹配会跨型号丢历史，嵌套不相等就干脆不配对（安全失败）；**有 pid 证据**的运行时折叠仍用 `HidWatcher.NamesMatch`（包含匹配，pid 钉死型号）。实时路径**不需要对手本轮答题**（db 已记录的回退行一旦有串号读数出现即折叠），桥折叠、db 配对折叠与 pid 折叠都走 `MergeAlias`（一并并历史、删 `devices` 行）。两个同型号单元仍然安全：两台的串号都解析出来 → 规范化名字匹配到两行 → 歧义 → 不折。
 - `razerwdl` 占用厂商通道期间 BLE 电量走 BAS 回退 + 心跳充电位，实测显示正常（96%，未充电）。
 
 ## get 半区全段扫描（2026-09-07 真机，`--hid-scan`，结果 hid-scan.log）
@@ -401,8 +400,11 @@ byte ~30 之后恒为零；data_size 最大的几条（0x00/0x82 串号 0x16、0
    完全一致，两个数据源共用同一身份。查询失败（设备忙/不支持，如 Joro）才退化为 `HID:{pid:X4}`
    ——**接收器的第二子设备（键盘槽）退化为 `HID:{pid:X4}:K`**，否则两槽共用一条历史序列
    （2026-09-18 的 ±44 尖峰事故，见上）。
-   **不做按名合并**：同名≠同设备（用户更换全新同型号鼠标即反例），历史库出现分裂身份时由
+   **身份推导不做按名合并**：同名≠同设备（用户更换全新同型号鼠标即反例），历史库出现分裂身份时由
    展示层用序列号后缀区分（`DeviceLabels`：历史页/hover/托盘/设置页显示 `名称(序列号尾8位)`）。
+   注意与**历史别名归槽**区分：`AliasPairs`/`Commit` 只把"合成回退句柄（含 `:`）"并进**唯一**的串号行
+   （无 pid 证据时用**规范化名字相等** + 唯一性守卫，绝不用子串包含；两台同型号单元的串号都在库里时自然歧义→不动），从不合并两个真串号行，
+   规则细节见 `docs/agent-history.md`「身份别名自愈」。
 7. 与 Synapse 并存无冲突（只读 feature 交换）；`Razer Control Device`(RZCONTROL) 是 Synapse
    自有驱动通道，与我们无关。
 
@@ -427,6 +429,14 @@ byte ~30 之后恒为零；data_size 最大的几条（0x00/0x82 串号 0x16、0
 - **status=0x05（不支持）日志限频**：空接收器槽/AA 设备对电量查询回 0x05 属预期，按
   (pid, slot) 10 分钟限频，消息带 pid+tx（`QueryCommand` 返回 (value, unsupported)）。
 - `hid poll` 签名行附 `(charging)` 与来源标签 `[Receiver]`/`[Wired]`/`[Ble]`，可从日志直接核验充电位与链路。
+- **一件设备一个身份（2026-11-10 补全）**：回退句柄归档有两条入口，规则按证据分两档（无 pid：规范化名字相等；有 pid：包含匹配 + pid 钉型号），共用唯一串号
+  守卫，见 `docs/agent-history.md`「身份别名自愈」）：`Commit` 的 pid 钉型号孤儿折叠，以及
+  `HistoryService.PendingAliases()` 的"库已记录"配对——后者**不要求对手本轮答题**，
+  `keep_recorded_devices` 种进来的回退行、或上一会话才解析出串号的行都能在正常轮询里归档；
+  `ResolveIdentity` 的 exact-name 桥丢弃 store 条目时同样补 `MergeAlias`（历史与 store 同步消失）。
+  日志三行可核对：`hid: identity resolved, folding rooted fallback`（pid 证据）、
+  `hid: identity resolved from history, folding recorded fallback`（库证据）、
+  `hid: identity resolved, folding fallback`（名字桥），随后 `history: merged alias identity … sample(s)`。
 - **数据源优先级（2026-09-21）**：有线 USB = 2.4G 接收器 > 蓝牙 > Synapse 日志，**按设备独立**
   （Joro 走蓝牙、Viper 走 2.4G 时两者互不影响）。USB 与蓝牙仍在同一轮 `Poll` 内完成，但按设备
   仲裁：同一轮里两条链路都答同一台设备时，优先级严格更低的那条读数直接丢弃（`HidWatcher.Commit`

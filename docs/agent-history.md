@@ -21,6 +21,18 @@
 - **`Record` 跳过 `IsSeeded` 行**：这些是恢复行而非实时观测，写入会为根本没连上的设备伪造离线心跳/`devices` 行。设备一旦被任何实时来源读到，watcher 用完整 `RazerDevice` 覆盖该 handle（`IsSeeded` 自然清零），此后照常记录。
 - 显示回落规则在 `DisplayModeResolver.Pick`（纯逻辑，`DisplayModeTests`）：正常选择为 null 且开关开启时按 `shown_device_handle` → 保留的 `LastShownHandle` → 最低电量（同级按名称、再按 handle）返回已记录设备；开关关闭时完全保持旧行为（含清空 `LastShownHandle`）。
 
+## 身份别名自愈（启动 `MergeAliasedRows` + 实时 `MergeAlias`）
+
+一个物理设备可能先后以两个身份落库：合成回退句柄（`HID:{pid}` / `BLE:{mac}`，串号查询失败时）和真串号。归档规则只有一条、两层共用（`HistoryService.AliasPairs` 与 `HidWatcher.NamesMatch` 是同一个包含匹配）：
+
+- **配对规则（无 pid 证据路径）**：仅回退句柄（含 `:`）作为 src；目标是**唯一**的串号行，判据是**规范化名字相等**（`CanonicalDeviceName`：trim、内部空白折叠为单空格、大小写不敏感、**去掉一个**前导 `Razer` token → `Joro` == `Razer Joro`）。**不用子串包含**：启动时拿不到 pid，`DeathAdder V2` 嵌套在 `DeathAdder V2 Pro` 里但是不同型号，包含匹配会把一台的历史灌进另一台；嵌套但不相等的型号名一律不配对（安全失败＝幽灵行留在库里，不丢数据）。运行时的 pid 钉型号折叠仍用 `HidWatcher.NamesMatch`（包含匹配），那里有 pid 兜底。
+- **歧义守卫**：同名（规范化后）匹配到两行以上串号 → 不动（两个同型号单元都会解析出真串号）。名字为空或规范化后为空（仅 `Razer` 一词）不配对。
+- **启动**（`Init` → `ScrubGlitches()` → `MergeAliasedRows()`，顺序固定）：先按各自身份的形状跑毛刺清洗，再合并。反序会先把回退序列（离线平台行）插进真串号序列中间，`CommittedGlitchTs` 随后把这段诚实的合并历史当成一次毛刺整段删除（2026-11-10 实测：169 行全部被清掉）。
+- **DB 半边**：`INSERT OR IGNORE` 把样本改挂到串号 handle → 删 src 样本 → 删 src `devices` 行；`(handle, ts)` 主键撞车的是同一台设备同一秒的两条读数，串号那条（canonical）胜出——这是去重不是丢数据，`MergeAlias(conn,…)` 返回 `(Moved, Tied)` 并由 `MergeAlias(src,dst)` 打一行 INFO：`history: merged alias identity <src> -> <dst>: N sample(s) re-pointed, M timestamp tie(s) kept under <dst>`。`_names`/`_series`/`_sources`/`_estimates` 同步剔除 src，`SavedTransport` 不会为已消失的行作答。
+- **实时**：`HidWatcher.Commit` 每轮用 `HistoryService.PendingAliases()`（同一规则作用于当前 roster）得到"回退→串号"对，两种情形都能折叠、**不要求对方本轮也答题**：①某轮解析出真串号且回退条目是孤儿（pid 钉型号那条规则照旧，另外回退条目只要被历史配对到就折）；②回退读数自己带着真名命中 store 里的串号条目（`ResolveIdentity` 的 exact-name 桥）——这条路径原先只删 store 条目、不并历史，正是幽灵行能在库里长存的原因。折叠后本轮即调用 `MergeAlias`，所以下一轮 `Record` 不会再为这个 handle 落新行。
+- **与 `keep_recorded_devices` 的关系**：`HistoryService.Init` 在 `AppState.LoadInitialConfig` 之前跑（`AppHost.Run` 顺序），所以种子集取的是**已合并**的 roster——幽灵行不可能作为恢复行进托盘/悬停；若某行在运行中才落库，实时折叠同样会先把它从 store 移除再合并。
+- 测试锚点：`HistoryAliasTests`（配对规则/歧义守卫/`(Moved,Tied)`/启动端到端）、`AliasHistoryLiveTests`（无对手轮的实时折叠、桥折叠并历史、`ResolveIdentity` 的 recorded-twin 分支）。
+
 ## 并发模型（2026-09-11 定稿）
 
 - 单一 `SqliteConnection` 被多线程共用（watcher 写、UI 读），而 Microsoft.Data.Sqlite 每连接只允许一条打开的命令：**所有 SQL 必须在 `DbLock` 内执行**（`Record` 写入、`SamplesInRange` 读取、`MergeAlias`/Scrub 的 DB 半边）。锁序恒为 `Sync → DbLock`（`Sync` 护内存结构，`DbLock` 护连接），任何路径不得反序或嵌套反转。

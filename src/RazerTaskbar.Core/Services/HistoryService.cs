@@ -197,17 +197,25 @@ public static class HistoryService
         {
             _db = conn;
         }
-        MergeAliasedRows();
+        // Order matters: the glitch scrub judges each identity's series on the
+        // shape it was recorded with. Run it BEFORE the identity fold — a
+        // fallback series merged in first interleaves two level tracks (the
+        // ghost's frozen off-plateau next to the live one) and the scrub then
+        // reads the honest merged history as one glitch, deleting it.
         ScrubGlitches();
+        MergeAliasedRows();
     }
 
     /// <summary>Startup heal for identity pollution: one physical device can
     /// take root under a synthesized fallback handle (HID:{pid} / BLE:{mac})
     /// when the vendor serial query went unanswered at startup, and both it
     /// and the later real-serial row end up in battery.db — two history
-    /// series for one device. Every fallback-keyed row whose (unique)
-    /// same-name serial row exists is folded into it: samples re-pointed,
-    /// alias row dropped, in-memory series merged.</summary>
+    /// series for one device. Every fallback-keyed row whose UNIQUE serial row
+    /// carries the same canonical name (see <see cref="AliasPairs"/>: the
+    /// vendor channel answers the bare name "Joro" where Synapse logs the
+    /// canonical "Razer Joro") is folded into it: samples re-pointed, alias row
+    /// dropped, in-memory series merged. One INFO line per merge is logged by
+    /// <see cref="MergeAlias(string, string)"/>.</summary>
     private static void MergeAliasedRows()
     {
         List<(string Src, string Dst)> aliases;
@@ -217,35 +225,52 @@ public static class HistoryService
         }
         foreach (var (src, dst) in aliases)
         {
-            Log.Info($"history: merged aliased HID device rows: {src} -> {dst}");
             MergeAlias(src, dst);
         }
     }
 
     /// <summary>Pure pairing rule for <see cref="MergeAliasedRows"/>: for each
-    /// fallback handle (contains ':') the same-name serial handle — but only
-    /// when it is unambiguous (two same-name serial rows could be two units
-    /// of one model; the alias then stays).</summary>
+    /// fallback handle (contains ':') the serial handle recorded for the same
+    /// device — but only when it is unambiguous. This path has NO pid evidence
+    /// (the runtime fold's pid pin is not available from battery.db), so the
+    /// naming rule is the narrow one: <see cref="CanonicalDeviceName"/> equality
+    /// — trim, whitespace collapse, case-insensitive, one leading "Razer"
+    /// dropped. That covers the measured gap (the vendor BLE channel answers
+    /// "Joro", Synapse logs "Razer Joro") and nothing wider: substring
+    /// containment would fold "Razer DeathAdder V2" into "Razer DeathAdder V2
+    /// Pro", i.e. pour one unit's history into another, so a nested-but-not-
+    /// equal model pair stays unpaired (safe failure: the ghost row just
+    /// remains). The uniqueness guard still applies: two units of one model
+    /// both resolve real serials with the same canonical name, so the fallback
+    /// then matches two serial rows and is left alone.</summary>
     internal static List<(string Src, string Dst)> AliasPairs(IReadOnlyDictionary<string, string> names)
     {
-        var aliases = new List<(string, string)>();
-        foreach (var (src, srcName) in names)
+        // Canonicalised once per candidate: the rule compares them pairwise
+        // and this runs per HID commit.
+        var canonical = new Dictionary<string, string>(names.Count, StringComparer.Ordinal);
+        foreach (var (handle, name) in names)
         {
-            if (src.IndexOf(':') < 0)
+            canonical[handle] = CanonicalDeviceName(name);
+        }
+        var aliases = new List<(string, string)>();
+        foreach (var (src, _) in names)
+        {
+            if (src.IndexOf(':') < 0 || canonical[src].Length == 0)
             {
                 continue;
             }
             string? dst = null;
-            foreach (var (key, name) in names)
+            foreach (var (key, _) in names)
             {
                 if (key.Contains(':')
-                    || !string.Equals(name, srcName, StringComparison.OrdinalIgnoreCase))
+                    || canonical[key].Length == 0
+                    || !string.Equals(canonical[key], canonical[src], StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
                 if (dst is not null)
                 {
-                    dst = null; // two same-name serial rows: could be two units — leave alone
+                    dst = null; // two canonically-equal serial rows: could be two units — leave alone
                     break;
                 }
                 dst = key;
@@ -258,11 +283,50 @@ public static class HistoryService
         return aliases;
     }
 
+    /// <summary>Canonical device name for the no-pid identity pairing: trim,
+    /// collapse internal whitespace to single spaces, and drop ONE leading
+    /// "Razer" token (so the vendor channel's bare "Joro" equals Synapse's
+    /// canonical "Razer Joro"). Case is left to the caller's
+    /// <see cref="StringComparison.OrdinalIgnoreCase"/> compare. Deliberately
+    /// NOT containment — see <see cref="AliasPairs"/>. An empty result (blank
+    /// name, or a name that is only the vendor word) never pairs.
+    /// </summary>
+    internal static string CanonicalDeviceName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "";
+        }
+        var tokens = name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        int start = tokens.Length > 1 && tokens[0].Equals(RazerBrandToken, StringComparison.OrdinalIgnoreCase)
+            ? 1
+            : 0;
+        return string.Join(' ', tokens, start, tokens.Length - start);
+    }
+
+    private const string RazerBrandToken = "Razer";
+
+    /// <summary>The live path's view of the startup heal: the fallback→serial
+    /// pairs today's battery.db roster can fold, under the same rule. Recomputed
+    /// per call on purpose — the roster holds tens of rows and the caller asks
+    /// once per HID commit, so a device recorded under a fallback identity in an
+    /// earlier session is archived the moment either identity answers, even
+    /// when the counterpart does not answer in that round.</summary>
+    internal static List<(string Src, string Dst)> PendingAliases()
+    {
+        lock (Sync)
+        {
+            return AliasPairs(_names);
+        }
+    }
+
     /// <summary>Fold a fallback identity's history into its resolved serial
     /// identity (one physical device, two handles over time). Merges the
     /// in-memory series and — while the DB is open — moves the samples and
     /// drops the alias row. On a timestamp tie the dst sample (recorded under
-    /// the canonical identity) wins.</summary>
+    /// the canonical identity) wins. Logs exactly one INFO line with the
+    /// outcome: the merge is the point where a ghost identity disappears, so
+    /// the app log must show it happened and how much moved.</summary>
     internal static void MergeAlias(string src, string dst)
     {
         lock (Sync)
@@ -276,6 +340,9 @@ public static class HistoryService
                 _series[dst] = merged;
             }
             _names.Remove(src);
+            // The alias handle is gone from the roster: its persisted transport
+            // must not answer SavedTransport for a row that no longer exists.
+            _sources.Remove(src);
             _estimates.Remove(src);
         }
         SqliteConnection? conn;
@@ -285,37 +352,62 @@ public static class HistoryService
         }
         if (conn is null)
         {
+            Log.Info($"history: merged alias identity in memory only (db closed): {src} -> {dst}");
             return;
         }
+        (long Moved, long Tied) counts;
         lock (DbLock)
         {
             // One connection serves every thread; commands must serialize on it.
-            MergeAlias(conn, src, dst);
+            counts = MergeAlias(conn, src, dst);
         }
         lock (Sync)
         {
             // The merged series changed shape: its cached prediction is stale.
             RecomputeEstimateLocked(dst);
         }
+        Log.Info(
+            $"history: merged alias identity {src} -> {dst}: " +
+            $"{counts.Moved} sample(s) re-pointed, {counts.Tied} timestamp tie(s) kept under {dst}");
     }
 
     /// <summary>DB half of <see cref="MergeAlias"/> on an explicit connection
-    /// (testable against a scratch database).</summary>
-    internal static void MergeAlias(SqliteConnection conn, string src, string dst)
+    /// (testable against a scratch database). Returns how many of the alias's
+    /// samples landed under the serial handle and how many were dropped as
+    /// timestamp ties (the canonical row already held that second — the same
+    /// device reported twice, so one reading is not data loss).</summary>
+    internal static (long Moved, long Tied) MergeAlias(SqliteConnection conn, string src, string dst)
     {
         try
         {
+            // Counted before/after rather than assumed: a sample whose second
+            // already exists under dst is ignored by the primary key, and the
+            // result line has to report that honestly.
+            long srcCount = ScalarLong(conn, "SELECT COUNT(*) FROM samples WHERE handle = $h", src);
+            long dstBefore = ScalarLong(conn, "SELECT COUNT(*) FROM samples WHERE handle = $h", dst);
             Exec(conn,
                 "INSERT OR IGNORE INTO samples(handle, ts, level, charging, connected) " +
                 "SELECT $dst, ts, level, charging, connected FROM samples WHERE handle = $src",
                 ("$src", src), ("$dst", dst));
+            long moved = ScalarLong(conn, "SELECT COUNT(*) FROM samples WHERE handle = $h", dst) - dstBefore;
             Exec(conn, "DELETE FROM samples WHERE handle = $src", ("$src", src));
             Exec(conn, "DELETE FROM devices WHERE handle = $src", ("$src", src));
+            return (moved, Math.Max(srcCount - moved, 0));
         }
         catch (Exception e)
         {
             Log.Error($"history: alias merge failed ({src} -> {dst})", e);
+            return (0, 0);
         }
+    }
+
+    /// <summary>COUNT(*) for one handle — the merge's before/after bookkeeping.</summary>
+    private static long ScalarLong(SqliteConnection conn, string sql, string handle)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue("$h", handle);
+        return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
     }
 
     /// <summary>Startup heal for committed glitch segments: rows recorded

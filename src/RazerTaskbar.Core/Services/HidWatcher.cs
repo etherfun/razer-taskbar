@@ -304,12 +304,20 @@ public sealed class HidWatcher
     /// the effective handle plus the stale one (null = the fallback stands
     /// alone, e.g. Synapse not running). Two units of one model where BOTH
     /// fail serial resolution would merge into one row — accepted: serial
-    /// resolution is the norm; the fallback is the exception.</summary>
+    /// resolution is the norm; the fallback is the exception.
+    /// <paramref name="recordedTwins"/> is the startup heal's pairing rule
+    /// (fallback handle → its unique serial twin in battery.db, see
+    /// <see cref="HistoryService.PendingAliases"/>): it catches the naming gap
+    /// the exact-name scan below cannot — the device was recorded as "Joro"
+    /// and answers as "Razer Joro" — so a fallback reading folds into its
+    /// recorded serial twin without waiting for a round in which the fallback
+    /// stops answering entirely.</summary>
     public static (string Handle, string? Stale) ResolveIdentity(
         IReadOnlyDictionary<string, RazerDevice> map,
         string handle,
         HidDeviceReading reading,
-        IReadOnlySet<string> seen)
+        IReadOnlySet<string> seen,
+        IReadOnlyDictionary<string, string>? recordedTwins = null)
     {
         // Real serial (vendor answer or BLE identity bridge): the log source
         // carries the same value, the dictionary dedupes by itself.
@@ -334,6 +342,17 @@ public sealed class HidWatcher
             }
             twin = key;
             break;
+        }
+        if (twin is null
+            && recordedTwins is not null
+            && recordedTwins.TryGetValue(handle, out var recorded)
+            && recorded != handle
+            && !seen.Contains(recorded)
+            && map.ContainsKey(recorded))
+        {
+            // History knows these two handles are one device; the live entry
+            // just arrives under the other name.
+            twin = recorded;
         }
         return twin is null ? (handle, null) : (twin, handle);
     }
@@ -383,6 +402,25 @@ public sealed class HidWatcher
         // Alias merges touch SQLite; collect them and run after Mutate so
         // the DeviceStore lock never spans DB IO (Snapshot blocks on it).
         var aliases = new List<(string Src, string Dst)>();
+        // The startup heal's pairing rule over the persisted roster (fallback
+        // handle -> unique serial twin). A device recorded under a fallback
+        // identity is archived as soon as EITHER identity answers: the
+        // counterpart not answering this round is the normal case, not a
+        // reason to leave two history series behind.
+        var recordedByFallback = new Dictionary<string, string>(StringComparer.Ordinal);
+        var recordedBySerial = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var (src, dst) in HistoryService.PendingAliases())
+        {
+            recordedByFallback.TryAdd(src, dst);
+            if (recordedBySerial.TryGetValue(dst, out var list))
+            {
+                list.Add(src);
+            }
+            else
+            {
+                recordedBySerial[dst] = new List<string> { src };
+            }
+        }
         // Which link each handle was written from in THIS round, so a device
         // answering on two links at once keeps the better one (USB HID
         // outranks Bluetooth LE — see BatteryTransports). Round scoped on
@@ -394,7 +432,8 @@ public sealed class HidWatcher
             var seen = new HashSet<string>();
             foreach (var reading in readings)
             {
-                var (handle, stale) = ResolveIdentity(map, HandleFor(reading), reading, seen);
+                var (handle, stale) = ResolveIdentity(
+                    map, HandleFor(reading), reading, seen, recordedByFallback);
                 var merged = ToRazerDevice(reading, handle, shown);
                 seen.Add(handle);
                 // A strictly worse link never displaces the better one that
@@ -436,6 +475,14 @@ public sealed class HidWatcher
                 if (stale is { } dead && dead != handle)
                 {
                     map.Remove(dead);
+                    _misses.Remove(dead);
+                    _lastSeenMs.Remove(dead);
+                    // The store healed, the history must follow: dropping the
+                    // entry alone left its battery.db row + samples behind, so
+                    // the ghost came back on every restart (and, with
+                    // keep_recorded_devices, straight into the roster).
+                    Log.Info($"hid: identity resolved, folding fallback {dead} -> {handle}");
+                    aliases.Add((dead, handle));
                 }
                 // A serial that resolved after earlier fallback rounds retires
                 // the fallback entry rooted while the radio was still waking
@@ -472,6 +519,11 @@ public sealed class HidWatcher
             // the bare-vs-canonical naming gap safely. (Two same-model units
             // can't hit this: an ambiguous heartbeat match resolves neither,
             // and pid-shaped fallbacks of a resolved pid never root.)
+            // A fallback the DB already pairs with this round's serial handle
+            // folds on that recorded evidence too — that is the ghost whose
+            // identity resolved in an earlier session and whose row (now
+            // seeded back as a recovery row) would otherwise answer no reading
+            // at all, leaving the pid pin empty and the fold unreachable.
             foreach (var reading in readings)
             {
                 var handle = HandleFor(reading);
@@ -479,14 +531,19 @@ public sealed class HidWatcher
                 {
                     continue; // still unresolved this round — nothing to fold into
                 }
-                foreach (var (src, device) in map)
+                recordedBySerial.TryGetValue(handle, out var recorded);
+                // Snapshot: the fold removes entries from the store it scans.
+                foreach (var (src, device) in map.ToList())
                 {
-                    if (src.IndexOf(':') < 0
-                        || seen.Contains(src)
-                        || !_fallbackPid.TryGetValue(src, out var pid)
-                        || pid != reading.ProductId
-                        || !SameFallbackSlot(src, reading)
-                        || !NamesMatch(device.Name, reading.NameOverride ?? reading.ProductName))
+                    if (src.IndexOf(':') < 0 || seen.Contains(src))
+                    {
+                        continue;
+                    }
+                    var pidPinned = _fallbackPid.TryGetValue(src, out var pid)
+                        && pid == reading.ProductId
+                        && SameFallbackSlot(src, reading)
+                        && NamesMatch(device.Name, reading.NameOverride ?? reading.ProductName);
+                    if (!pidPinned && (recorded is null || !recorded.Contains(src)))
                     {
                         continue;
                     }
@@ -496,7 +553,9 @@ public sealed class HidWatcher
                     _misses.Remove(src);
                     _lastSeenMs.Remove(src);
                     _fallbackPid.Remove(src);
-                    Log.Info($"hid: identity resolved, folding rooted fallback {src} -> {handle}");
+                    Log.Info(pidPinned
+                        ? $"hid: identity resolved, folding rooted fallback {src} -> {handle}"
+                        : $"hid: identity resolved from history, folding recorded fallback {src} -> {handle}");
                     aliases.Add((src, handle));
                 }
             }
