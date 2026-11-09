@@ -102,6 +102,7 @@ public static class Win32Consts
     public const uint GGO_METRICS = 0;
 
     // DrawText flags
+    public const uint DT_TOP = 0;
     public const uint DT_LEFT = 0;
     public const uint DT_CENTER = 1;
     public const uint DT_RIGHT = 2;

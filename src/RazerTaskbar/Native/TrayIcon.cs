@@ -23,10 +23,14 @@ public static class TrayIcon
     public const uint TrayUid = 1;
     public const uint WmTray = WM_APP + 1;
 
-    /// <summary>Digit face of the numeric style. Segoe UI ships with Windows
-    /// 10/11 and has real semibold digits; CreateFontW silently substitutes a
-    /// missing face, which at tray sizes stays legible either way.</summary>
-    private const string NumberFontFace = "Segoe UI";
+    /// <summary>Digit face of the numeric style. Segoe UI's digits are too wide
+    /// for a 16px tile (two digits cap out at ~0.55 of the icon height before
+    /// the advance width runs out), so the percentage uses Bahnschrift's
+    /// semi-condensed instance — a Windows 10 1709+ system font with DIN-like
+    /// lining figures that are ~15% narrower, which buys enough height to read
+    /// the number at a glance. A missing face substitutes silently (GDI), and
+    /// the measurement below adapts to whatever actually renders.</summary>
+    private const string NumberFontFace = "Bahnschrift SemiCondensed";
 
     private static IntPtr _hwnd;
 
@@ -391,7 +395,10 @@ public static class TrayIcon
     /// tints it with the state color, so antialiased edges become real alpha
     /// instead of a dark color fringe. The face/height auto-fits the box:
     /// measured with DT_CALCRECT, then shrunk one pixel at a time until "100"
-    /// fits both dimensions — never truncated.</summary>
+    /// fits both dimensions — never truncated. Fitting uses the digit INK
+    /// height (cap height), not the font line box: digits occupy ~0.7em, so
+    /// fitting tmHeight threw away a third of the icon (2026-11-10: the tray
+    /// digits read too small). The ink box is also what gets centered.</summary>
     private static void DrawDigits(IntPtr mem, TrayIconState? state, int src)
     {
         var chars = TrayDisplay.DisplayText(state?.Level).ToCharArray();
@@ -414,12 +421,17 @@ public static class TrayIcon
         // One measurement at 2/3 of the box is enough to estimate the fitted
         // height (text metrics are near-linear in the font height), keeping
         // the shrink loop to a couple of iterations instead of maxH.
-        int startH = maxH;
-        if (Measure(chars, mem, src, maxH, Math.Max(4, maxH * 2 / 3)) is { Width: > 0, Height: > 0 } probe)
+        // The start height is deliberately allowed ABOVE the pixel box: a GDI
+        // font height is the line-cell height (~1.3em), while the digits only
+        // fill the cap height (~0.7em), so a font that fits the box vertically
+        // still wastes a third of the tile. The fit checks in the loop (advance
+        // width and ink height) are what actually decide.
+        int startH = maxH * 2;
+        if (Measure(chars, mem, src, maxH, Math.Max(4, maxH * 2 / 3)) is { Width: > 0, InkHeight: > 0 } probe)
         {
             int byWidth = probe.FontHeight * maxW / probe.Width;
-            int byHeight = probe.FontHeight * maxH / probe.Height;
-            startH = Math.Clamp(Math.Min(byWidth, byHeight), 4, maxH);
+            int byHeight = probe.FontHeight * maxH / probe.InkHeight;
+            startH = Math.Clamp(Math.Min(byWidth, byHeight), 4, maxH * 3);
         }
         for (int fontH = startH; fontH >= 4; fontH--)
         {
@@ -427,23 +439,29 @@ public static class TrayIcon
             {
                 return; // font creation failed: leave the icon empty
             }
-            if (m.Width > maxW || m.Height > maxH)
+            if (m.Width > maxW || m.InkHeight > maxH)
             {
                 continue;
             }
-            DrawCentered(chars, mem, src, fontH, m.Height);
+            DrawInkCentered(chars, mem, src, fontH, m);
             return;
         }
         // Even 4px did not measure inside the box (only possible for sizes far
         // below SM_CXSMICON): draw the smallest attempt rather than nothing.
-        DrawCentered(chars, mem, src, 4, maxH);
+        if (Measure(chars, mem, src, maxH, 4) is { } smallest)
+        {
+            DrawInkCentered(chars, mem, src, 4, smallest);
+        }
     }
 
-    private readonly record struct TextMetrics(int FontHeight, int Width, int Height);
+    /// <summary>`FontHeight` is the requested GDI height; `Width` the
+    /// DT_CALCRECT advance; `InkHeight` the digit ink height (cap height,
+    /// tmAscent minus internal leading — digits are lining figures) and
+    /// `Ascent` the baseline distance used to center that ink.</summary>
+    private readonly record struct TextMetrics(int FontHeight, int Width, int InkHeight, int Ascent);
 
-    /// <summary>Measure `chars` at `fontHeight`: DT_CALCRECT for the width and
-    /// text metrics for the line height (DT_CALCRECT's single-line height is
-    /// not reliable enough for the centering rect). Null when GDI cannot
+    /// <summary>Measure `chars` at `fontHeight`: DT_CALCRECT for the advance
+    /// width and text metrics for the digit ink height. Null when GDI cannot
     /// create the font.</summary>
     private static TextMetrics? Measure(char[] chars, IntPtr mem, int src, int maxH, int fontHeight)
     {
@@ -457,13 +475,23 @@ public static class TrayIcon
         var old = SelectObject(mem, font);
         var rc = new RECT { Left = 0, Top = 0, Right = src * 4, Bottom = maxH };
         DrawTextW(mem, chars, chars.Length, ref rc, DT_CALCRECT | DT_SINGLELINE);
-        int height = GetTextMetricsW(mem, out var tm) ? tm.tmHeight : maxH;
+        int ink = maxH;
+        int ascent = maxH;
+        if (GetTextMetricsW(mem, out var tm))
+        {
+            // Digits are cap-height glyphs; the leading above the cap is
+            // empty space for them, so only the cap can be centered.
+            ink = Math.Max(1, tm.tmAscent - tm.tmInternalLeading);
+            ascent = tm.tmAscent;
+        }
         SelectObject(mem, old);
         DeleteObject(font);
-        return new TextMetrics(fontHeight, rc.Right, height);
+        return new TextMetrics(fontHeight, rc.Right, ink, ascent);
     }
 
-    private static void DrawCentered(char[] chars, IntPtr mem, int src, int fontHeight, int textHeight)
+    /// <summary>Draw at `fontHeight` so the digit ink box — not the font line
+    /// box — is centered in the tile.</summary>
+    private static void DrawInkCentered(char[] chars, IntPtr mem, int src, int fontHeight, TextMetrics m)
     {
         var font = CreateFontW(fontHeight, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
@@ -473,9 +501,18 @@ public static class TrayIcon
             return;
         }
         var old = SelectObject(mem, font);
-        int top = (src - textHeight) / 2;
-        var rc = new RECT { Left = 0, Top = top, Right = src, Bottom = top + textHeight };
-        DrawTextW(mem, chars, chars.Length, ref rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
+        // DT_TOP puts the line-box top at rc.Top; the digit ink starts
+        // (ascent - ink) below it. Solve that for a centered ink box.
+        int top = (src - m.InkHeight) / 2 - (m.Ascent - m.InkHeight);
+        int left = (src - m.Width) / 2;
+        var rc = new RECT
+        {
+            Left = left,
+            Top = top,
+            Right = left + Math.Max(m.Width, 1),
+            Bottom = top + Math.Max(m.InkHeight * 2, 8),
+        };
+        DrawTextW(mem, chars, chars.Length, ref rc, DT_LEFT | DT_SINGLELINE | DT_TOP | DT_NOCLIP);
         SelectObject(mem, old);
         DeleteObject(font);
     }
