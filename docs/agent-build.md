@@ -47,7 +47,7 @@ dotnet test tests/RazerTaskbar.Tests/RazerTaskbar.Tests.csproj   # 勿加 --quie
 | `razer-taskbar.exe --hid-tx` | transaction_id 0x00-0xFF 全空间只读路由扫描（~3 分钟）→ `hid-tx.log`；实测 tx 位 7 选子设备槽（见 agent-hid.md 2026-09-22 节） |
 | `razer-taskbar.exe --hid-deep` | 可读寄存器 91 字节全载荷 dump + class 0x0F args0 扫描（~10 分钟）→ `hid-deep.log`；查"载荷深部还藏了什么"用 |
 | `razer-taskbar.exe --ble-vendor` | Razer BLE 厂商 GATT 通道重放（观测查询基线） |
-| `razer-taskbar.exe --tray-preview` | 托盘图标样式预览：`tray_display_mode` 的 icon/number 两模式 × 目标尺寸 16/32/64px（≈100/200/400% DPI）× 电量 {7,29,55,74,100}、充电、无设备、省电，深/浅底各一行、4x 最近邻放大 → `%APPDATA%\razer-taskbar\tray-preview\tray-preview-<mode>-<size>px.png` + `tray-preview.txt`（列序说明 + HICON 构建自检）。PNG 由探针内置的极简编码器输出（ZLibStream，无 System.Drawing 依赖）。目检数字可读性/AA 边缘/状态色用 |
+| `razer-taskbar.exe --tray-preview` | 托盘图标样式预览：`tray_display_mode` 的 icon/number 两模式 × 目标尺寸 16/32/64px（≈100/200/400% DPI）× 电量 {7,29,55,74,100}、充电、无设备、省电、离线兜底（`keep_recorded_devices`），深/浅底各一行、4x 最近邻放大 → `%APPDATA%\razer-taskbar\tray-preview\tray-preview-<mode>-<size>px.png` + `tray-preview.txt`（列序说明 + HICON 构建自检）。PNG 由探针内置的极简编码器输出（ZLibStream，无 System.Drawing 依赖）。目检数字可读性/AA 边缘/状态色用 |
 | `… --ble-vendor --sweep` | 厂商通道 page 01/05 × id 0x80-0xFF 只读枚举 |
 | `… --ble-vendor --pages` | 全 page 发现（(page)/80/0000，256 页）+ 活页 get 半区扫描（~10 分钟）→ 完整 page/id 地图（2026-09-22：6 个活页，见 agent-hid.md） |
 | `… --ble-vendor --raw=LEN:PAGE:ID:PARAM[:hex]` | 单发命令（LEN≠0=写，需 `--yes-i-know`；set 半区 id 拒绝） |

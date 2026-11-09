@@ -153,7 +153,11 @@ public static class HoverPanel
         I18n.Tr("No Razer devices found"), "--", "", 0, false, false, false, false, DeviceKind.Other);
 
     /// <summary>Immutable snapshot of the device list: connected first (then by
-    /// name). The device the widget currently shows gets the highlight.</summary>
+    /// name). Offline rows come from the watcher and, with
+    /// `keep_recorded_devices`, from the battery.db startup seed — the panel
+    /// only reports an empty roster when nothing was ever recorded. The device
+    /// the widget currently shows gets the highlight (an offline fallback row
+    /// included, so the panel agrees with the tray).</summary>
     private static List<Row> SnapshotRows()
     {
         var devices = AppState.Instance.Devices.Snapshot();
@@ -169,12 +173,16 @@ public static class HoverPanel
         var rows = devices.Values.Select(d => new Row(
             DeviceLabels.Label(d.Name, d.Handle, deviceNames),
             $"{d.BatteryPercentage}%",
-            HistoryService.EstimateFor(d.Handle) is { } e ? HistoryService.FormatEstimateCompact(e) : "",
+            // A prediction needs a live discharge anchor: offline rows never
+            // show one (a seeded row has no in-memory series at all).
+            d.IsConnected && HistoryService.EstimateFor(d.Handle) is { } e
+                ? HistoryService.FormatEstimateCompact(e)
+                : "",
             d.BatteryPercentage,
-            d.IsCharging,
+            d.IsCharging && d.IsConnected,
             d.BatterySaver,
             d.IsConnected,
-            d.IsConnected && d.Handle == shown,
+            d.Handle == shown,
             d.Kind)).ToList();
         rows.Sort((a, b) =>
         {

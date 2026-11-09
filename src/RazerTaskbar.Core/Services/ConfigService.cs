@@ -92,6 +92,15 @@ public sealed class Config
     [JsonPropertyName("hover_devices")]
     public bool HoverDevices { get; set; } = true;
 
+    /// <summary>Keep devices that were ever recorded (battery.db `devices`
+    /// table) visible after they go offline / across restarts instead of
+    /// falling back to "No devices found": the store is seeded from history at
+    /// startup, and the display picker falls back to a recorded device when
+    /// nothing is live. Default on; old settings.json without the key keeps
+    /// loading with this behaviour.</summary>
+    [JsonPropertyName("keep_recorded_devices")]
+    public bool KeepRecordedDevices { get; set; } = true;
+
     /// <summary>Record battery samples to battery.db and predict usage time.</summary>
     [JsonPropertyName("record_battery_history")]
     public bool RecordBatteryHistory { get; set; } = true;

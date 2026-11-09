@@ -231,6 +231,19 @@
                         <ToggleSwitch x:Name="SwitchHover" Grid.Column="1" VerticalAlignment="Center"
                                       Toggled="SwitchHover_Toggled" />
                     </Grid>
+                    <!-- Keep recorded devices when nothing is online -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblKeepRecorded" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescKeepRecorded" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="SwitchKeepRecorded" Grid.Column="1" VerticalAlignment="Center"
+                                      Toggled="SwitchKeepRecorded_Toggled" />
+                    </Grid>
                 </StackPanel>
             </Border>
 

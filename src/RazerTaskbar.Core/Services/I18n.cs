@@ -78,6 +78,7 @@ public static class I18n
         ["Exit"] = "退出",
         // Tooltip (TrayIcon)
         ["(charging)"] = "（充电中）",
+        ["offline"] = "离线",
         ["No devices found"] = "未找到设备",
         // Hover panel
         ["No Razer devices found"] = "未找到 Razer 设备",
@@ -143,6 +144,8 @@ public static class I18n
         ["Tray icon style"] = "托盘图标样式",
         ["Show the battery percentage as a number instead of the battery glyph."] = "托盘图标显示电量数字，替代电池图标。",
         ["Hover the widget to list every known device."] = "悬停挂件列出所有已知设备。",
+        ["Keep recorded devices"] = "保留已记录设备",
+        ["Keep showing devices already recorded in the battery history after they go offline, instead of reporting that no devices were found."] = "设备离线后仍显示电量历史中已记录的设备，而不是提示未找到设备。",
         ["Display refresh cadence (seconds) when there is no log activity."] = "无日志活动时的显示刷新间隔(秒)。",
         ["Sample battery.db and predict usage time."] = "采样 battery.db 并预测可用时长。",
         ["Sampling cadence while recording is enabled (seconds)."] = "记录启用时的采样间隔(秒)。",

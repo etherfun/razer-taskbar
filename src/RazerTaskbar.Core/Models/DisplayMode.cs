@@ -59,7 +59,13 @@ public static class DisplayModeResolver
 
     /// <summary>Resolve the device to show under the configured mode. `nowMs`
     /// is Environment.TickCount64. Advancing is guarded by timestamps, so
-    /// multiple calls within one interval are side-effect-free replays.</summary>
+    /// multiple calls within one interval are side-effect-free replays.
+    ///
+    /// With `keep_recorded_devices` on, a null pick (no live device selected,
+    /// none connected, or the store still empty before the first poll) falls
+    /// back to a recorded device instead of the empty state — see
+    /// <see cref="PickRecordedFallback"/>. Off returns exactly the old
+    /// behaviour, including clearing the last-shown handle.</summary>
     public static RazerDevice? Pick(
         IReadOnlyDictionary<string, RazerDevice> devices,
         Config cfg,
@@ -72,8 +78,63 @@ public static class DisplayModeResolver
             DisplayMode.Rotate => PickRotate(devices, cfg.RotateIntervalSecs, st, nowMs),
             _ => DeviceSelector.PickDeviceToDisplay(devices),
         };
-        st.LastShownHandle = device?.Handle ?? "";
+        device ??= cfg.KeepRecordedDevices
+            ? PickRecordedFallback(devices, cfg.ShownDeviceHandle, st.LastShownHandle)
+            : null;
+        if (device is not null)
+        {
+            st.LastShownHandle = device.Handle;
+        }
+        else if (!cfg.KeepRecordedDevices)
+        {
+            // Preserve the last-shown handle across a null pick only while the
+            // recorded fallback may need it (it is the second preference).
+            st.LastShownHandle = "";
+        }
         return device;
+    }
+
+    /// <summary>Fallback for `keep_recorded_devices`: the device to keep on
+    /// screen when nothing is live/pickable. Deterministic preference order:
+    /// the configured shown handle, then the handle the widget last displayed,
+    /// then the lowest level — with ordinal name and then handle breaking ties.
+    /// A live pick always wins because this only runs on a null pick; an empty
+    /// store still yields null (the flag cannot invent a device). Internal for
+    /// tests.</summary>
+    internal static RazerDevice? PickRecordedFallback(
+        IReadOnlyDictionary<string, RazerDevice> devices,
+        string shownHandle,
+        string lastShownHandle)
+    {
+        if (devices.Count == 0)
+        {
+            return null;
+        }
+        if (shownHandle.Length > 0 && devices.TryGetValue(shownHandle, out var shown))
+        {
+            return shown;
+        }
+        if (lastShownHandle.Length > 0 && devices.TryGetValue(lastShownHandle, out var last))
+        {
+            return last;
+        }
+        RazerDevice? best = null;
+        foreach (var d in devices.Values)
+        {
+            if (best is null
+                || d.BatteryPercentage < best.BatteryPercentage
+                || (d.BatteryPercentage == best.BatteryPercentage && Precedes(d, best)))
+            {
+                best = d;
+            }
+        }
+        return best;
+
+        static bool Precedes(RazerDevice a, RazerDevice b)
+        {
+            int byName = string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            return byName != 0 ? byName < 0 : string.CompareOrdinal(a.Handle, b.Handle) < 0;
+        }
     }
 
     /// <summary>Shown device, except while some device just lost battery

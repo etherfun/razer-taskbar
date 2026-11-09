@@ -34,6 +34,9 @@ public sealed class ConfigTests
             Assert.True(cfg.ShowEstimatedTime);
             Assert.False(cfg.ColorBatteryIcon);
             Assert.Equal("icon", cfg.TrayDisplayMode);
+            // Requested out-of-the-box behaviour: old settings.json without the
+            // key keeps recorded devices visible.
+            Assert.True(cfg.KeepRecordedDevices);
         }
         finally
         {
@@ -60,6 +63,7 @@ public sealed class ConfigTests
                 HistoryPollIntervalSecs = 7,
                 Language = "zh",
                 TrayDisplayMode = "number",
+                KeepRecordedDevices = false,
             };
             ConfigService.Save(cfg);
             Assert.True(File.Exists(ConfigService.ConfigPath));
@@ -77,6 +81,7 @@ public sealed class ConfigTests
             Assert.Equal(7ul, loaded.HistoryPollIntervalSecs);
             Assert.Equal("zh", loaded.Language);
             Assert.Equal("number", loaded.TrayDisplayMode);
+            Assert.False(loaded.KeepRecordedDevices);
         }
         finally
         {

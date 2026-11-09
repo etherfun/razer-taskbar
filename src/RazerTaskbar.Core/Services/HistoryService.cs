@@ -59,6 +59,12 @@ using Microsoft.Data.Sqlite;
 
 namespace RazerTaskbar.Core;
 
+/// <summary>One device row persisted in battery.db plus its latest sample —
+/// the input of the `keep_recorded_devices` startup seed. `Latest` is null for
+/// a row without any sample yet (nothing to seed a level from).</summary>
+public readonly record struct KnownDevice(
+    string Handle, string Name, BatteryTransport Transport, Sample? Latest);
+
 public static class HistoryService
 {
     /// <summary>Heartbeat while a device sits unchanged. Must stay well below
@@ -594,6 +600,15 @@ public static class HistoryService
                 var present = new HashSet<string>();
                 foreach (var d in map.Values)
                 {
+                    // `keep_recorded_devices` seeds the store from this very
+                    // table (IsSeeded): those rows are not live observations,
+                    // and writing them would fabricate offline heartbeats for
+                    // a device that is not even connected. A live read replaces
+                    // the record (clearing the flag) and is recorded normally.
+                    if (d.IsSeeded)
+                    {
+                        continue;
+                    }
                     present.Add(d.Handle);
                     if (!_series.TryGetValue(d.Handle, out var hist))
                     {
@@ -801,6 +816,70 @@ public static class HistoryService
         lock (Sync)
         {
             return _names.TryGetValue(handle, out var n) ? n : null;
+        }
+    }
+
+    /// <summary>Recorded-but-offline roster for `keep_recorded_devices`: every
+    /// battery.db device row with its latest sample, ordered by name (then
+    /// handle) so the startup seed and its log line are deterministic. Empty
+    /// when the DB is not open (history unavailable).</summary>
+    public static List<KnownDevice> KnownDevices()
+    {
+        lock (DbLock)
+        {
+            return _db is null ? new List<KnownDevice>() : KnownDevices(_db);
+        }
+    }
+
+    /// <summary>DB half of <see cref="KnownDevices"/> on an explicit connection
+    /// (testable against a scratch database). One grouped query resolves every
+    /// handle's newest sample — no per-device round trip.</summary>
+    internal static List<KnownDevice> KnownDevices(SqliteConnection conn)
+    {
+        try
+        {
+            lock (DbLock)
+            {
+                var rows = new List<(string Handle, string Name, BatteryTransport Transport)>();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        "SELECT handle, name, source FROM devices ORDER BY name COLLATE NOCASE, handle";
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        rows.Add((reader.GetString(0), reader.GetString(1),
+                            ParseSavedSource(reader.IsDBNull(2) ? null : reader.GetString(2))));
+                    }
+                }
+                var latest = new Dictionary<string, Sample>();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        "SELECT s.handle, s.ts, s.level, s.charging, s.connected " +
+                        "FROM samples s JOIN (" +
+                        "SELECT handle, MAX(ts) AS ts FROM samples GROUP BY handle) m " +
+                        "ON m.handle = s.handle AND m.ts = s.ts";
+                    using var reader = cmd.ExecuteReader();
+                    while (reader.Read())
+                    {
+                        latest[reader.GetString(0)] = new Sample(
+                            reader.GetInt64(1),
+                            (int)Math.Clamp(reader.GetInt64(2), 0L, 100L),
+                            reader.GetInt64(3) != 0,
+                            reader.GetInt64(4) != 0);
+                    }
+                }
+                return rows
+                    .Select(r => new KnownDevice(r.Handle, r.Name, r.Transport,
+                        latest.TryGetValue(r.Handle, out var s) ? s : null))
+                    .ToList();
+            }
+        }
+        catch (Exception e)
+        {
+            Log.Error("battery.db known-device read failed", e);
+            return new List<KnownDevice>();
         }
     }
 

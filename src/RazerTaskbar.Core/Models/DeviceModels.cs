@@ -63,7 +63,13 @@ public sealed record RazerDevice(
     /// <summary>Link this reading came in on — recorded per device and
     /// persisted by the history store. Defaults to the log source: every
     /// producer that does not read a device directly is the log parser.</summary>
-    BatteryTransport Transport = BatteryTransport.Log);
+    BatteryTransport Transport = BatteryTransport.Log,
+    /// <summary>Recovered from battery.db by `keep_recorded_devices` at startup:
+    /// no live source has observed this device during this run yet. A live
+    /// read replaces the whole record (clearing the flag); the history writer
+    /// skips flagged rows so the recovery seed cannot fabricate offline
+    /// samples for a device that is not even connected.</summary>
+    bool IsSeeded = false);
 
 public static class DeviceClassifier
 {

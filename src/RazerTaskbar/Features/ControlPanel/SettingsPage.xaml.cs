@@ -85,6 +85,8 @@ public sealed partial class SettingsPage : Page
             DescTrayStyle.Text = I18n.Tr("Show the battery percentage as a number instead of the battery glyph.");
             LblHover.Text = I18n.Tr("Show devices on hover");
             DescHover.Text = I18n.Tr("Hover the widget to list every known device.");
+            LblKeepRecorded.Text = I18n.Tr("Keep recorded devices");
+            DescKeepRecorded.Text = I18n.Tr("Keep showing devices already recorded in the battery history after they go offline, instead of reporting that no devices were found.");
             LblPoll.Text = I18n.Tr("Poll interval");
             DescPoll.Text = I18n.Tr("Display refresh cadence (seconds) when there is no log activity.");
             LblRec.Text = I18n.Tr("Record battery history");
@@ -99,7 +101,7 @@ public sealed partial class SettingsPage : Page
             var offLabel = I18n.Tr("Off");
             foreach (var s in new[] { SwitchAutostart, SwitchWidget, SwitchEmbedWidgets,
                      SwitchEmbedTaskbar, SwitchEst, SwitchColor, SwitchFade,
-                     SwitchTray, SwitchHover, SwitchRec })
+                     SwitchTray, SwitchHover, SwitchRec, SwitchKeepRecorded })
             {
                 s.OnContent = onLabel;
                 s.OffContent = offLabel;
@@ -127,6 +129,7 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(SwitchTray, LblTray.Text);
             AutomationProperties.SetName(ComboTrayStyle, LblTrayStyle.Text);
             AutomationProperties.SetName(SwitchHover, LblHover.Text);
+            AutomationProperties.SetName(SwitchKeepRecorded, LblKeepRecorded.Text);
             AutomationProperties.SetName(ComboPoll, LblPoll.Text);
             AutomationProperties.SetName(SwitchRec, LblRec.Text);
             AutomationProperties.SetName(ComboRecI, LblRecI.Text);
@@ -188,6 +191,7 @@ public sealed partial class SettingsPage : Page
             SwitchFade.IsOn = cfg.FadeTransition;
             SwitchTray.IsOn = cfg.ShowTrayIcon;
             SwitchHover.IsOn = cfg.HoverDevices;
+            SwitchKeepRecorded.IsOn = cfg.KeepRecordedDevices;
             SwitchRec.IsOn = cfg.RecordBatteryHistory;
             SwitchAutostart.IsOn = cfg.RunAtStartup;
 
@@ -400,6 +404,22 @@ public sealed partial class SettingsPage : Page
         var mode = ComboTrayStyle.SelectedIndex == 1 ? TrayDisplayMode.Number : TrayDisplayMode.Icon;
         AppState.PostModifyConfig(c => c.TrayDisplayMode = mode.ToConfig());
         AppState.PostTrayRefresh();
+    }
+
+    /// <summary>`keep_recorded_devices`: seed the store from battery.db (or
+    /// drop the recovery rows when switched off) and repaint tray + widget on
+    /// the widget thread; the hover panel follows its own poll.</summary>
+    private void SwitchKeepRecorded_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress)
+        {
+            return;
+        }
+        bool on = SwitchKeepRecorded.IsOn;
+        AppState.PostModifyConfig(c => c.KeepRecordedDevices = on);
+        AppState.PostSeedRecordedDevices();
+        AppState.PostTrayRefresh();
+        AppState.PostReposition();
     }
 
     private void SwitchHover_Toggled(object sender, RoutedEventArgs e)

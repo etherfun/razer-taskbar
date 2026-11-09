@@ -14,6 +14,13 @@
 - `devices.source` 记每台设备**上次读数是从哪条链路来的**（`BatteryTransport`：Wired/Receiver/Ble/Log，写入见 `UpsertDevice`）。旧库由 `EnsureTables` 自动补列（`pragma_table_info` 探测 + `ALTER TABLE ... DEFAULT ''`），旧行读回按 `Log`（`ParseSavedSource`）。读取入口 `HistoryService.SavedTransport(handle)`；实时值在 `RazerDevice.Transport` 上，优先级链见 `docs/agent-hid.md`。
 - **库里"充电后半段没数据"先分清设备与采样**：写点是"store 变了才落库"，所以缺行可能是设备压根没报那个值（Joro 有线通道充满时电量字节直接跳到 255=100%，reboot 复盘见 `docs/agent-hid.md` 线缆节），也可能是读数没进 store（`HidWatcher.Commit` 的充电位守卫曾把整条读数丢掉，2026-10-08 修复为只回填充电位）。分辨：那一轮前后有 `hid: no answer this round` / `setFeature|getFeature failed` / `marked disconnected` 才说明 HID 真的没答；一条都没有就是"HID 每轮都在答、值就是设备报的"。要设备当前原始字节直接跑 `razer-taskbar.exe --hid-probe`（看 `raw=`，`Scaled255` 下 255=100%）。滚动到满格的首个读数还会被 `SpikeFilter` 的 60s 确认窗扣住再提交（一批两行，间隔 ≈60s），这是设计行为不是丢数据。
 
+## 记录设备恢复（`keep_recorded_devices` 启动种子）
+
+- `HistoryService.KnownDevices()` 是**只读**入口：`SELECT handle, name, source FROM devices` + 一条分组查询取每个 handle 的 `MAX(ts)` 最新样本（`ts/level/charging/connected`），返回 `KnownDevice(Handle, Name, Transport, Latest)`，按名称（SQLite `COLLATE NOCASE`）→ handle 排序保证播种与日志确定。无样本的 devices 行 `Latest=null`（不播种，没有电平可用于显示）。两条查询都在 `DbLock` 内（单连接规则，见上）；DB 未打开时返回空表。可测试的重载 `KnownDevices(SqliteConnection)` 用于临时库。
+- `AppState.LoadInitialConfig`（启动、功能挂载之前）在 `keep_recorded_devices=true` 时把结果播种进 `DeviceStore`：`IsConnected=false`、`IsSelected` 按 `shown_device_handle`、`Kind` 走 `DeviceClassifier`、`Transport` 用持久化 source、`IsSeeded=true`；**不覆盖已存在的 handle**（实时数据优先），并打一行 INFO：`keep-recorded: seeded N recorded device(s): …`。运行中开/关开关走 `AppState.PostSeedRecordedDevices()`：开=重新播种（幂等）、关=移除 `IsSeeded` 行，使 store 回到只有实时来源产出的状态。
+- **`Record` 跳过 `IsSeeded` 行**：这些是恢复行而非实时观测，写入会为根本没连上的设备伪造离线心跳/`devices` 行。设备一旦被任何实时来源读到，watcher 用完整 `RazerDevice` 覆盖该 handle（`IsSeeded` 自然清零），此后照常记录。
+- 显示回落规则在 `DisplayModeResolver.Pick`（纯逻辑，`DisplayModeTests`）：正常选择为 null 且开关开启时按 `shown_device_handle` → 保留的 `LastShownHandle` → 最低电量（同级按名称、再按 handle）返回已记录设备；开关关闭时完全保持旧行为（含清空 `LastShownHandle`）。
+
 ## 并发模型（2026-09-11 定稿）
 
 - 单一 `SqliteConnection` 被多线程共用（watcher 写、UI 读），而 Microsoft.Data.Sqlite 每连接只允许一条打开的命令：**所有 SQL 必须在 `DbLock` 内执行**（`Record` 写入、`SamplesInRange` 读取、`MergeAlias`/Scrub 的 DB 半边）。锁序恒为 `Sync → DbLock`（`Sync` 护内存结构，`DbLock` 护连接），任何路径不得反序或嵌套反转。

@@ -37,6 +37,7 @@ internal static class TrayPreview
         ("55% charging", new TrayIconState(55, true, true, false)),
         ("no device", null),
         ("55% saver", new TrayIconState(55, false, true, true)),
+        ("55% offline", new TrayIconState(55, false, false, false)),
     ];
 
     public static int Run()

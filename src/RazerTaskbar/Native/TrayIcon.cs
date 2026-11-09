@@ -44,28 +44,45 @@ public static class TrayIcon
     /// and are all destroyed in Destroy().</summary>
     private static readonly Dictionary<IconKey, IntPtr> Icons = new();
 
+    /// <summary>Bounding cap for <see cref="Icons"/>. The key space is fixed
+    /// but wide (two styles x 101 levels x charging/connected/saver), and the
+    /// shell copies the image at NIM_ADD/NIM_MODIFY time, so an icon the tray
+    /// currently shows is safe to release. Clearing at the cap keeps the GDI
+    /// object count flat across a long uptime instead of betting the user never
+    /// visits every state (each icon owns two DIBs).</summary>
+    private const int IconsMax = 512;
+
     /// <summary>Everything the rendered pixels depend on. The style is part of
     /// it: the same battery level is a different image in number mode.</summary>
     private readonly record struct IconKey(
         TrayDisplayMode Mode, int Level, bool Charging, bool Connected, bool Saver);
 
     /// <summary>Cache/dedupe key of a render state. Icon mode draws from
-    /// (level, charging) only, so its flags are normalized to keep that half
-    /// of the cache exactly as small as it was before number mode existed;
-    /// number mode tints by the full state (connected/saver/charging).</summary>
+    /// (level, charging, connected) — saver is normalized away because the
+    /// glyph has no leaf variant — so its key space stays small; number mode
+    /// tints by the full state (connected/saver/charging).</summary>
     private static IconKey KeyFor(TrayDisplayMode mode, TrayIconState? state) => state is { } s
         ? mode == TrayDisplayMode.Number
             ? new IconKey(mode, s.Level, s.Charging, s.Connected, s.Saver)
-            : new IconKey(mode, s.Level, s.Charging, true, false)
+            : new IconKey(mode, s.Level, s.Charging, s.Connected, false)
         : new IconKey(mode, -1, false, false, false);
 
     /// <summary>Cached icon for a display state; 0 on GDI failure (not cached,
-    /// retried next refresh).</summary>
+    /// retried next refresh). Hits the <see cref="IconsMax"/> cap by dropping
+    /// the whole cache — the key set is fixed, so this cannot thrash.</summary>
     private static IntPtr CachedIcon(TrayDisplayMode mode, TrayIconState? state)
     {
         var key = KeyFor(mode, state);
         if (!Icons.TryGetValue(key, out var icon) && (icon = BuildIcon(mode, state)) != 0)
         {
+            if (Icons.Count >= IconsMax)
+            {
+                foreach (var cached in Icons.Values)
+                {
+                    DestroyIcon(cached);
+                }
+                Icons.Clear();
+            }
             Icons[key] = icon;
         }
         return icon;
@@ -125,10 +142,14 @@ public static class TrayIcon
             AppState.Instance.ModeState, Environment.TickCount64);
         if (device is { } d)
         {
-            var charging = d.IsCharging ? $" {I18n.Tr("(charging)")}" : "";
-            tip = $"{d.Name}: {d.BatteryPercentage}%{charging}";
+            // `keep_recorded_devices` can hand us a recorded device that is not
+            // online: keep its last reading but mark it offline — and no usage
+            // estimate (predictions need a live discharge anchor).
+            var charging = d.IsCharging && d.IsConnected ? $" {I18n.Tr("(charging)")}" : "";
+            var offline = d.IsConnected ? "" : $" {I18n.Tr("offline")}";
+            tip = $"{d.Name}: {d.BatteryPercentage}%{charging}{offline}";
             // Predicted usage time / time-to-full from history.
-            if (HistoryService.EstimateFor(d.Handle) is { } e)
+            if (d.IsConnected && HistoryService.EstimateFor(d.Handle) is { } e)
             {
                 tip += $" · {HistoryService.FormatEstimateVerbose(e)}";
             }
@@ -307,8 +328,15 @@ public static class TrayIcon
     private static void DrawGlyph(IntPtr mem, TrayIconState? state, int src)
     {
         static int S(int v, int src) => v * src / 16;
-        var (level, charging) = state is { } s ? (s.Level, s.Charging) : (0, false);
-        var fr = state is { } d ? BatteryColors.ColorFor(d.Level) : new RgbColor(0x80, 0x80, 0x80);
+        // A recorded-but-offline device cannot be charging: a stale charging
+        // flag must not draw the bolt over the neutral fill.
+        var (level, charging) = state is { } s ? (s.Level, s.Charging && s.Connected) : (0, false);
+        // A recorded-but-offline device (keep_recorded_devices fallback) keeps
+        // its level fill but in the neutral gray of the disconnected state, so
+        // the tray still says "already recorded", not "live reading".
+        var fr = state is { } d
+            ? d.Connected ? BatteryColors.ColorFor(d.Level) : new RgbColor(0x80, 0x80, 0x80)
+            : new RgbColor(0x80, 0x80, 0x80);
 
         var white = CreateSolidBrush(0x00FF_FFFF);
         var fill = CreateSolidBrush(ColorRef(fr.R, fr.G, fr.B));

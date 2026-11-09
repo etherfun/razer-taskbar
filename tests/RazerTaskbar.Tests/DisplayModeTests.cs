@@ -12,11 +12,14 @@ public sealed class DisplayModeTests
     private static RazerDevice Dev(string handle, int level, bool charging = false, bool selected = true, bool connected = true)
         => new(handle, handle, level, charging, BatterySaver: false, IsConnected: connected, IsSelected: selected, Kind: DeviceKind.Other);
 
-    private static Config Cfg(string mode, ulong swapSecs = 30, ulong rotSecs = 30) => new()
+    private static Config Cfg(string mode, ulong swapSecs = 30, ulong rotSecs = 30, bool keepRecorded = false) => new()
     {
         DisplayMode = mode,
         SwapDisplaySecs = swapSecs,
         RotateIntervalSecs = rotSecs,
+        // The existing mode tests pin the live-only pick; the recorded-device
+        // fallback (default on in Config) has its own tests below.
+        KeepRecordedDevices = keepRecorded,
     };
 
     private static Dictionary<string, RazerDevice> Map(params RazerDevice[] devices)
@@ -214,5 +217,87 @@ public sealed class DisplayModeTests
         var devices = Map(Dev("a", 20, connected: false));
         Assert.Null(DisplayModeResolver.Pick(devices, Cfg("rotate"), st, 1000));
         Assert.Equal("", st.LastShownHandle);
+    }
+
+    // ——— keep_recorded_devices fallback ———
+
+    [Fact]
+    public void KeepRecordedFlagOffStillReturnsNull()
+    {
+        // Byte-identical to the pre-flag behaviour: nothing live, nothing shown.
+        var st = new DisplayModeState { LastShownHandle = "a" };
+        var devices = Map(Dev("a", 20, connected: false));
+        Assert.Null(DisplayModeResolver.Pick(devices, Cfg("fixed"), st, 1000));
+        Assert.Equal("", st.LastShownHandle); // cleared, exactly as before
+    }
+
+    [Fact]
+    public void KeepRecordedPrefersShownHandle()
+    {
+        // shown handle exists in the store (offline included) → it wins even
+        // when another recorded device has a lower level.
+        var st = new DisplayModeState();
+        var devices = Map(Dev("a", 80, connected: false), Dev("b", 10, connected: false));
+        var cfg = Cfg("fixed", keepRecorded: true);
+        cfg.ShownDeviceHandle = "a";
+        var picked = DisplayModeResolver.Pick(devices, cfg, st, 1000);
+        Assert.Equal("a", picked!.Handle);
+        Assert.Equal("a", st.LastShownHandle);
+    }
+
+    [Fact]
+    public void KeepRecordedPrefersPreservedLastShownOverLowestLevel()
+    {
+        // The shown handle is gone; the widget's last displayed device is
+        // still remembered and beats the lowest-level device.
+        var st = new DisplayModeState { LastShownHandle = "b" };
+        var devices = Map(Dev("a", 90, connected: false), Dev("b", 85, connected: false));
+        var picked = DisplayModeResolver.Pick(devices, Cfg("fixed", keepRecorded: true), st, 1000);
+        Assert.Equal("b", picked!.Handle);
+        Assert.Equal("b", st.LastShownHandle);
+    }
+
+    [Fact]
+    public void KeepRecordedFallsBackToLowestLevelThenName()
+    {
+        var st = new DisplayModeState();
+        var cfg = Cfg("fixed", keepRecorded: true);
+        var devices = Map(
+            new RazerDevice("High", "h1", 90, false, BatterySaver: false,
+                IsConnected: false, IsSelected: true, Kind: DeviceKind.Other),
+            new RazerDevice("Zeta", "h2", 40, false, BatterySaver: false,
+                IsConnected: false, IsSelected: true, Kind: DeviceKind.Other),
+            new RazerDevice("Alpha", "h3", 40, false, BatterySaver: false,
+                IsConnected: false, IsSelected: true, Kind: DeviceKind.Other));
+        // The 40% tie is broken by name, not insertion order.
+        Assert.Equal("h3", DisplayModeResolver.Pick(devices, cfg, st, 1000)!.Handle);
+    }
+
+    [Fact]
+    public void KeepRecordedLivePickWinsOverFallback()
+    {
+        var st = new DisplayModeState();
+        var devices = Map(Dev("live", 90), Dev("old", 5, connected: false));
+        var picked = DisplayModeResolver.Pick(devices, Cfg("fixed", keepRecorded: true), st, 1000);
+        Assert.Equal("live", picked!.Handle);
+    }
+
+    [Fact]
+    public void KeepRecordedPreservesLastShownOnEmptyStore()
+    {
+        var st = new DisplayModeState { LastShownHandle = "gone" };
+        Assert.Null(DisplayModeResolver.Pick(
+            new Dictionary<string, RazerDevice>(), Cfg("fixed", keepRecorded: true), st, 1000));
+        Assert.Equal("gone", st.LastShownHandle); // preserved for the next tick
+    }
+
+    [Fact]
+    public void KeepRecordedAppliesToRotateWhenEverythingIsOffline()
+    {
+        var st = new DisplayModeState();
+        var devices = Map(Dev("a", 50, connected: false), Dev("b", 30, connected: false));
+        Assert.Equal("b", DisplayModeResolver.Pick(
+            devices, Cfg("rotate", keepRecorded: true), st, 1000)!.Handle);
+        Assert.Equal("b", st.LastShownHandle);
     }
 }

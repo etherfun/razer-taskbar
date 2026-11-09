@@ -78,13 +78,113 @@ public sealed class AppState
         _published = _config.Clone();
     }
 
-    /// <summary>Load the authoritative config copy at startup (widget thread).</summary>
+    /// <summary>Load the authoritative config copy at startup. Runs before the
+    /// features mount (AppHost order), so no reader can observe a half-seeded
+    /// store; the device store is lock-protected and the later widget thread
+    /// only ever sees the finished seed.</summary>
     public void LoadInitialConfig()
     {
         lock (_configLock)
         {
             _config = ConfigService.Load();
             Publish();
+        }
+        // `keep_recorded_devices` seeds the store from history so the tray,
+        // hover panel and widget have content before the first live poll and
+        // across restarts. Outside the config lock (a battery.db read must
+        // never nest inside it) and skipped entirely when the flag is off
+        // (old startup behaviour, no extra DB read).
+        if (ConfigSnapshot().KeepRecordedDevices)
+        {
+            SeedRecordedDevices(HistoryService.KnownDevices());
+        }
+    }
+
+    /// <summary>`keep_recorded_devices` seed: history-known devices re-enter
+    /// the store as offline rows. Never overwrites a handle a live source
+    /// already produced; IsSeeded marks the row as recovery-only so the
+    /// history writer does not fabricate samples for it. Returns the handles
+    /// that were added (empty = nothing new to seed).</summary>
+    private List<string> SeedRecordedDevices(IReadOnlyList<KnownDevice> known)
+    {
+        var seeded = new List<string>();
+        if (known.Count == 0)
+        {
+            return seeded;
+        }
+        var shown = ConfigSnapshot().ShownDeviceHandle;
+        Devices.Mutate(devices =>
+        {
+            foreach (var k in known)
+            {
+                if (k.Handle.Length == 0 || devices.ContainsKey(k.Handle) || k.Latest is not { } latest)
+                {
+                    continue;
+                }
+                devices[k.Handle] = new RazerDevice(
+                    k.Name,
+                    k.Handle,
+                    latest.Level,
+                    latest.Charging,
+                    BatterySaver: false,
+                    IsConnected: false,
+                    IsSelected: shown.Length == 0 || shown == k.Handle,
+                    Kind: DeviceClassifier.FromCategoryAndName("", k.Name),
+                    Transport: k.Transport,
+                    IsSeeded: true);
+                seeded.Add(k.Handle);
+            }
+        });
+        if (seeded.Count > 0)
+        {
+            Log.Info($"keep-recorded: seeded {seeded.Count} recorded device(s): {string.Join(", ", seeded)}");
+        }
+        return seeded;
+    }
+
+    /// <summary>Drop the recovery rows again when the toggle is switched off:
+    /// the store must return to exactly what the live sources produced
+    /// (offline rows a live source actually reported stay).</summary>
+    private void DropSeededDevices()
+    {
+        var removed = new List<string>();
+        Devices.Mutate(devices =>
+        {
+            foreach (var (handle, device) in devices)
+            {
+                if (device.IsSeeded)
+                {
+                    removed.Add(handle);
+                }
+            }
+            foreach (var handle in removed)
+            {
+                devices.Remove(handle);
+            }
+        });
+        if (removed.Count > 0)
+        {
+            Log.Info($"keep-recorded: dropped {removed.Count} seeded device(s): {string.Join(", ", removed)}");
+        }
+    }
+
+    /// <summary>Settings toggle: re-seed from battery.db (enable) or drop the
+    /// recovery rows (disable) without a restart, then repaint the surfaces
+    /// that changed. Widget thread; idempotent (existing handles are kept).</summary>
+    private void SeedRecordedDevicesNow()
+    {
+        if (!ConfigSnapshot().KeepRecordedDevices)
+        {
+            DropSeededDevices();
+            WidgetWindow.InvalidateDisplay();
+            TrayIcon.Refresh();
+            return;
+        }
+        var seeded = SeedRecordedDevices(HistoryService.KnownDevices());
+        if (seeded.Count > 0)
+        {
+            WidgetWindow.InvalidateDisplay();
+            TrayIcon.Refresh();
         }
     }
 
@@ -162,6 +262,11 @@ public sealed class AppState
 
     public static void PostTrayRefresh() => WidgetThread.Post(TrayIcon.Refresh);
 
+    /// <summary>`keep_recorded_devices` toggle: seed/drop the recovery rows on
+    /// the widget thread (battery.db read + store mutation), then the caller
+    /// posts its refresh/reposition steps.</summary>
+    public static void PostSeedRecordedDevices() => WidgetThread.Post(() => Instance.SeedRecordedDevicesNow());
+
     public static void PostExit() => WidgetThread.Post(WidgetWindow.ExitWidget);
 }
 
@@ -189,6 +294,7 @@ public static class ConfigExt
         ShowTrayIcon = c.ShowTrayIcon,
         TrayDisplayMode = c.TrayDisplayMode,
         HoverDevices = c.HoverDevices,
+        KeepRecordedDevices = c.KeepRecordedDevices,
         RecordBatteryHistory = c.RecordBatteryHistory,
         ShowEstimatedTime = c.ShowEstimatedTime,
         ColorBatteryIcon = c.ColorBatteryIcon,
