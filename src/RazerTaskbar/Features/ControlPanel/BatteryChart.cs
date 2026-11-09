@@ -343,13 +343,16 @@ public sealed class BatteryChart : Canvas
         FlushArea();
         FlushLine();
 
-        // Swap markers: orange dot at any discharging rise >= 30 pct.
-        const int SwapJumpPct = 30;
+        // Swap markers: orange dot wherever the history would split the
+        // cycle — the same threshold and the same "the rise must stick"
+        // durability test ComputeSpans applies, so a dot and a SWAP row in
+        // the list below always come from one rule (the chart reads the raw
+        // series, the list the deflated one, exactly as before).
         for (int i = 1; i < main.Count; i++)
         {
             var prev = main[i - 1];
             var cur = main[i];
-            if (!prev.Charging && !cur.Charging && cur.Level - prev.Level >= SwapJumpPct)
+            if (!prev.Charging && HistoryService.IsSwapJump(main, i, prev.Level))
             {
                 double cx = X(cur.Ts);
                 double cy = Y(cur.Level);

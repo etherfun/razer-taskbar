@@ -174,9 +174,6 @@ public static class I18n
         ["Widget side"] = "挂件位置",
         ["Left"] = "左侧",
         ["Right"] = "右侧",
-        // ToggleSwitch OnContent/OffContent: the framework defaults come from
-        // the OS resource language (Chinese "开/关" on a zh Windows), not the
-        // app language — set them explicitly on every toggle.
         ["On"] = "开",
         ["Off"] = "关",
     };

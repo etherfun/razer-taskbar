@@ -411,12 +411,23 @@ public sealed class HidWatcher
                     continue;
                 }
                 // Same handle from two transports (cable + BT charging at
-                // once): keep the entry that knows charging — GATT has no
-                // charging flag, so a BLE reading must not erase it.
-                if (map.TryGetValue(handle, out var previous)
-                    && previous.IsCharging && !merged.IsCharging && reading.IsCharging != true)
+                // once): a reading that carries NO charging information must
+                // not erase the flag a USB link reported — GATT has no
+                // charging flag at all. Only the flag is held back; the
+                // reading's level and connectivity still land. Dropping the
+                // whole reading instead froze the device at its last charging
+                // level (the sample never reached battery.db, and the round
+                // even read as a failed acquisition): the Joro's vendor
+                // channel drops the 0x84 flag the moment it goes full, and the
+                // dongle's keyboard slot never reports charging at all — both
+                // are exactly the states reached *during* a charge, so the
+                // charge's last stretch vanished while the flag stayed set.
+                // An explicit flag is the device's own answer and stands.
+                if (reading.IsCharging is null
+                    && map.TryGetValue(handle, out var previous)
+                    && previous.IsCharging && !merged.IsCharging)
                 {
-                    continue;
+                    merged = merged with { IsCharging = true };
                 }
                 map[handle] = merged;
                 _written[handle] = merged;

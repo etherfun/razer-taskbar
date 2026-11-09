@@ -12,6 +12,7 @@
   mtime 与进程写入计数器，不能看文件尺寸。实测一次真实 checkpoint 只回写本代有效帧（几十 KB），
   不是整个 4 MB，所以无需为 WAL 大小额外调优。
 - `devices.source` 记每台设备**上次读数是从哪条链路来的**（`BatteryTransport`：Wired/Receiver/Ble/Log，写入见 `UpsertDevice`）。旧库由 `EnsureTables` 自动补列（`pragma_table_info` 探测 + `ALTER TABLE ... DEFAULT ''`），旧行读回按 `Log`（`ParseSavedSource`）。读取入口 `HistoryService.SavedTransport(handle)`；实时值在 `RazerDevice.Transport` 上，优先级链见 `docs/agent-hid.md`。
+- **库里"充电后半段没数据"先分清设备与采样**：写点是"store 变了才落库"，所以缺行可能是设备压根没报那个值（Joro 有线通道充满时电量字节直接跳到 255=100%，reboot 复盘见 `docs/agent-hid.md` 线缆节），也可能是读数没进 store（`HidWatcher.Commit` 的充电位守卫曾把整条读数丢掉，2026-10-08 修复为只回填充电位）。分辨：那一轮前后有 `hid: no answer this round` / `setFeature|getFeature failed` / `marked disconnected` 才说明 HID 真的没答；一条都没有就是"HID 每轮都在答、值就是设备报的"。要设备当前原始字节直接跑 `razer-taskbar.exe --hid-probe`（看 `raw=`，`Scaled255` 下 255=100%）。滚动到满格的首个读数还会被 `SpikeFilter` 的 60s 确认窗扣住再提交（一批两行，间隔 ≈60s），这是设计行为不是丢数据。
 
 ## 并发模型（2026-09-11 定稿）
 
@@ -22,16 +23,18 @@
 ## 周期切分（`ComputeSpans`）
 
 - 放电/充电会话按 `(level, charging, connected)` 切分；**跨省电关机延续**：断连静默 >30 分钟（`GapBreakSecs`）不计活跃时间但**不结束**周期（图表用同一阈值画暗带，排除出统计）。
-- 放电中上升 ≥30 点（`SwapJumpPct`）= 换电，当前周期结束、从新电平另起（新周期带 `Span.SwapStart`，列表按"换电"而非"充电"展示）；跳后立即回落的是报告毛刺，整段丢弃（防伪见下）。
+- 放电中上升 ≥20 点（`SwapJumpPct`）= 换电，当前周期结束、从新电平另起（新周期带 `Span.SwapStart`，列表按"换电"而非"充电"展示）。判定的两部分都收在 `IsSwapJump` 里：幅度到阈值，**且跳变必须"站住"**（`SwapSticks`，跳后 `SwapConfirmSecs`=15 分钟内不得回落到跳前电平 ±`SpikeFilter.TolerancePct`）——真换电只移一次并留在那里，回落的是报告毛刺（陈旧重连读数/仪表重读），与写时 `SpikeFilter`、启动 `CommittedGlitchTs` 同一条规则；候选项未通过则跳过该样本，运行段当作这条坏读数没来过。**历史页图表上的橙点用同一个 `IsSwapJump`**，所以点与列表里的 SWAP 行同源同规则（两者输入序列与改动前一致：图用原始读数、列表用 Deflate 后的序列）。
+  - 阈值标定（真机 DB，2026-10-02）：AA 电芯换电前 51%、换后 76%（+25）——旧的 30 点阈值**静默漏判**，用户反馈"换电池没判定"；而 2026-09-15 09:19 断电重启后仪表重锚定 41→53（+12）**不是换电**，不能切周期。20 点落在真换电下方 5 点、伪影上方 8 点；更小的 1 点级抖动（2026-09-14 10:14 / 09-15 09:45 反馈点）天然够不到阈值。改这个数字前先跑 `HistoryTests.SmallSwapJumpStillEndsCycle` / `GaugeReanchorJumpStaysOneCycle` / `SwapJumpBelowThresholdStaysOneCycle`。
 - **电池类型**（`Core/Models/BatteryType.cs`，完整交接见 `docs/agent-battery-type.md`）：openrazer 在 `razermouse_driver.c: razer_attr_read_charge_status` 里用一张 **PID 名单**把 Atheris/Orochi/HyperSpeed 等机型直接短路成 `charge_status = 0`（注释"Use AA batteries"）——即**按机型**判电池类型，而不是读设备上的某个值。同样的"按型号判"名单移植在 `BatteryTypes.Detect`（型号名不区分大小写包含匹配；HyperSpeed 后缀写全，避免误伤同为 HyperSpeed 的键盘与 V3 Pro / Naga V2 Pro 等内置电池机型），`Resolve` 先看用户设置。可更换电池的读数只有**换电池**时才会跃升，且根本没有充电硬件：`BatteryTypes.AsReplaceable` 把序列的充电旗强制清零后再进 `Deflate`/`ComputeSpans`，否则一个假充电旗 + 换电跃升会被当成一次真正的充电会话（`ChargeHoursPerPct`、容量衰减都会被污染）。**作用范围仅限历史页读路径**（`HistoryPage.Reload` 及其对比序列）：HID/日志采集与挂件/托盘显示仍按设备上报原样工作——若要连显示一起纠正，入口在 `HidWatcher.ToRazerDevice`。**HID 直读电池类型已实测证伪**（设备固件只把它用在百分比换算上，无寄存器承载），可行的自动判定路径是 Synapse 的 `products_*.log`，见 `docs/agent-battery-type.md`。
 - History 页"充放电循环"计数是**等效满充放循环**（行业口径，`CycleStatsOfSpans`）：合格放电段（`Qualifies`）的 `MovedPct` 累计 ÷ 100——一次完整"充满→放空→再充满"计为 1 次循环，不完整会话按比例累计（每天 5 次 20% 的外出 = 1 而非 5）；低于 5 点/60s 门槛的 flicker 段不计。`CycleStats.Cycles` 为 double，UI 按 1~2 位小数显示。
 
-## 三层数据防伪
+## 数据防伪（写时 / 启动 / 读时）
 
 1. **SpikeFilter（写时）**：瞬时跳变（真机案例 65%→100% 共 20s）先扣住 60s 不入库；窗口内回到跳前电平附近 → 整段丢弃，到期 → 作为真换电提交；跨跳变震荡段（重连形态：跳前锚是陈旧断连心跳）同样丢弃。`Record` 的配套规则 `CoalesceSample`：**断连行一律记序列可信电量**（`hist[^1]`）、充电旗清零——离线设备无法上报活电平，商店里复读的可能正是毛刺值（真机案例 2026-09-10 05:04：58% 在线 → 断电毛刺 100% → 5.5h 陈旧 100% 断连心跳被 60s 到期当"真换电"整段提交），写可信电平让扣留看到真实回落、按既有规则丢段。
 2. **Scrub（启动时，`CommittedGlitchTs`）**：把同样的回溯规则应用于已加载序列——60s 内回落的可疑跳变从 battery.db 与内存中删除，治愈写时守卫存在之前（或经其漏洞）入库的坏行。**跨断连形态**：跳变行之后（或跳变行本身即）断连 = 电平从未被在线确认，陈旧平台行不携带信息；沿断连行继续扫描，下一个**在线**读数（无论电平/充电旗，无论多久之后）重锚定序列，跳变行+平台整段删除；断连行若本身带锚点容差内的可信电平（诚实回现行）则按容差就地确认。真换电不受影响：新电平在线到达并在宽限后保持（`KeepsSwapBridgedByOffThenSteadyNewLevel`）。**规则跑到不动点**（`CommittedGlitchTs` → `GlitchPass` 多轮）：一遍扫描在"重锚定行自身仍是毛刺值"时会漏掉平台最后一行（真机案例 2026-09-18 11:15：合并注入的 80% 平台以一行 **在线 80%** 收段，真实 36% 在 9s 后到达，残留的 80 夹在两条 36 之间，图上就是一根孤峰）。判定的行从序列里去掉后再判一轮，直到某轮无产出——等价于写时扣留在首次回落时丢掉整段待定行的行为。收敛单调（每轮至少少一行），无循环风险。
 3. **ReboundFilter（读时）**：无线设备静置后电芯弛豫，唤醒报高读数（真机案例 61%→65%→61%）；放电序列维持包络 env，1~4 点的未充电回升立即钳到 env，回落 ≤env 确认伪影；抬升**在线持续 ≥2h**（`ReboundAcceptSecs`，静置/断连不计时钟）才接受为真实再校准；≥5 点回升（SpikeFilter 已确认的真换电）与充电样本直通并重置 env。**预测/周期统计/健康/显示锚点跑在包络（Deflate）序列上，图表与显示百分比保持原始读数**。契约：公共入口（`Predict`/`CycleStatsOf`/`HealthStatsOf`）收**原始**序列且各只过一遍（非幂等，被接受的次阈值回升二次扫描会被重钳）。
 4. **BridgeDropouts（历史页读路径，`Reload`）**：枚举抖动不是关机——真机 DB 实测 2026-09-23：有界断连行 1327 条中 467 条跨度 ≤5 min（14 s ~ 5 min，绝大多数单行），每条都会把曲线切出口子、把会话统计切碎。规则：断连行连续 ≤3 行、两侧均在线、总跨度 ≤5 min → 就地改标在线并携带所属运行段的充电旗（图表连线、离线暗带、会话切分因此一致地视设备为持续在场）；跨度更长或序列首尾无锚的断连保持原样（真实离开，暗带与会话切分不动）。主/对比序列在 Deflate 之前各过一遍。
+5. **换电持久性（读时，`IsSwapJump`/`SwapSticks`）**：切分阶段对幅度达标的回升再做一次"站得住"确认——`SwapConfirmSecs` 内回到跳前电平 ±`TolerancePct` 即判为毛刺并丢弃该样本；同时保留旧的一步回落检查（下一行低于跳前电平）。图表橙点共用这一判定，`BatteryChart` 不再自带那个写死的 30。
 
 ## 三层预测器（`Predict` → `PredictDeflated`）
 
@@ -59,18 +62,19 @@
 |---|---|---|
 | `HeartbeatSecs` | 15 min | 静止心跳间隔，必须远小于 `GapBreakSecs` |
 | `GapBreakSecs` | 30 min | 静默阈值：不计活跃时间但不结束周期；图表同阈值画暗带 |
-| `SwapJumpPct` | 30 | 放电中上升 ≥此值 = 换电 |
+| `SwapJumpPct` | 20 | 放电中上升 ≥此值 = 换电（标定见上，真换电 +25 vs 伪影 +12） |
+| `SwapConfirmSecs` | 15 min | 跳变保持窗口：窗口内回落到跳前电平 ±3 点 = 毛刺而非换电 |
 | `HalfLifeDays` | 30 | EWMA 半衰期（日历老化/习惯漂移按墙钟累积） |
 | `MaxAgeDays` | 180 | 周期数据截断龄（老化膝点后由新近权重尾巴跟踪） |
 | `BlendKPct` | 8 | 当前会话混合常数（已移动 8 点 = 半总权重） |
 
 ## 测试锚点
 
-- `HistoryTests`：span 切分、加权速率、预测。
+- `HistoryTests`：span 切分、加权速率、预测；换电判定四条：`SmallSwapJumpStillEndsCycle`（真机 +25 必须切周期）、`GaugeReanchorJumpStaysOneCycle`（+12 重锚定不得切）、`SwapJumpBelowThresholdStaysOneCycle`（阈值下沿）、`SwapJumpThatFallsBackLaterIsNotASwap`（持久性）、`SwapAcrossPowerOffEndsCycle`（开盖断电后达阈）、`JumpThatFallsBackIsAGlitch`（一步回落）。
 - `ReboundFilterTests`：11 条用例含真实案例基准（61→65→61）。
 - `HistoryScrubTests`：启动回溯清洗。
 - `HistoryAliasTests`：合成句柄（`HID:{pid}`/`BLE:{mac}`）别名合并。
-- `TransportPriorityTests`：`devices.source` 的 upsert/读回与旧库补列（`EnsureTables` 的迁移分支）。
+- `TransportPriorityTests`：链路分层与单轮仲裁、充电位守卫（无充电位读数不抹充电位但电量照落；充电设备读数不因 flag 回落被整条丢）、`devices.source` 的 upsert/读回与旧库补列（`EnsureTables` 的迁移分支）。
 - `BatteryTypeTests`：型号名单（AA/AAA 机型 vs HyperSpeed 键盘/V3 Pro 等内置电池机型）、设置优先级、配置拼写往返、`AsReplaceable` 只清充电旗。
 - `ConfigTests.BatteryTypeOverridesLoadAndFilterUnknownSpellings`：`device_battery_types` 的缺键/`null`/未知拼写与往返。
 - 改动切分/加权/过滤规则必须保持对应用例全绿；ReboundFilter 的"原始序列恰好一次"契约勿破坏。

@@ -346,6 +346,119 @@ public sealed class HistoryTests
     }
 
     [Fact]
+    public void SmallSwapJumpStillEndsCycle()
+    {
+        // Real swap from battery.db (Viper V3 HyperSpeed, 2026-10-02 00:58):
+        // the AA cell went in at 51% and read 76% immediately after — a rise
+        // of 25, which the old 30-point threshold silently swallowed, so the
+        // cycle never split and the new cell's drain was booked against the
+        // old one. The fresh cell then sags 76 → 73 → 71, never approaching
+        // the pre-swap level, so the rise sticks.
+        List<Sample> samples =
+        [
+            S(0, 51, false, true),
+            S(900, 51, false, true),
+            S(1800, 51, false, true),
+            S(2700, 76, false, true),   // battery swapped (+25)
+            S(3600, 73, false, true),
+            S(5400, 71, false, true),
+        ];
+        var (dis, _) = HistoryService.ComputeSpans(samples);
+        Assert.Equal(2, dis.Count);
+        Assert.False(dis[0].SwapStart);
+        Assert.Equal((51, 51), (dis[0].LevelStart, dis[0].LevelEnd));
+        Assert.True(dis[1].SwapStart);
+        Assert.Equal(2700, dis[1].StartTs);
+        Assert.Equal((76, 71), (dis[1].LevelStart, dis[1].LevelEnd));
+    }
+
+    [Fact]
+    public void GaugeReanchorJumpStaysOneCycle()
+    {
+        // Real shape from battery.db (2026-09-15 09:19): the reading had sat
+        // at 41% for a day, the device was power-cycled, and the gauge came
+        // back at 53% → 51%. No cell was changed — the +12 is a re-anchored
+        // estimate, and it must not split the cycle (the same shape that
+        // mis-fired as a swap in the 2026-09-14 10:14 / 09-15 09:45 reports).
+        List<Sample> samples =
+        [
+            S(0, 41, false, true),
+            S(900, 41, false, true),
+            S(1800, 41, false, false),  // power-cycled
+            S(1904, 53, false, true),   // gauge re-anchored (+12)
+            S(1917, 51, false, true),
+            S(9000, 51, false, true),
+            S(9900, 49, false, true),
+        ];
+        var (dis, _) = HistoryService.ComputeSpans(samples);
+        Assert.Single(dis);
+        Assert.False(dis[0].SwapStart);
+        Assert.Equal((41, 49), (dis[0].LevelStart, dis[0].LevelEnd));
+    }
+
+    [Fact]
+    public void SwapJumpBelowThresholdStaysOneCycle()
+    {
+        // The threshold sits above the largest artifact seen (the +12
+        // re-anchor) and below the smallest real swap (the +25 above): a
+        // rise just short of it is normal drain, not a new cell.
+        List<Sample> samples =
+        [
+            S(0, 40, false, true),
+            S(900, 39, false, true),
+            S(1800, 58, false, true),   // +19
+            S(2700, 57, false, true),
+        ];
+        var (dis, _) = HistoryService.ComputeSpans(samples);
+        Assert.Single(dis);
+        Assert.False(dis[0].SwapStart);
+    }
+
+    [Fact]
+    public void SwapJumpThatFallsBackLaterIsNotASwap()
+    {
+        // 51 → 76 → 53 within the confirmation window: the one-step glitch
+        // check alone would keep this (53 is above 51), but a swap moves once
+        // and STAYS — a return to within TolerancePct of the pre-jump level
+        // condemns the whole rise, exactly like the write-time hold. Both
+        // high samples are skipped and the cycle carries on from 51.
+        List<Sample> samples =
+        [
+            S(0, 51, false, true),
+            S(900, 51, false, true),
+            S(1800, 76, false, true),
+            S(1860, 74, false, true),
+            S(1980, 53, false, true),   // back near the anchor: artifact
+            S(2700, 52, false, true),
+        ];
+        var (dis, _) = HistoryService.ComputeSpans(samples);
+        Assert.Single(dis);
+        Assert.False(dis[0].SwapStart);
+        Assert.Equal((51, 52), (dis[0].LevelStart, dis[0].LevelEnd));
+    }
+
+    [Fact]
+    public void SwapAcrossPowerOffEndsCycle()
+    {
+        // A cell change means opening the battery door: the device is off for
+        // a stretch and comes back on the new cell. The rise is measured from
+        // the last counted sample, so the off rows neither hide nor fake it.
+        List<Sample> samples =
+        [
+            S(0, 40, false, true),
+            S(900, 38, false, true),
+            S(1800, 38, false, false),  // battery door open
+            S(2000, 65, false, true),   // new cell (+27)
+            S(2900, 63, false, true),
+        ];
+        var (dis, _) = HistoryService.ComputeSpans(samples);
+        Assert.Equal(2, dis.Count);
+        Assert.False(dis[0].SwapStart);
+        Assert.True(dis[1].SwapStart);
+        Assert.Equal((65, 63), (dis[1].LevelStart, dis[1].LevelEnd));
+    }
+
+    [Fact]
     public void ReplaceableCellNeverProducesChargeSessions()
     {
         // An AA mouse whose readings carry a bogus charge flag: the level

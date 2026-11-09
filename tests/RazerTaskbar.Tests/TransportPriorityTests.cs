@@ -100,6 +100,49 @@ public sealed class TransportPriorityTests
         Assert.Equal(BatteryTransport.Ble, d.Transport);
     }
 
+    // — a reading with no charging flag must not erase a known one, and must
+    //   never be discarded when the device is charging —
+
+    private static HidDeviceReading Wired(int level, bool? charging)
+        => new(ProductId: 0x02CD, ProductName: "Razer Joro", Serial: Serial,
+            LevelRaw: (byte)level, LevelPercent: level, IsCharging: charging,
+            Transport: BatteryTransport.Wired);
+
+    [Fact]
+    public void BleReadingKeepsTheUsbChargingFlagButStillLandsItsLevel()
+    {
+        // Cable and BT charging at once: GATT carries no charging flag, so the
+        // BLE reading must not clear the flag the USB link just reported — but
+        // its level is this round's live data and must land.
+        var store = new DeviceStore();
+        var hid = new HidWatcher();
+        hid.Commit(store, new List<HidDeviceReading> { Reading(BatteryTransport.Receiver, 61, true) }, "");
+        hid.Commit(store, new List<HidDeviceReading> { Reading(BatteryTransport.Ble, 72, null) }, "");
+
+        var d = store.Snapshot()[Serial];
+        Assert.Equal(72, d.BatteryPercentage);
+        Assert.True(d.IsCharging);
+        Assert.Equal(BatteryTransport.Ble, d.Transport);
+    }
+
+    [Fact]
+    public void ChargedDeviceThatDropsItsFlagStillRecordsItsLevel()
+    {
+        // Live 2026-10-08 01:21, Razer Joro cabled: the firmware drops the 0x84
+        // charge flag the moment it goes full, one reading before the level
+        // byte latches 255 (=100%). The reading is the device's answer — its
+        // level must be recorded, not swallowed because the store still said
+        // charging (that lost the charge's last stretch in battery.db).
+        var store = new DeviceStore();
+        var hid = new HidWatcher();
+        hid.Commit(store, new List<HidDeviceReading> { Wired(70, true) }, "");
+        hid.Commit(store, new List<HidDeviceReading> { Wired(80, false) }, "");
+
+        var d = store.Snapshot()[Serial];
+        Assert.Equal(80, d.BatteryPercentage);
+        Assert.False(d.IsCharging);
+    }
+
     // — a failed acquisition re-runs the chain once, per device —
 
     [Fact]

@@ -91,6 +91,15 @@ Joro 机身开关切到线缆模式后枚举为独立 USB 复合设备 **PID 0x0
   键盘槽实时上涨（247→255，拔线回落 249 = 真实满格非占位值），但 **dongle 键盘槽
   0x07/0x84 恒 0 不报告充电**——dongle+坞充的充电图标只能靠 Synapse 心跳
   （`chargingStatus="Charging"` 正常出现）。
+- **充满那一刻电量字节直接跳满（真机 battery.db 复盘 2026-10-08 01:21）**：有线 20%→100%
+  的整段充电里，raw 每 ~2 分钟加 2~3（1%/行），70%（raw 178）在 69→70 那步之后**原值保持
+  10 分钟不变**，然后下一轮读数直接是 255 = 100%（`--hid-probe` 现在仍读到 raw=255、
+  `0x84`=0：「满电停充、由 USB 供电」的既有语义），中间 71~99 **设备从未上报**。所以
+  battery.db 里"充电后半段跳一格"先是设备行为（不是采样丢行）：判据是那 10 分钟里每一轮
+  HID 读都在 `WrittenThisRound` 里（否则 `PollHidWithRetry` 会在第一轮记
+  "no answer this round"，实测只有 01:21:01 那一条，即 flag 回落的那一轮）。滚动到
+  100% 的首个读数会被 `SpikeFilter` 的 60s 确认窗扣住再提交（行对 01:21:08/01:22:11，
+  间隔 63s = 宽限期），属设计行为。
 - Joro 蓝牙模式见下节。
 
 ## 蓝牙（BLE）模式（2026-09-07 真机实测，Razer Joro）
@@ -426,6 +435,15 @@ byte ~30 之后恒为零；data_size 最大的几条（0x00/0x82 串号 0x16、0
   后到的蓝牙读数被丢。胜出链路记在 `RazerDevice.Transport`（`BatteryTransport`：Wired/Receiver/
   Ble/Log），并随设备行持久化到 battery.db 的 `devices.source` 列（旧库由 `EnsureTables` 自动
   `ALTER TABLE` 补列，旧行读回按 `Log`），`HistoryService.SavedTransport(handle)` 读回。
+- **充电位不被无位读数抹掉、但读数不整条丢（2026-10-08 修复）**：`Commit` 里"保留知道充电
+  的那条"守卫原先是 `continue`——只要 store 里 `IsCharging=true` 而本条读数为 false/null，就把
+  **整条读数**（含电量）丢掉。它要守的只是充电位（GATT/BLE 无充电位），结果成了丢样本：Joro
+  厂商通道在**充满那一刻**把 0x84 清零（`WiredDevicePids` 已记），dongle 键盘槽则**恒不报充电**，
+  两种状态都出现在充电过程中——于是充电后半段的电量行整个消失（battery.db 只剩 70→100 的跳跃），
+  且该轮句柄不在 `WrittenThisRound` 里，`PollHidWithRetry` 还会误报一条
+  "no answer this round … re-running the source chain"（真机 2026-10-08 01:21:01，跳变前一秒）。
+  现在只回填充电位（`merged with { IsCharging = true }`），电量/连接照常落库；**显式**的 false
+  是设备自己的回答，不再被改写（否则拔线后充电图标与电量都会冻住）。
 - **日志层按设备兜底（2026-09-21）**：HID 轮结束后日志源只补"本轮没被直接读到的设备"
   （`ParseOnce` → `AnyUncovered` → `ParseLog(cfg, covered)`，`covered` = `HidWatcher.WrittenThisRound`）。
   被直接读到的设备整段跳过（`ApplyV4Batch`/`ParseV3` 的 covered 判定）：既不会被更旧的快照覆盖，
@@ -447,6 +465,8 @@ byte ~30 之后恒为零；data_size 最大的几条（0x00/0x82 串号 0x16、0
 PID 表、HID→RazerDevice 映射与 `IsSelected` 盖章。协议解析改动必须同步此文件。
 `tests/RazerTaskbar.Tests/TransportPriorityTests.cs`：链路分层（线缆=接收器 > 蓝牙 > 日志）、
 `UsbTransport` 的线缆/接收器判定、`Commit` 的单轮仲裁（两种到达顺序都必须 USB 胜）、
+无充电位的蓝牙读数不得抹掉 USB 报过的充电位（`BleReadingKeepsTheUsbChargingFlagButStillLandsItsLevel`）
+且充电设备的读数不得因充电位回退而整条被丢（`ChargedDeviceThatDropsItsFlagStillRecordsItsLevel`）、
 按设备的日志兜底（`ApplyV4Batch` 的 covered：直接读到的设备既不被覆盖也不被判离线，没读到的
 那台仍由日志补齐）、`AcquisitionFailed` 的按设备重跑判定，以及 `devices.source` 的持久化与
 旧库补列。

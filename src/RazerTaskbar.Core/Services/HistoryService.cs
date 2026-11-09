@@ -71,8 +71,21 @@ public static class HistoryService
     public const long GapBreakSecs = 30 * 60;
 
     /// <summary>A level rise of at least this many points while discharging is
-    /// a battery swap, not data noise.</summary>
-    private const int SwapJumpPct = 30;
+    /// a battery swap, not data noise. Calibrated against the field DB: an AA
+    /// cell swapped at 51% read 76% right after (rise 25, 2026-10-02 00:58 —
+    /// silently missed by the old threshold of 30), while a gauge that
+    /// re-anchored after a power cycle moved 41→53 (rise 12, 2026-09-15
+    /// 09:19 — must NOT split the cycle). 20 sits five points under the real
+    /// swap and eight over the artifact; anything smaller that still looks
+    /// like a jump is caught by <see cref="SwapSticks"/> plus the ±1-point
+    /// reporting wobbles reported at 2026-09-14 10:14 / 2026-09-15 09:45.
+    /// The history chart draws its swap dots off this same constant.</summary>
+    public const int SwapJumpPct = 20;
+
+    /// <summary>Confirmation window for <see cref="SwapSticks"/>: one
+    /// heartbeat, long enough for a stale reading to fall back, short enough
+    /// that a weak cell's post-swap sag is unlikely to void a real swap.</summary>
+    private const long SwapConfirmSecs = 15 * 60;
 
     /// <summary>EWMA half-life for cycle weights: a cycle's weight halves
     /// every 30 days of age. Scale rationale (small Li-ion/LiPo cells in
@@ -1005,6 +1018,56 @@ public static class HistoryService
     /// An open run at the end is kept (a real, still-growing observation).
     /// Level movement is accumulated per counted interval (connected + short
     /// gap) rather than taken from the endpoints.</summary>
+    /// <summary>Does the level rise at <paramref name="jumpIdx"/> pass the
+    /// swap test? It must reach <see cref="SwapJumpPct"/> while discharging,
+    /// not fall straight back below the pre-jump level, and — the part the
+    /// chart and the cycle list must agree on — it must STICK: a real swap
+    /// moves once and stays, so a level that returns to within
+    /// <see cref="SpikeFilter.TolerancePct"/> of the pre-jump level inside
+    /// <see cref="SwapConfirmSecs"/> was a reporting artifact (stale
+    /// reconnect reading, gauge re-read). That is the rule SpikeFilter
+    /// applies at write time and CommittedGlitchTs at startup; the read path
+    /// has to judge the survivors the same way.
+    /// <paramref name="prevLevel"/> is the level the rise is measured from:
+    /// the run's last counted sample in <see cref="ComputeSpans"/>, the
+    /// preceding sample in the chart.</summary>
+    public static bool IsSwapJump(IReadOnlyList<Sample> samples, int jumpIdx, int prevLevel)
+    {
+        if (jumpIdx < 0 || jumpIdx >= samples.Count)
+        {
+            return false;
+        }
+        var s = samples[jumpIdx];
+        if (s.Charging || s.Level - prevLevel < SwapJumpPct)
+        {
+            return false;
+        }
+        if (jumpIdx + 1 < samples.Count && samples[jumpIdx + 1].Level < prevLevel)
+        {
+            return false; // fell straight back: the old one-step glitch shape
+        }
+        return SwapSticks(samples, jumpIdx, prevLevel);
+    }
+
+    /// <summary>Persistence half of <see cref="IsSwapJump"/>: true while no
+    /// sample inside <see cref="SwapConfirmSecs"/> has come back to within
+    /// <see cref="SpikeFilter.TolerancePct"/> of the pre-jump level.</summary>
+    public static bool SwapSticks(IReadOnlyList<Sample> samples, int jumpIdx, int preLevel)
+    {
+        for (int i = jumpIdx + 1; i < samples.Count; i++)
+        {
+            if (samples[i].Ts - samples[jumpIdx].Ts > SwapConfirmSecs)
+            {
+                return true; // window expired with the level still away: real
+            }
+            if (Math.Abs(samples[i].Level - preLevel) <= SpikeFilter.TolerancePct)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// <summary>Fold reporting flickers into the run they interrupt: a short
     /// disconnected stretch bounded by connected samples on both sides is an
     /// enumeration hiccup, not a power-off — the field DB holds ~470 bounded
@@ -1065,12 +1128,13 @@ public static class HistoryService
                 var prev = samples[open.Last];
                 long gap = s.Ts - prev.Ts;
                 int rise = s.Level - prev.Level;
-                // Battery swap: a big jump up while discharging. If the very
-                // next sample drops back below the pre-jump level, the jump
-                // was a reporting glitch — skip this sample instead.
-                bool jump = !s.Charging && rise >= SwapJumpPct;
-                bool glitch = jump && i + 1 < samples.Count && samples[i + 1].Level < prev.Level;
-                if (glitch)
+                // Battery swap: a jump up while discharging, big enough to be
+                // a cell change and durable enough not to be a reporting
+                // artifact (IsSwapJump). A candidate that fails confirmation
+                // was a glitch — skip this sample, the run continues as if
+                // the bogus reading never arrived.
+                bool jump = IsSwapJump(samples, i, prev.Level);
+                if (!jump && !s.Charging && rise >= SwapJumpPct)
                 {
                     continue;
                 }

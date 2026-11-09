@@ -93,9 +93,6 @@ public sealed partial class SettingsPage : Page
             DescLang.Text = I18n.Tr("UI language. Auto follows the Windows UI language.");
             LblAutostart.Text = I18n.Tr("Run at startup");
             DescAutostart.Text = I18n.Tr("Register HKCU\\...\\Run\\RazerTaskbar.");
-            // Toggle on/off captions: the framework defaults follow the OS
-            // resource language (Chinese "开/关" on a zh Windows), not the
-            // app language — set them explicitly.
             var onLabel = I18n.Tr("On");
             var offLabel = I18n.Tr("Off");
             foreach (var s in new[] { SwitchAutostart, SwitchWidget, SwitchEmbedWidgets,
