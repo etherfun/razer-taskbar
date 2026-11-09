@@ -2,6 +2,11 @@
 //! primary; the tray icon keeps the app usable when the hook is occluded.
 //! Right-clicking opens the same menu as the widget, double-clicking opens
 //! the battery history window — both via the WM_TRAY callback.
+//!
+//! C# extension (no Rust equivalent): `tray_display_mode` styles the icon as
+//! either the original battery glyph or the percentage as digits. The style is
+//! part of both the Refresh dedupe signature and the HICON cache key, so a
+//! Settings toggle repaints on the next tick instead of keeping the old icon.
 
 using System.Runtime.InteropServices;
 using RazerTaskbar.Core;
@@ -18,27 +23,61 @@ public static class TrayIcon
     public const uint TrayUid = 1;
     public const uint WmTray = WM_APP + 1;
 
+    /// <summary>Digit face of the numeric style. Segoe UI ships with Windows
+    /// 10/11 and has real semibold digits; CreateFontW silently substitutes a
+    /// missing face, which at tray sizes stays legible either way.</summary>
+    private const string NumberFontFace = "Segoe UI";
+
     private static IntPtr _hwnd;
-    /// <summary>Last displayed (tooltip, battery state): refresh() runs every
-    /// second and a NIM_MODIFY is only worth doing when something changed.</summary>
-    private static (string Tip, (int Level, bool Charging)? State)? _last;
+
+    /// <summary>Last displayed (tooltip, render key): refresh() runs every
+    /// second and a NIM_MODIFY is only worth doing when something changed.
+    /// The key carries the display style as well, otherwise switching
+    /// icon/number would dedupe away the repaint.</summary>
+    private static (string Tip, IconKey Key)? _last;
+
     /// <summary>Per-state HICON cache. The tooltip carries a minute-resolution
     /// countdown, so Refresh() swaps the icon about every minute — building a
     /// fresh HICON per swap leaked ~1400 handles a day (each two DIBs). The
-    /// cache bounds it to one icon per (level, charging) pair; entries stay
-    /// alive while shown and are all destroyed in Destroy().</summary>
-    private static readonly Dictionary<(int Level, bool Charging), IntPtr> Icons = new();
+    /// cache bounds it to one icon per rendering state (style + level +
+    /// state flags); the key space is fixed, entries stay alive while shown
+    /// and are all destroyed in Destroy().</summary>
+    private static readonly Dictionary<IconKey, IntPtr> Icons = new();
+
+    /// <summary>Everything the rendered pixels depend on. The style is part of
+    /// it: the same battery level is a different image in number mode.</summary>
+    private readonly record struct IconKey(
+        TrayDisplayMode Mode, int Level, bool Charging, bool Connected, bool Saver);
+
+    /// <summary>Cache/dedupe key of a render state. Icon mode draws from
+    /// (level, charging) only, so its flags are normalized to keep that half
+    /// of the cache exactly as small as it was before number mode existed;
+    /// number mode tints by the full state (connected/saver/charging).</summary>
+    private static IconKey KeyFor(TrayDisplayMode mode, TrayIconState? state) => state is { } s
+        ? mode == TrayDisplayMode.Number
+            ? new IconKey(mode, s.Level, s.Charging, s.Connected, s.Saver)
+            : new IconKey(mode, s.Level, s.Charging, true, false)
+        : new IconKey(mode, -1, false, false, false);
 
     /// <summary>Cached icon for a display state; 0 on GDI failure (not cached,
     /// retried next refresh).</summary>
-    private static IntPtr CachedIcon((int Level, bool Charging)? state)
+    private static IntPtr CachedIcon(TrayDisplayMode mode, TrayIconState? state)
     {
-        var key = state is { } s ? (s.Level, s.Charging) : (-1, false);
-        if (!Icons.TryGetValue(key, out var icon) && (icon = BuildIcon(state)) != 0)
+        var key = KeyFor(mode, state);
+        if (!Icons.TryGetValue(key, out var icon) && (icon = BuildIcon(mode, state)) != 0)
         {
             Icons[key] = icon;
         }
         return icon;
+    }
+
+    /// <summary>Tray icon dimensions: SM_CXSMICON (DPI-scaled for a
+    /// PerMonitorV2 process), with the historical 16px as a fallback when the
+    /// metric is unavailable.</summary>
+    private static int IconSize()
+    {
+        int size = GetSystemMetrics(SM_CXSMICON);
+        return size is >= 8 and <= 256 ? size : 16;
     }
 
     /// <summary>Create the tray icon (idempotent). `hwnd` receives WM_TRAY.
@@ -50,6 +89,7 @@ public static class TrayIcon
         // Fresh registration: reset the dedup so the trailing refresh()
         // really re-applies icon + tooltip on the (new) taskbar.
         _last = null;
+        var mode = TrayDisplay.Parse(AppState.Instance.ConfigSnapshot().TrayDisplayMode);
         var nid = new NOTIFYICONDATAW
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
@@ -58,7 +98,7 @@ public static class TrayIcon
             uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON,
             uCallbackMessage = WmTray,
             szTip = "Razer Taskbar",
-            hIcon = CachedIcon(null),
+            hIcon = CachedIcon(mode, null),
         };
         Shell_NotifyIconW(NIM_ADD, ref nid);
         // Deliberately NOT NOTIFYICON_VERSION_4: v4 suppresses the standard
@@ -76,10 +116,12 @@ public static class TrayIcon
         {
             return;
         }
+        var cfg = AppState.Instance.ConfigSnapshot();
+        var mode = TrayDisplay.Parse(cfg.TrayDisplayMode);
         string tip;
-        (int Level, bool Charging)? state;
+        TrayIconState? state;
         var device = DisplayModeResolver.Pick(
-            AppState.Instance.Devices.Snapshot(), AppState.Instance.ConfigSnapshot(),
+            AppState.Instance.Devices.Snapshot(), cfg,
             AppState.Instance.ModeState, Environment.TickCount64);
         if (device is { } d)
         {
@@ -90,14 +132,15 @@ public static class TrayIcon
             {
                 tip += $" · {HistoryService.FormatEstimateVerbose(e)}";
             }
-            state = (d.BatteryPercentage, d.IsCharging);
+            state = new TrayIconState(d.BatteryPercentage, d.IsCharging, d.IsConnected, d.BatterySaver);
         }
         else
         {
             tip = I18n.Tr("No devices found");
             state = null;
         }
-        if (_last == (tip, state))
+        var key = KeyFor(mode, state);
+        if (_last is { } last && last.Tip == tip && last.Key == key)
         {
             return;
         }
@@ -108,10 +151,10 @@ public static class TrayIcon
             uID = TrayUid,
             uFlags = NIF_TIP | NIF_ICON,
             szTip = tip,
-            hIcon = CachedIcon(state),
+            hIcon = CachedIcon(mode, state),
         };
         Shell_NotifyIconW(NIM_MODIFY, ref nid);
-        _last = (tip, state);
+        _last = (tip, key);
     }
 
     public static void Destroy()
@@ -157,28 +200,39 @@ public static class TrayIcon
         }
     }
 
-    /// <summary>16x16 tray icon (32bpp, per-pixel alpha): battery outline +
-    /// level fill + charging bolt, drawn at 2x and downsampled for smooth
-    /// edges. Alpha comes from drawn-pixel coverage. Returns 0 on GDI
-    /// failure (handle exhaustion): the caller's NIM_ADD/NIM_MODIFY then
-    /// degrades to an icon-less registration, same silent-failure rule as
-    /// the other DIB sites (WidgetWindow/HoverPanel/D2d scanner).
-    /// A nonzero result is owned by the <see cref="Icons"/> cache (the shell
-    /// copies the image at NIM_ADD/NIM_MODIFY time) and lives until
-    /// Destroy().</summary>
-    private static IntPtr BuildIcon((int Level, bool Charging)? state)
+    /// <summary>Build the HICON for a display state. A nonzero result is owned
+    /// by the <see cref="Icons"/> cache (the shell copies the image at
+    /// NIM_ADD/NIM_MODIFY time) and lives until Destroy(); 0 on GDI failure
+    /// (handle exhaustion): the caller's NIM_ADD/NIM_MODIFY then degrades to an
+    /// icon-less registration, same silent-failure rule as the other DIB sites
+    /// (WidgetWindow/HoverPanel/D2d scanner).</summary>
+    private static IntPtr BuildIcon(TrayDisplayMode mode, TrayIconState? state)
     {
-        const int src = 32; // 2x supersample of the 16x16 target
+        int size = IconSize();
+        return RenderPixels(mode, state, size) is { } pixels ? CreateIconFromPixels(pixels, size) : 0;
+    }
+
+    /// <summary>Compose straight-alpha ARGB pixels (0xAARRGGBB) of the tray
+    /// icon at `size`x`size`. Drawn at 2x and downsampled for smooth edges.
+    /// Also used by the `--tray-preview` probe (which renders fixed sizes for
+    /// the style/size matrix). Returns null on GDI failure.</summary>
+    internal static uint[]? RenderPixels(TrayDisplayMode mode, TrayIconState? state, int size)
+    {
+        if (size is < 8 or > 256)
+        {
+            return null;
+        }
+        int src = size * 2; // 2x supersample of the target
         var hdc = GetDC(0);
         if (hdc == 0)
         {
-            return 0;
+            return null;
         }
         var mem = CreateCompatibleDC(hdc);
         if (mem == 0)
         {
             ReleaseDC(0, hdc);
-            return 0;
+            return null;
         }
         var bmi = new BITMAPINFO
         {
@@ -197,7 +251,7 @@ public static class TrayIcon
         {
             DeleteDC(mem);
             ReleaseDC(0, hdc);
-            return 0;
+            return null;
         }
         var oldBmp = SelectObject(mem, hbmp);
         unsafe
@@ -205,25 +259,78 @@ public static class TrayIcon
             new Span<byte>((void*)bits, src * src * 4).Clear();
         }
 
-        var (level, charging) = state ?? (0, false);
-        var fr = state is { } s ? BatteryColors.ColorFor(s.Level) : new RgbColor(0x80, 0x80, 0x80);
+        uint[] output;
+        if (mode == TrayDisplayMode.Number)
+        {
+            DrawDigits(mem, state, src);
+            // Number mode always colorizes: charging / saver / disconnected
+            // keep their shared state colors, plain discharge gets the
+            // green→red level palette (a numeric icon is a colored number).
+            var color = state is { } s
+                ? BatteryColors.LevelFillColor(s.Level, s.Connected, s.Saver, s.Charging, colorize: true)
+                : new RgbColor(0x80, 0x80, 0x80);
+            unsafe
+            {
+                output = DownsampleDigits((uint*)bits, src, size, color);
+            }
+        }
+        else
+        {
+            DrawGlyph(mem, state, src);
+            unsafe
+            {
+                output = DownsampleGlyph((uint*)bits, src, size);
+            }
+        }
 
-        static int S(int v) => v * 2;
+        // GDI refuses DeleteObject while an object is still selected into a
+        // DC (the handle silently leaks): restore the bitmap before deleting.
+        SelectObject(mem, oldBmp);
+        DeleteObject(hbmp);
+        DeleteDC(mem);
+        ReleaseDC(0, hdc);
+        return output;
+    }
+
+    /// <summary>`--tray-preview` self-check: the full HICON construction path
+    /// (DIB → CreateIconIndirect), which the pixel sheet does not exercise.
+    /// A successful build is owned by the caller (destroy it with DestroyIcon).</summary>
+    internal static bool TryBuildIcon(TrayDisplayMode mode, TrayIconState? state, int size, out IntPtr icon)
+    {
+        icon = RenderPixels(mode, state, size) is { } pixels ? CreateIconFromPixels(pixels, size) : 0;
+        return icon != 0;
+    }
+
+    /// <summary>16x16 logical battery outline + level fill + charging bolt,
+    /// scaled to the supersample buffer (the historical 16px geometry maps
+    /// 1:1 at size 16 and scales with the DPI metric otherwise).</summary>
+    private static void DrawGlyph(IntPtr mem, TrayIconState? state, int src)
+    {
+        static int S(int v, int src) => v * src / 16;
+        var (level, charging) = state is { } s ? (s.Level, s.Charging) : (0, false);
+        var fr = state is { } d ? BatteryColors.ColorFor(d.Level) : new RgbColor(0x80, 0x80, 0x80);
+
         var white = CreateSolidBrush(0x00FF_FFFF);
         var fill = CreateSolidBrush(ColorRef(fr.R, fr.G, fr.B));
-        var pen = CreatePen(PS_SOLID, 2, 0x00FF_FFFF);
+        var pen = CreatePen(PS_SOLID, Math.Max(1, src / 16), 0x00FF_FFFF);
         var oldPen = SelectObject(mem, pen);
         SelectObject(mem, GetStockObject(NULL_BRUSH));
-        // Outline: 1,3 - 12,12; cap at 13,6 - 14,9.
-        RoundRect(mem, S(1), S(3), S(12), S(12), 4, 4);
+        // Outline: 1,3 - 12,12; cap at 13,6 - 15,10.
+        RoundRect(mem, S(1, src), S(3, src), S(12, src), S(12, src), S(2, src), S(2, src));
         var oldBrush = SelectObject(mem, white);
-        Rectangle(mem, S(13), S(6), S(15), S(10));
+        Rectangle(mem, S(13, src), S(6, src), S(15, src), S(10, src));
         if (state is not null)
         {
             int fw = 9 * level / 100;
             if (fw > 0)
             {
-                var rc = new RECT { Left = S(2), Top = S(4), Right = S(2 + fw), Bottom = S(11) };
+                var rc = new RECT
+                {
+                    Left = S(2, src),
+                    Top = S(4, src),
+                    Right = S(2 + fw, src),
+                    Bottom = S(11, src),
+                };
                 FillRect(mem, ref rc, fill);
             }
             if (charging)
@@ -232,106 +339,234 @@ public static class TrayIcon
                 var oldBolt = SelectObject(mem, bolt);
                 POINT[] pts =
                 [
-                    new(S(7), S(3)),
-                    new(S(4), S(8)),
-                    new(S(6), S(8)),
-                    new(S(5), S(12)),
-                    new(S(8), S(7)),
-                    new(S(6), S(7)),
+                    new(S(7, src), S(3, src)),
+                    new(S(4, src), S(8, src)),
+                    new(S(6, src), S(8, src)),
+                    new(S(5, src), S(12, src)),
+                    new(S(8, src), S(7, src)),
+                    new(S(6, src), S(7, src)),
                 ];
                 Polygon(mem, pts);
                 SelectObject(mem, oldBolt);
                 DeleteObject(bolt);
             }
         }
-        // GDI refuses DeleteObject while an object is still selected into a
-        // DC (the handle silently leaks): restore every slot — bitmap, pen,
-        // brush — before the deletes.
-        SelectObject(mem, oldBmp);
         SelectObject(mem, oldPen);
         SelectObject(mem, oldBrush);
         DeleteObject(pen);
         DeleteObject(white);
         DeleteObject(fill);
+    }
 
-        // Downsample 2x2 -> 16x16 straight-alpha pixels: alpha = drawn-pixel
-        // coverage, color = average of drawn colors.
-        var output = new uint[256];
-        unsafe
+    /// <summary>Percentage digits (or "--") centered in the supersample
+    /// buffer, drawn WHITE: the downsample turns text intensity into alpha and
+    /// tints it with the state color, so antialiased edges become real alpha
+    /// instead of a dark color fringe. The face/height auto-fits the box:
+    /// measured with DT_CALCRECT, then shrunk one pixel at a time until "100"
+    /// fits both dimensions — never truncated.</summary>
+    private static void DrawDigits(IntPtr mem, TrayIconState? state, int src)
+    {
+        var chars = TrayDisplay.DisplayText(state?.Level).ToCharArray();
+        if (chars.Length == 0)
         {
-            var srcPtr = (uint*)bits;
-            for (int y = 0; y < 16; y++)
+            return;
+        }
+        // 1 logical px (2 supersample px) of breathing room on every side.
+        int margin = Math.Max(2, src / 16);
+        int maxW = src - margin * 2;
+        int maxH = src - margin * 2;
+        if (maxW < 4 || maxH < 4)
+        {
+            return;
+        }
+
+        SetBkMode(mem, TRANSPARENT);
+        SetTextColor(mem, 0x00FF_FFFF);
+
+        // One measurement at 2/3 of the box is enough to estimate the fitted
+        // height (text metrics are near-linear in the font height), keeping
+        // the shrink loop to a couple of iterations instead of maxH.
+        int startH = maxH;
+        if (Measure(chars, mem, src, maxH, Math.Max(4, maxH * 2 / 3)) is { Width: > 0, Height: > 0 } probe)
+        {
+            int byWidth = probe.FontHeight * maxW / probe.Width;
+            int byHeight = probe.FontHeight * maxH / probe.Height;
+            startH = Math.Clamp(Math.Min(byWidth, byHeight), 4, maxH);
+        }
+        for (int fontH = startH; fontH >= 4; fontH--)
+        {
+            if (Measure(chars, mem, src, maxH, fontH) is not { } m)
             {
-                for (int x = 0; x < 16; x++)
+                return; // font creation failed: leave the icon empty
+            }
+            if (m.Width > maxW || m.Height > maxH)
+            {
+                continue;
+            }
+            DrawCentered(chars, mem, src, fontH, m.Height);
+            return;
+        }
+        // Even 4px did not measure inside the box (only possible for sizes far
+        // below SM_CXSMICON): draw the smallest attempt rather than nothing.
+        DrawCentered(chars, mem, src, 4, maxH);
+    }
+
+    private readonly record struct TextMetrics(int FontHeight, int Width, int Height);
+
+    /// <summary>Measure `chars` at `fontHeight`: DT_CALCRECT for the width and
+    /// text metrics for the line height (DT_CALCRECT's single-line height is
+    /// not reliable enough for the centering rect). Null when GDI cannot
+    /// create the font.</summary>
+    private static TextMetrics? Measure(char[] chars, IntPtr mem, int src, int maxH, int fontHeight)
+    {
+        var font = CreateFontW(fontHeight, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, NumberFontFace);
+        if (font == 0)
+        {
+            return null;
+        }
+        var old = SelectObject(mem, font);
+        var rc = new RECT { Left = 0, Top = 0, Right = src * 4, Bottom = maxH };
+        DrawTextW(mem, chars, chars.Length, ref rc, DT_CALCRECT | DT_SINGLELINE);
+        int height = GetTextMetricsW(mem, out var tm) ? tm.tmHeight : maxH;
+        SelectObject(mem, old);
+        DeleteObject(font);
+        return new TextMetrics(fontHeight, rc.Right, height);
+    }
+
+    private static void DrawCentered(char[] chars, IntPtr mem, int src, int fontHeight, int textHeight)
+    {
+        var font = CreateFontW(fontHeight, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, NumberFontFace);
+        if (font == 0)
+        {
+            return;
+        }
+        var old = SelectObject(mem, font);
+        int top = (src - textHeight) / 2;
+        var rc = new RECT { Left = 0, Top = top, Right = src, Bottom = top + textHeight };
+        DrawTextW(mem, chars, chars.Length, ref rc, DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOCLIP);
+        SelectObject(mem, old);
+        DeleteObject(font);
+    }
+
+    /// <summary>2x2 → size downsample of the glyph path: alpha = drawn-pixel
+    /// coverage, color = average of drawn colors (the legacy formula).</summary>
+    private static unsafe uint[] DownsampleGlyph(uint* srcPtr, int src, int size)
+    {
+        var output = new uint[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                uint r = 0, g = 0, b = 0, n = 0;
+                for (int dy = 0; dy < 2; dy++)
                 {
-                    uint r = 0, g = 0, b = 0, n = 0;
-                    for (int dy = 0; dy < 2; dy++)
+                    for (int dx = 0; dx < 2; dx++)
                     {
-                        for (int dx = 0; dx < 2; dx++)
+                        uint v = srcPtr[((y * 2 + dy) * src) + (x * 2 + dx)];
+                        if ((v & 0x00FF_FFFF) != 0)
                         {
-                            uint v = srcPtr[((y * 2 + dy) * 32) + (x * 2 + dx)];
-                            if ((v & 0x00FF_FFFF) != 0)
-                            {
-                                r += v & 0xFF;
-                                g += (v >> 8) & 0xFF;
-                                b += (v >> 16) & 0xFF;
-                                n += 1;
-                            }
+                            r += v & 0xFF;
+                            g += (v >> 8) & 0xFF;
+                            b += (v >> 16) & 0xFF;
+                            n += 1;
                         }
                     }
-                    if (n > 0)
-                    {
-                        output[(y * 16) + x] = ((n * 255 / 4) << 24) | ((b / n) << 16) | ((g / n) << 8) | (r / n);
-                    }
+                }
+                if (n > 0)
+                {
+                    output[(y * size) + x] = ((n * 255 / 4) << 24) | ((b / n) << 16) | ((g / n) << 8) | (r / n);
                 }
             }
         }
-        DeleteObject(hbmp);
-        DeleteDC(mem);
+        return output;
+    }
 
-        // 16x16 32bpp color bitmap with the computed alpha. hdc is still
-        // live here: the template DC must not be released before this
-        // CreateCompatibleDC (the old code released it two lines early and
-        // only GDI handle-reuse luck kept the icon rendering).
-        var outBmi = new BITMAPINFO
+    /// <summary>2x2 → size downsample of the digit path: white text intensity
+    /// is the coverage (alpha), the color is the state color — this keeps
+    /// antialiased glyph edges as real alpha instead of averaging them into a
+    /// darker tint.</summary>
+    private static unsafe uint[] DownsampleDigits(uint* srcPtr, int src, int size, RgbColor color)
+    {
+        // Output pixels are copied into a 32bpp DIB verbatim: byte order in
+        // memory is B,G,R,A, so the uint is 0xAARRGGBB.
+        uint rgb = ((uint)color.R << 16) | ((uint)color.G << 8) | color.B;
+        var output = new uint[size * size];
+        for (int y = 0; y < size; y++)
+        {
+            for (int x = 0; x < size; x++)
+            {
+                uint coverage = 0;
+                for (int dy = 0; dy < 2; dy++)
+                {
+                    for (int dx = 0; dx < 2; dx++)
+                    {
+                        coverage += srcPtr[((y * 2 + dy) * src) + (x * 2 + dx)] & 0xFF;
+                    }
+                }
+                uint alpha = (coverage + 2) / 4;
+                if (alpha > 0)
+                {
+                    output[(y * size) + x] = (alpha << 24) | rgb;
+                }
+            }
+        }
+        return output;
+    }
+
+    /// <summary>Wrap the straight-alpha pixels in an HICON (32bpp color bitmap
+    /// + all-zero mask: with any nonzero alpha byte the system composites
+    /// per-pixel alpha and ignores the mask).</summary>
+    private static IntPtr CreateIconFromPixels(uint[] pixels, int size)
+    {
+        // The template DC must stay live until after the last
+        // CreateCompatibleDC — releasing it early relied on GDI handle reuse
+        // luck in the old code.
+        var hdc = GetDC(0);
+        if (hdc == 0)
+        {
+            return 0;
+        }
+        var mem = CreateCompatibleDC(hdc);
+        if (mem == 0)
+        {
+            ReleaseDC(0, hdc);
+            return 0;
+        }
+        var bmi = new BITMAPINFO
         {
             bmiHeader = new BITMAPINFOHEADER
             {
                 biSize = (uint)Marshal.SizeOf<BITMAPINFOHEADER>(),
-                biWidth = 16,
-                biHeight = -16,
+                biWidth = size,
+                biHeight = -size,
                 biPlanes = 1,
                 biBitCount = 32,
                 biCompression = BI_RGB,
             },
         };
-        var mem2 = CreateCompatibleDC(hdc);
-        if (mem2 == 0)
+        var bmp = CreateDIBSection(mem, ref bmi, DIB_RGB_COLORS, out var bits, 0, 0);
+        if (bmp == 0 || bits == 0)
         {
-            ReleaseDC(0, hdc);
-            return 0;
-        }
-        var outBmp = CreateDIBSection(mem2, ref outBmi, DIB_RGB_COLORS, out var outBits, 0, 0);
-        if (outBmp == 0 || outBits == 0)
-        {
-            DeleteDC(mem2);
+            DeleteDC(mem);
             ReleaseDC(0, hdc);
             return 0;
         }
         unsafe
         {
-            output.AsSpan().CopyTo(new Span<uint>((void*)outBits, 256));
+            pixels.AsSpan().CopyTo(new Span<uint>((void*)bits, size * size));
         }
-
-        // Mask all-zero (= opaque): with any nonzero alpha byte the system
-        // composites per-pixel alpha and ignores the mask.
-        var maskBits = new byte[32];
-        var mask = CreateBitmap(16, 16, 1, 1, maskBits);
-        var ii = new ICONINFO { fIcon = 1, hbmMask = mask, hbmColor = outBmp };
+        // Monochrome rows are WORD-aligned; zeros = no transparency bits.
+        int maskStride = ((size + 15) / 16) * 2;
+        var mask = CreateBitmap(size, size, 1, 1, new byte[maskStride * size]);
+        var ii = new ICONINFO { fIcon = 1, hbmMask = mask, hbmColor = bmp };
         var icon = mask != 0 ? CreateIconIndirect(ref ii) : 0;
         DeleteObject(mask);
-        DeleteObject(outBmp);
-        DeleteDC(mem2);
+        DeleteObject(bmp);
+        DeleteDC(mem);
         ReleaseDC(0, hdc);
         return icon;
     }

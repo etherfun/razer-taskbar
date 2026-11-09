@@ -187,6 +187,7 @@ public static class ConfigExt
         WindowOffsetTop = c.WindowOffsetTop,
         ShowWidget = c.ShowWidget,
         ShowTrayIcon = c.ShowTrayIcon,
+        TrayDisplayMode = c.TrayDisplayMode,
         HoverDevices = c.HoverDevices,
         RecordBatteryHistory = c.RecordBatteryHistory,
         ShowEstimatedTime = c.ShowEstimatedTime,

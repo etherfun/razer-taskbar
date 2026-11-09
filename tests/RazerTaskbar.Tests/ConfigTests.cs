@@ -33,6 +33,7 @@ public sealed class ConfigTests
             Assert.True(cfg.RecordBatteryHistory);
             Assert.True(cfg.ShowEstimatedTime);
             Assert.False(cfg.ColorBatteryIcon);
+            Assert.Equal("icon", cfg.TrayDisplayMode);
         }
         finally
         {
@@ -58,6 +59,7 @@ public sealed class ConfigTests
                 ColorBatteryIcon = true,
                 HistoryPollIntervalSecs = 7,
                 Language = "zh",
+                TrayDisplayMode = "number",
             };
             ConfigService.Save(cfg);
             Assert.True(File.Exists(ConfigService.ConfigPath));
@@ -74,6 +76,7 @@ public sealed class ConfigTests
             Assert.True(loaded.ColorBatteryIcon);
             Assert.Equal(7ul, loaded.HistoryPollIntervalSecs);
             Assert.Equal("zh", loaded.Language);
+            Assert.Equal("number", loaded.TrayDisplayMode);
         }
         finally
         {
@@ -113,6 +116,34 @@ public sealed class ConfigTests
                 BatteryType.Replaceable,
                 BatteryTypes.Parse(loaded.DeviceBatteryTypes["HID:1532:0094"]));
             Assert.False(loaded.DeviceBatteryTypes.ContainsKey("SI-1"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("APPDATA", old);
+            try { Directory.Delete(scratch, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public void TrayDisplayModeDefaultsToIconAndNormalizesUnknownSpellings()
+    {
+        var scratch = WithScratchAppData(out var old);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigService.ConfigPath)!);
+            // Old settings.json without the key keeps the battery glyph.
+            File.WriteAllText(ConfigService.ConfigPath, "{\"polling_throttle_secs\": 9}");
+            Assert.Equal("icon", ConfigService.Load().TrayDisplayMode);
+
+            // A hand-edited spelling is accepted tolerantly and canonicalized.
+            File.WriteAllText(ConfigService.ConfigPath, "{\"tray_display_mode\": \" Number \"}");
+            Assert.Equal("number", ConfigService.Load().TrayDisplayMode);
+
+            // Null and unknown values fall back to the glyph (old configs, typos).
+            File.WriteAllText(ConfigService.ConfigPath, "{\"tray_display_mode\": null}");
+            Assert.Equal("icon", ConfigService.Load().TrayDisplayMode);
+            File.WriteAllText(ConfigService.ConfigPath, "{\"tray_display_mode\": \"数字\"}");
+            Assert.Equal("icon", ConfigService.Load().TrayDisplayMode);
         }
         finally
         {

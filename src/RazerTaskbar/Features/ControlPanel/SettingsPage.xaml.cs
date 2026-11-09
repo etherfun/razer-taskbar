@@ -81,6 +81,8 @@ public sealed partial class SettingsPage : Page
             DescFade.Text = I18n.Tr("Cross-fade the widget when the displayed device changes.");
             LblTray.Text = I18n.Tr("Show tray icon");
             DescTray.Text = I18n.Tr("Notification-area icon with tooltip and menu.");
+            LblTrayStyle.Text = I18n.Tr("Tray icon style");
+            DescTrayStyle.Text = I18n.Tr("Show the battery percentage as a number instead of the battery glyph.");
             LblHover.Text = I18n.Tr("Show devices on hover");
             DescHover.Text = I18n.Tr("Hover the widget to list every known device.");
             LblPoll.Text = I18n.Tr("Poll interval");
@@ -106,6 +108,10 @@ public sealed partial class SettingsPage : Page
             var sideIdx = ComboSide.SelectedIndex;
             ComboSide.ItemsSource = new List<string> { I18n.Tr("Left"), I18n.Tr("Right") };
             ComboSide.SelectedIndex = sideIdx >= 0 ? sideIdx : 1;
+            // Tray icon style: battery glyph (default) or percentage digits.
+            ComboTrayStyle.ItemsSource = new List<string> { I18n.Tr("Icon"), I18n.Tr("Number") };
+            ComboTrayStyle.SelectedIndex =
+                TrayDisplay.Parse(cfg.TrayDisplayMode) == TrayDisplayMode.Number ? 1 : 0;
             // Accessibility: screen readers announce the row label per control.
             AutomationProperties.SetName(ComboDevice, LblShownDevice.Text);
             AutomationProperties.SetName(ComboDisplayMode, LblDisplayMode.Text);
@@ -119,6 +125,7 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(SwitchColor, LblColor.Text);
             AutomationProperties.SetName(SwitchFade, LblFade.Text);
             AutomationProperties.SetName(SwitchTray, LblTray.Text);
+            AutomationProperties.SetName(ComboTrayStyle, LblTrayStyle.Text);
             AutomationProperties.SetName(SwitchHover, LblHover.Text);
             AutomationProperties.SetName(ComboPoll, LblPoll.Text);
             AutomationProperties.SetName(SwitchRec, LblRec.Text);
@@ -379,6 +386,20 @@ public sealed partial class SettingsPage : Page
         bool on = SwitchTray.IsOn;
         AppState.PostModifyConfig(c => c.ShowTrayIcon = on);
         AppState.PostTraySetEnabled(on);
+    }
+
+    /// <summary>`tray_display_mode` toggle. The tray's Refresh dedupe signature
+    /// and HICON cache key both carry the mode, so this repaints the icon on
+    /// the next tick instead of leaving the old style on screen.</summary>
+    private void ComboTrayStyle_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress || ComboTrayStyle.SelectedIndex < 0)
+        {
+            return;
+        }
+        var mode = ComboTrayStyle.SelectedIndex == 1 ? TrayDisplayMode.Number : TrayDisplayMode.Icon;
+        AppState.PostModifyConfig(c => c.TrayDisplayMode = mode.ToConfig());
+        AppState.PostTrayRefresh();
     }
 
     private void SwitchHover_Toggled(object sender, RoutedEventArgs e)

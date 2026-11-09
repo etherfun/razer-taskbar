@@ -87,6 +87,10 @@ public static class Win32Consts
     // Monitor
     public const uint MONITOR_DEFAULTTONEAREST = 2;
 
+    // System metrics (GetSystemMetrics)
+    public const int SM_CXSMICON = 49;
+    public const int SM_CYSMICON = 50;
+
     // GDI
     public const int PS_SOLID = 0;
     public const uint BLACKNESS = 0x42;
@@ -99,6 +103,7 @@ public static class Win32Consts
 
     // DrawText flags
     public const uint DT_LEFT = 0;
+    public const uint DT_CENTER = 1;
     public const uint DT_RIGHT = 2;
     public const uint DT_VCENTER = 4;
     public const uint DT_SINGLELINE = 0x20;
@@ -406,6 +411,11 @@ public static class User32
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hwnd);
 
+    /// <summary>System metric, DPI-scaled for a PerMonitorV2 process (the tray
+    /// icon size: SM_CXSMICON).</summary>
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     public static extern IntPtr LoadCursorW(IntPtr hInstance, IntPtr lpCursorName);
 
@@ -565,4 +575,12 @@ public static class Shell32
 {
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool Shell_NotifyIconW(uint dwMessage, ref NOTIFYICONDATAW lpData);
+}
+
+public static class Kernel32
+{
+    /// <summary>Attach the (windowed) process to the launching console so the
+    /// diagnostic probes can echo their output there (0xFFFFFFFF = parent).</summary>
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AttachConsole(uint dwProcessId);
 }

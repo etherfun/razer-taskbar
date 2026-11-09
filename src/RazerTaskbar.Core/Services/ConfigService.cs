@@ -81,6 +81,13 @@ public sealed class Config
     [JsonPropertyName("show_tray_icon")]
     public bool ShowTrayIcon { get; set; } = true;
 
+    /// <summary>Notification-area icon style: "icon" (battery glyph, the
+    /// original look and still the default) | "number" (battery percentage as
+    /// digits). Unknown spellings read back as "icon" so a hand-edited file
+    /// cannot shadow the real setting.</summary>
+    [JsonPropertyName("tray_display_mode")]
+    public string TrayDisplayMode { get; set; } = TrayDisplay.IconValue;
+
     /// <summary>Hover popover on the widget listing every device.</summary>
     [JsonPropertyName("hover_devices")]
     public bool HoverDevices { get; set; } = true;
@@ -199,6 +206,10 @@ public static class ConfigService
             cfg.WidgetSide = "right";
             cfg.EmbedIntoWidgetsSpace = true;
         }
+        // Canonicalize the tray icon style the same way: Parse is tolerant, so
+        // any unknown/missing value already renders as the glyph, but persisting
+        // the canonical spelling keeps the file self-describing.
+        cfg.TrayDisplayMode = TrayDisplay.Parse(cfg.TrayDisplayMode).ToConfig();
         // A hand-edited `"device_battery_types": null` must not null-ref the
         // per-device lookups (the initializer only covers a missing key).
         cfg.DeviceBatteryTypes ??= new Dictionary<string, string>();

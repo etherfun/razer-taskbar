@@ -59,6 +59,11 @@ public static class AppHost
         {
             return BleVendorProbe.Run(args);
         }
+        // Tray icon style sheet (both modes x 1x/2x/4x) for visual review.
+        if (args.Contains("--tray-preview"))
+        {
+            return TrayPreview.Run();
+        }
 
         // Single instance (port of find_existing_instance): the overlay is a
         // findable top-level window; embedded children need the enum fallback.

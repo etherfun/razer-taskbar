@@ -140,6 +140,8 @@ public static class I18n
         ["Fade transition"] = "切换过渡动画",
         ["Cross-fade the widget when the displayed device changes."] = "显示设备变化时，挂件画面淡入淡出过渡。",
         ["Notification-area icon with tooltip and menu."] = "带提示与菜单的通知区图标。",
+        ["Tray icon style"] = "托盘图标样式",
+        ["Show the battery percentage as a number instead of the battery glyph."] = "托盘图标显示电量数字，替代电池图标。",
         ["Hover the widget to list every known device."] = "悬停挂件列出所有已知设备。",
         ["Display refresh cadence (seconds) when there is no log activity."] = "无日志活动时的显示刷新间隔(秒)。",
         ["Sample battery.db and predict usage time."] = "采样 battery.db 并预测可用时长。",
@@ -176,6 +178,9 @@ public static class I18n
         ["Right"] = "右侧",
         ["On"] = "开",
         ["Off"] = "关",
+        // Tray icon style (settings page)
+        ["Icon"] = "图标",
+        ["Number"] = "数字",
     };
 
     private static string Translate(string s) => ZhMap.TryGetValue(s, out var zh) ? zh : s;

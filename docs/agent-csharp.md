@@ -46,7 +46,7 @@ Rust 版的全量 C# 实现(本分支唯一实现,不再是实验):挂件/托盘
 | window.rs | Features/Widget/WidgetFeature.cs → Native/WidgetWindow.cs | 类名/样式/colorkey/PaintSig 去重/墨迹居中/定时器 1,2,3,4,5/z-burst/菜单 ID 全保留;C# 扩展(无 Rust 对应):设备切换交叉淡化(fade_transition,预乘帧 CPU 插值,TimerFade 16ms/300ms smoothstep,仅 overlay ULW 路径,embed colorkey 无动画)、show_widget 门控(2026-09-09:`SetWidgetEnabled` 只销毁/重建显示窗口,锚窗口/定时器/UIA/托盘常驻,`TrayHostHwnd()` 在挂件关闭时让锚窗口承载托盘回调,`PlaceWidgetCore` 对 !WidgetOn 短路防 1s 轮询/UIA 复活窗口) |
 | taskbar.rs | Native/TaskbarLocator.cs | Win11 判定、右锚 notify.left−w+2、WidgetsButton UIA 30s 缓存、TaskbarDa 门控、embed 模式 |
 | hover.rs | Native/HoverPanel.cs | 120ms 轮询 + 350ms dwell、黑 key 圆角面板 |
-| tray.rs | Native/TrayIcon.cs | legacy 回调(2026-09-09 移除 VERSION_4:V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,与 WM_TRAY 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘右键/双击一并失效)、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON |
+| tray.rs | Native/TrayIcon.cs | legacy 回调(2026-09-09 移除 VERSION_4:V4 抑制标准 szTip tooltip 需 NIF_SHOWTIP,且回调改派 WM_CONTEXTMENU/NIN_SELECT,与 WM_TRAY 分发的 WM_RBUTTONUP/WM_LBUTTONDBLCLK 永不匹配——tooltip 与托盘右键/双击一并失效)、每秒 NIM_MODIFY 去重、32×32 DIB 2x 软采样 16×16 HICON;C# 扩展(无 Rust 对应):`tray_display_mode` 数字模式(GDI CreateFontW/DrawTextW 画电量数字,DT_CALCRECT 量宽 + 逐像素缩字号保证 "100" 不被截断,白色覆盖率在 2x2 软采样后转 alpha 再染 `BatteryColors.LevelFillColor` 状态色,无设备灰色 "--";尺寸取 SM_CXSMICON 回退 16;模式进 Refresh 去重签名与 HICON 缓存键,设置切换即时重绘),`--tray-preview` 探针渲染两模式 × 16/32/64px × 深/浅底预览图 |
 | icons.rs | Native/DeviceIcons.cs | 字形常量 + D2d 墨迹宽度 + ICON_SIZES 吸附(码点在 Core 共享给 FontIcon) |
 | (新增) | Native/D2d.cs | 共享 D2D/DWrite 上下文：工厂/字体回退探测/格式缓存/墨迹扫描(渲染像素为准) |
 | uia_events.rs | Native/UiaEvents.cs + Interop/Uia.cs | 手写 COM interop,IID/vtable 对齐官方 Win32 元数据(与 windows 0.58 crate 同源) |

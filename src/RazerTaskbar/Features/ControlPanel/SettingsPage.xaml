@@ -205,6 +205,19 @@
                         <ToggleSwitch x:Name="SwitchTray" Grid.Column="1" VerticalAlignment="Center"
                                       Toggled="SwitchTray_Toggled" />
                     </Grid>
+                    <!-- Tray icon style (glyph vs percentage digits) -->
+                    <Grid Style="{StaticResource SettingRowStyle}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="2">
+                            <TextBlock x:Name="LblTrayStyle" Style="{StaticResource SettingTitleStyle}" />
+                            <TextBlock x:Name="DescTrayStyle" Style="{StaticResource SettingDescStyle}" />
+                        </StackPanel>
+                        <ComboBox x:Name="ComboTrayStyle" Grid.Column="1" Width="140" VerticalAlignment="Center"
+                                  SelectionChanged="ComboTrayStyle_SelectionChanged" />
+                    </Grid>
                     <!-- Hover devices -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>
