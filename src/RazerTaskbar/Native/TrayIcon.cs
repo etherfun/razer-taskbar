@@ -7,6 +7,14 @@
 //! either the original battery glyph or the percentage as digits. The style is
 //! part of both the Refresh dedupe signature and the HICON cache key, so a
 //! Settings toggle repaints on the next tick instead of keeping the old icon.
+//!
+//! Multi-tray (`tray_device_handles`): an empty selection keeps the single
+//! legacy icon (uID 1, device from DisplayModeResolver.Pick — byte-identical to
+//! the pre-multi behaviour). A non-empty selection registers one icon per
+//! checked device on the SAME host HWND, each with its own stable uID and its
+//! own dedupe signature; the shell delivers every click through the same
+//! WM_TRAY callback (wParam = uID, lParam = mouse event) that the widget
+//! dispatch keeps ignoring in favour of the event.
 
 using System.Runtime.InteropServices;
 using RazerTaskbar.Core;
@@ -34,11 +42,37 @@ public static class TrayIcon
 
     private static IntPtr _hwnd;
 
-    /// <summary>Last displayed (tooltip, render key): refresh() runs every
-    /// second and a NIM_MODIFY is only worth doing when something changed.
-    /// The key carries the display style as well, otherwise switching
+    /// <summary>Last displayed legacy (tooltip, render key): refresh() runs
+    /// every second and a NIM_MODIFY is only worth doing when something
+    /// changed. The key carries the display style as well, otherwise switching
     /// icon/number would dedupe away the repaint.</summary>
     private static (string Tip, IconKey Key)? _last;
+
+    /// <summary>True while the legacy single icon (uID = <see cref="TrayUid"/>)
+    /// is registered. An empty `tray_device_handles` selection uses it; a
+    /// non-empty selection replaces it with one icon per device.</summary>
+    private static bool _legacyAdded;
+
+    /// <summary>One registered per-device icon (uID ≥ <see cref="TrayUid"/>+1,
+    /// same host window and WM_TRAY callback as the legacy icon). `Last` is
+    /// that icon's own dedupe signature; `Uid` never changes for a handle
+    /// during the process lifetime.</summary>
+    private sealed class DeviceSlot
+    {
+        public uint Uid;
+        public (string Tip, IconKey Key)? Last;
+    }
+
+    /// <summary>Active per-device icons keyed by device handle.</summary>
+    private static readonly Dictionary<string, DeviceSlot> DeviceSlots = new();
+
+    /// <summary>handle → notification-area uID. Allocated on first use and kept
+    /// for the process lifetime so editing the selection never renumbers the
+    /// other icons (a renumbered icon means NIM_DELETE + NIM_ADD on the shell,
+    /// i.e. a visible flicker). <see cref="TrayUid"/> stays reserved for the
+    /// legacy icon; the map is bounded by the number of known devices.</summary>
+    private static readonly Dictionary<string, uint> UidByHandle = new();
+    private static uint _nextDeviceUid = TrayUid + 1;
 
     /// <summary>Per-state HICON cache. The tooltip carries a minute-resolution
     /// countdown, so Refresh() swaps the icon about every minute — building a
@@ -101,27 +135,47 @@ public static class TrayIcon
         return size is >= 8 and <= 256 ? size : 16;
     }
 
-    /// <summary>Create the tray icon (idempotent). `hwnd` receives WM_TRAY.
-    /// Also the re-add path after an explorer restart: NIM_ADD with the same
-    /// hWnd/uID replaces the registration, never duplicates it.</summary>
+    private static NOTIFYICONDATAW Nid(uint uid, uint flags) => new()
+    {
+        cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
+        hWnd = _hwnd,
+        uID = uid,
+        uFlags = flags,
+    };
+
+    /// <summary>Tooltip of one device, shared by the legacy pick and every
+    /// per-device icon. The estimate is only queried for a connected device
+    /// (an offline/recorded row has no live discharge anchor).</summary>
+    private static string TooltipOf(RazerDevice device)
+    {
+        string? estimate = null;
+        if (device.IsConnected && HistoryService.EstimateFor(device.Handle) is { } e)
+        {
+            estimate = HistoryService.FormatEstimateVerbose(e);
+        }
+        return TraySelection.Tooltip(device, estimate);
+    }
+
+    private static TrayIconState StateOf(RazerDevice device)
+        => new(device.BatteryPercentage, device.IsCharging, device.IsConnected, device.BatterySaver);
+
+    /// <summary>Create the tray icon(s) (idempotent). `hwnd` receives WM_TRAY.
+    /// Also the re-add path after an explorer restart: the shell dropped every
+    /// registration, so the bookkeeping is reset and Refresh re-adds the whole
+    /// current set — the legacy icon or every per-device icon.</summary>
     public static void EnsureCreated(IntPtr hwnd)
     {
-        _hwnd = hwnd;
-        // Fresh registration: reset the dedup so the trailing refresh()
-        // really re-applies icon + tooltip on the (new) taskbar.
-        _last = null;
-        var mode = TrayDisplay.Parse(AppState.Instance.ConfigSnapshot().TrayDisplayMode);
-        var nid = new NOTIFYICONDATAW
+        if (_hwnd != 0)
         {
-            cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
-            hWnd = hwnd,
-            uID = TrayUid,
-            uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON,
-            uCallbackMessage = WmTray,
-            szTip = "Razer Taskbar",
-            hIcon = CachedIcon(mode, null),
-        };
-        Shell_NotifyIconW(NIM_ADD, ref nid);
+            // The previous host may be gone (widget recreate) or the shell may
+            // have restarted: delete what we still track, then re-register on
+            // the new host. A no-op when the shell already forgot them.
+            DeleteTrackedIcons(_hwnd);
+        }
+        _hwnd = hwnd;
+        _last = null;
+        _legacyAdded = false;
+        DeviceSlots.Clear();
         // Deliberately NOT NOTIFYICON_VERSION_4: v4 suppresses the standard
         // szTip tooltip (unless NIF_SHOWTIP is also set) and delivers
         // WM_CONTEXTMENU/NIN_SELECT instead of the mouse messages the WM_TRAY
@@ -130,7 +184,10 @@ public static class TrayIcon
         Refresh();
     }
 
-    /// <summary>Rebuild icon + tooltip from the current device state (deduped).</summary>
+    /// <summary>Reconcile the registered icon(s) with the current selection and
+    /// device state (deduped per icon). Runs on the 1s tick, so a selection or
+    /// config edit applies without a restart; Settings also calls it directly
+    /// so a checkbox change is immediate.</summary>
     public static void Refresh()
     {
         if (_hwnd == 0)
@@ -139,25 +196,39 @@ public static class TrayIcon
         }
         var cfg = AppState.Instance.ConfigSnapshot();
         var mode = TrayDisplay.Parse(cfg.TrayDisplayMode);
+        var devices = AppState.Instance.Devices.Snapshot();
+        var selected = TraySelection.Resolve(cfg.TrayDeviceHandles, devices);
+        if (selected.Count == 0)
+        {
+            // Empty selection (or every configured handle unknown) = the
+            // legacy single icon, unchanged.
+            RemoveAllDeviceIcons();
+            RefreshLegacy(cfg, mode, devices);
+            return;
+        }
+        RemoveLegacyIcon();
+        var wanted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var device in selected)
+        {
+            wanted.Add(device.Handle);
+            RefreshDeviceIcon(device, mode);
+        }
+        RemoveStaleDeviceIcons(wanted);
+    }
+
+    /// <summary>Legacy single icon: the DisplayModeResolver pick (or the
+    /// no-device tooltip), exactly as before multi-tray existed.</summary>
+    private static void RefreshLegacy(
+        Config cfg, TrayDisplayMode mode, IReadOnlyDictionary<string, RazerDevice> devices)
+    {
+        var device = DisplayModeResolver.Pick(
+            devices, cfg, AppState.Instance.ModeState, Environment.TickCount64);
         string tip;
         TrayIconState? state;
-        var device = DisplayModeResolver.Pick(
-            AppState.Instance.Devices.Snapshot(), cfg,
-            AppState.Instance.ModeState, Environment.TickCount64);
         if (device is { } d)
         {
-            // `keep_recorded_devices` can hand us a recorded device that is not
-            // online: keep its last reading but mark it offline — and no usage
-            // estimate (predictions need a live discharge anchor).
-            var charging = d.IsCharging && d.IsConnected ? $" {I18n.Tr("(charging)")}" : "";
-            var offline = d.IsConnected ? "" : $" {I18n.Tr("offline")}";
-            tip = $"{d.Name}: {d.BatteryPercentage}%{charging}{offline}";
-            // Predicted usage time / time-to-full from history.
-            if (d.IsConnected && HistoryService.EstimateFor(d.Handle) is { } e)
-            {
-                tip += $" · {HistoryService.FormatEstimateVerbose(e)}";
-            }
-            state = new TrayIconState(d.BatteryPercentage, d.IsCharging, d.IsConnected, d.BatterySaver);
+            tip = TooltipOf(d);
+            state = StateOf(d);
         }
         else
         {
@@ -165,21 +236,154 @@ public static class TrayIcon
             state = null;
         }
         var key = KeyFor(mode, state);
-        if (_last is { } last && last.Tip == tip && last.Key == key)
+        if (_legacyAdded && _last is { } last && last.Tip == tip && last.Key == key)
+        {
+            return;
+        }
+        var nid = Nid(TrayUid, NIF_TIP | NIF_ICON);
+        nid.szTip = tip;
+        nid.hIcon = CachedIcon(mode, state);
+        if (_legacyAdded)
+        {
+            Shell_NotifyIconW(NIM_MODIFY, ref nid);
+            _last = (tip, key);
+            return;
+        }
+        nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
+        nid.uCallbackMessage = WmTray;
+        if (Shell_NotifyIconW(NIM_ADD, ref nid))
+        {
+            _legacyAdded = true;
+            _last = (tip, key);
+        }
+    }
+
+    /// <summary>One per-device icon: NIM_ADD on first sight, NIM_MODIFY only
+    /// when that icon's own (tip, render key) changed.</summary>
+    private static void RefreshDeviceIcon(RazerDevice device, TrayDisplayMode mode)
+    {
+        var tip = TooltipOf(device);
+        var state = StateOf(device);
+        var key = KeyFor(mode, state);
+        if (DeviceSlots.TryGetValue(device.Handle, out var slot))
+        {
+            if (slot.Last is { } last && last.Tip == tip && last.Key == key)
+            {
+                return;
+            }
+            var nid = Nid(slot.Uid, NIF_TIP | NIF_ICON);
+            nid.szTip = tip;
+            nid.hIcon = CachedIcon(mode, state);
+            Shell_NotifyIconW(NIM_MODIFY, ref nid);
+            slot.Last = (tip, key);
+            return;
+        }
+        var uid = UidFor(device.Handle);
+        var add = Nid(uid, NIF_MESSAGE | NIF_TIP | NIF_ICON);
+        add.uCallbackMessage = WmTray;
+        add.szTip = tip;
+        add.hIcon = CachedIcon(mode, state);
+        if (!Shell_NotifyIconW(NIM_ADD, ref add))
+        {
+            return; // not tracked, so the next tick retries the add
+        }
+        DeviceSlots[device.Handle] = new DeviceSlot { Uid = uid, Last = (tip, key) };
+    }
+
+    /// <summary>Stable per-handle uID (see <see cref="UidByHandle"/>).</summary>
+    private static uint UidFor(string handle)
+    {
+        if (!UidByHandle.TryGetValue(handle, out var uid))
+        {
+            uid = _nextDeviceUid++;
+            UidByHandle[handle] = uid;
+        }
+        return uid;
+    }
+
+    private static void RemoveLegacyIcon()
+    {
+        if (!_legacyAdded)
+        {
+            return;
+        }
+        DeleteIcon(TrayUid, _hwnd);
+        _legacyAdded = false;
+        _last = null;
+    }
+
+    private static void RemoveDeviceIcon(string handle)
+    {
+        if (!DeviceSlots.Remove(handle, out var slot))
+        {
+            return;
+        }
+        DeleteIcon(slot.Uid, _hwnd);
+    }
+
+    /// <summary>NIM_DELETE the icons whose device left the selection (the
+    /// handle keeps its uID mapping, so re-selecting it later comes back on
+    /// the same slot).</summary>
+    private static void RemoveStaleDeviceIcons(HashSet<string> wanted)
+    {
+        List<string>? stale = null;
+        foreach (var handle in DeviceSlots.Keys)
+        {
+            if (!wanted.Contains(handle))
+            {
+                (stale ??= new List<string>()).Add(handle);
+            }
+        }
+        if (stale is null)
+        {
+            return;
+        }
+        foreach (var handle in stale)
+        {
+            RemoveDeviceIcon(handle);
+        }
+    }
+
+    private static void RemoveAllDeviceIcons()
+    {
+        if (DeviceSlots.Count == 0)
+        {
+            return;
+        }
+        foreach (var handle in DeviceSlots.Keys.ToList())
+        {
+            RemoveDeviceIcon(handle);
+        }
+    }
+
+    private static void DeleteIcon(uint uid, IntPtr host)
+    {
+        if (host == 0)
         {
             return;
         }
         var nid = new NOTIFYICONDATAW
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
-            hWnd = _hwnd,
-            uID = TrayUid,
-            uFlags = NIF_TIP | NIF_ICON,
-            szTip = tip,
-            hIcon = CachedIcon(mode, state),
+            hWnd = host,
+            uID = uid,
         };
-        Shell_NotifyIconW(NIM_MODIFY, ref nid);
-        _last = (tip, key);
+        Shell_NotifyIconW(NIM_DELETE, ref nid);
+    }
+
+    /// <summary>NIM_DELETE every registration on `host` (pre-recreate cleanup;
+    /// harmless when the shell already dropped them on an explorer restart).</summary>
+    private static void DeleteTrackedIcons(IntPtr host)
+    {
+        if (_legacyAdded)
+        {
+            DeleteIcon(TrayUid, host);
+            _legacyAdded = false;
+        }
+        foreach (var slot in DeviceSlots.Values)
+        {
+            DeleteIcon(slot.Uid, host);
+        }
     }
 
     public static void Destroy()
@@ -188,15 +392,11 @@ public static class TrayIcon
         {
             return;
         }
-        var nid = new NOTIFYICONDATAW
-        {
-            cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATAW>(),
-            hWnd = _hwnd,
-            uID = TrayUid,
-        };
-        Shell_NotifyIconW(NIM_DELETE, ref nid);
+        DeleteTrackedIcons(_hwnd);
+        DeviceSlots.Clear();
         _hwnd = 0;
         _last = null;
+        _legacyAdded = false;
         foreach (var icon in Icons.Values)
         {
             DestroyIcon(icon);
@@ -204,7 +404,7 @@ public static class TrayIcon
         Icons.Clear();
     }
 
-    /// <summary>Settings-page toggle: create or remove the icon.</summary>
+    /// <summary>Settings-page toggle: create or remove the icon(s).</summary>
     public static void SetEnabled(bool enabled)
     {
         if (enabled)

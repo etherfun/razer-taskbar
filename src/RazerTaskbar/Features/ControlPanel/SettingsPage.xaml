@@ -218,6 +218,16 @@
                         <ComboBox x:Name="ComboTrayStyle" Grid.Column="1" Width="140" VerticalAlignment="Center"
                                   SelectionChanged="ComboTrayStyle_SelectionChanged" />
                     </Grid>
+                    <!-- Tray devices: one notification-area icon per checked
+                         device (multi-tray). Roster is a snapshot rebuilt on
+                         open/language switch and after every toggle. -->
+                    <Expander x:Name="ExpTrayDevices" HorizontalAlignment="Stretch"
+                              HorizontalContentAlignment="Stretch" Margin="0,4,0,6">
+                        <StackPanel Spacing="4">
+                            <TextBlock x:Name="DescTrayDevices" Style="{StaticResource SettingDescStyle}" />
+                            <StackPanel x:Name="TrayDeviceList" Spacing="2" />
+                        </StackPanel>
+                    </Expander>
                     <!-- Hover devices -->
                     <Grid Style="{StaticResource SettingRowStyle}">
                         <Grid.ColumnDefinitions>

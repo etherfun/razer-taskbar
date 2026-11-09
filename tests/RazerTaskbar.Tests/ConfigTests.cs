@@ -37,6 +37,8 @@ public sealed class ConfigTests
             // Requested out-of-the-box behaviour: old settings.json without the
             // key keeps recorded devices visible.
             Assert.True(cfg.KeepRecordedDevices);
+            // No per-device tray icons until the user checks some.
+            Assert.Empty(cfg.TrayDeviceHandles);
         }
         finally
         {
@@ -63,6 +65,7 @@ public sealed class ConfigTests
                 HistoryPollIntervalSecs = 7,
                 Language = "zh",
                 TrayDisplayMode = "number",
+                TrayDeviceHandles = new List<string> { "SI-123", "BLE:CF4F" },
                 KeepRecordedDevices = false,
             };
             ConfigService.Save(cfg);
@@ -81,6 +84,7 @@ public sealed class ConfigTests
             Assert.Equal(7ul, loaded.HistoryPollIntervalSecs);
             Assert.Equal("zh", loaded.Language);
             Assert.Equal("number", loaded.TrayDisplayMode);
+            Assert.Equal(new[] { "SI-123", "BLE:CF4F" }, loaded.TrayDeviceHandles);
             Assert.False(loaded.KeepRecordedDevices);
         }
         finally
@@ -149,6 +153,33 @@ public sealed class ConfigTests
             Assert.Equal("icon", ConfigService.Load().TrayDisplayMode);
             File.WriteAllText(ConfigService.ConfigPath, "{\"tray_display_mode\": \"数字\"}");
             Assert.Equal("icon", ConfigService.Load().TrayDisplayMode);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("APPDATA", old);
+            try { Directory.Delete(scratch, true); } catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public void TrayDeviceHandlesDefaultEmptyAndNormalize()
+    {
+        var scratch = WithScratchAppData(out var old);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigService.ConfigPath)!);
+            // Old settings.json without the key = no per-device tray icons.
+            File.WriteAllText(ConfigService.ConfigPath, "{\"polling_throttle_secs\": 9}");
+            Assert.Empty(ConfigService.Load().TrayDeviceHandles);
+
+            // Hand-edited null must not null-ref the resolver.
+            File.WriteAllText(ConfigService.ConfigPath, "{\"tray_device_handles\": null}");
+            Assert.Empty(ConfigService.Load().TrayDeviceHandles);
+
+            // Blank / null / duplicate entries are dropped, order is kept.
+            File.WriteAllText(ConfigService.ConfigPath,
+                "{\"tray_device_handles\": [\"b\", \" a \", \"\", null, \"b\", \"a\"]}");
+            Assert.Equal(new[] { "b", "a" }, ConfigService.Load().TrayDeviceHandles);
         }
         finally
         {

@@ -27,6 +27,11 @@ public sealed partial class SettingsPage : Page
     /// during init/refresh (Win32 had none because BM_SETCHECK doesn't fire).</summary>
     private bool _suppress;
 
+    /// <summary>Page-local mirror of `tray_device_handles`: lets the checkbox
+    /// list be rebuilt immediately after a click, before the posted config edit
+    /// reaches the widget thread.</summary>
+    private List<string> _traySelection = new();
+
     public SettingsPage()
     {
         InitializeComponent();
@@ -83,6 +88,9 @@ public sealed partial class SettingsPage : Page
             DescTray.Text = I18n.Tr("Notification-area icon with tooltip and menu.");
             LblTrayStyle.Text = I18n.Tr("Tray icon style");
             DescTrayStyle.Text = I18n.Tr("Show the battery percentage as a number instead of the battery glyph.");
+            var trayDevicesTitle = I18n.Tr("Tray devices");
+            ExpTrayDevices.Header = trayDevicesTitle;
+            DescTrayDevices.Text = I18n.Tr("One checked device = one notification-area icon with its own battery. Nothing checked keeps the single icon that follows the widget's device.");
             LblHover.Text = I18n.Tr("Show devices on hover");
             DescHover.Text = I18n.Tr("Hover the widget to list every known device.");
             LblKeepRecorded.Text = I18n.Tr("Keep recorded devices");
@@ -128,6 +136,7 @@ public sealed partial class SettingsPage : Page
             AutomationProperties.SetName(SwitchFade, LblFade.Text);
             AutomationProperties.SetName(SwitchTray, LblTray.Text);
             AutomationProperties.SetName(ComboTrayStyle, LblTrayStyle.Text);
+            AutomationProperties.SetName(ExpTrayDevices, trayDevicesTitle);
             AutomationProperties.SetName(SwitchHover, LblHover.Text);
             AutomationProperties.SetName(SwitchKeepRecorded, LblKeepRecorded.Text);
             AutomationProperties.SetName(ComboPoll, LblPoll.Text);
@@ -213,11 +222,99 @@ public sealed partial class SettingsPage : Page
                 "zh" => 2,
                 _ => 0,
             };
+
+            // Multi-tray device picker (roster snapshot; see the method doc).
+            UpdateTrayDevicesPanel(cfg);
         }
         finally
         {
             _suppress = false;
         }
+    }
+
+    /// <summary>Rebuild the collapsible "Tray devices" list: only meaningful
+    /// with the tray icon on and at least two known devices (one device needs
+    /// no choice). The roster is a snapshot taken here — a device that appears
+    /// later shows up on the next open/language switch. Checked state mirrors
+    /// the config list (and the local mirror after a click).</summary>
+    private void UpdateTrayDevicesPanel(Config cfg)
+    {
+        var devices = AppState.Instance.Devices.Snapshot();
+        bool show = cfg.ShowTrayIcon && devices.Count >= 2;
+        ExpTrayDevices.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        _traySelection = new List<string>(cfg.TrayDeviceHandles);
+        if (!show)
+        {
+            return;
+        }
+        RebuildTrayDeviceList(devices);
+    }
+
+    private void RebuildTrayDeviceList(IReadOnlyDictionary<string, RazerDevice> devices)
+    {
+        TrayDeviceList.Children.Clear();
+        var names = devices.Values.Select(d => d.Name).ToList();
+        var ordered = devices.Values
+            .OrderByDescending(d => d.IsConnected)
+            .ThenBy(d => DeviceLabels.Label(d.Name, d.Handle, names), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        foreach (var device in ordered)
+        {
+            var label = DeviceLabels.Label(device.Name, device.Handle, names);
+            if (!device.IsConnected)
+            {
+                label += $" ({I18n.Tr("offline")})";
+            }
+            var box = new CheckBox
+            {
+                Content = label,
+                IsChecked = _traySelection.Contains(device.Handle),
+                Tag = device.Handle,
+                MinWidth = 0,
+            };
+            box.Checked += TrayDevice_Toggled;
+            box.Unchecked += TrayDevice_Toggled;
+            AutomationProperties.SetName(box, label);
+            TrayDeviceList.Children.Add(box);
+        }
+    }
+
+    /// <summary>One checkbox = one tray icon. Appends the handle in click order
+    /// (removing it first), so the config list order is the click order; the
+    /// tray reconciles on the posted refresh (and on the 1s tick regardless).</summary>
+    private void TrayDevice_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppress || sender is not CheckBox { Tag: string handle } box)
+        {
+            return;
+        }
+        bool on = box.IsChecked == true;
+        AppState.PostModifyConfig(c =>
+        {
+            c.TrayDeviceHandles.RemoveAll(h => h == handle);
+            if (on)
+            {
+                c.TrayDeviceHandles.Add(handle);
+            }
+        });
+        // Mirror locally so the rebuilt list keeps the click visible before
+        // the posted config edit reaches the widget thread.
+        _traySelection.RemoveAll(h => h == handle);
+        if (on)
+        {
+            _traySelection.Add(handle);
+        }
+        var devices = AppState.Instance.Devices.Snapshot();
+        _suppress = true;
+        try
+        {
+            RebuildTrayDeviceList(devices);
+        }
+        finally
+        {
+            _suppress = false;
+        }
+        AppState.PostTrayRefresh();
     }
 
     private void ComboDevice_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -390,6 +487,9 @@ public sealed partial class SettingsPage : Page
         bool on = SwitchTray.IsOn;
         AppState.PostModifyConfig(c => c.ShowTrayIcon = on);
         AppState.PostTraySetEnabled(on);
+        // The multi-tray picker only makes sense while the icons exist.
+        bool multiTray = on && AppState.Instance.Devices.Snapshot().Count >= 2;
+        ExpTrayDevices.Visibility = multiTray ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>`tray_display_mode` toggle. The tray's Refresh dedupe signature

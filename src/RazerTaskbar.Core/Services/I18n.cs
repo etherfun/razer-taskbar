@@ -143,6 +143,8 @@ public static class I18n
         ["Notification-area icon with tooltip and menu."] = "带提示与菜单的通知区图标。",
         ["Tray icon style"] = "托盘图标样式",
         ["Show the battery percentage as a number instead of the battery glyph."] = "托盘图标显示电量数字，替代电池图标。",
+        ["Tray devices"] = "托盘设备",
+        ["One checked device = one notification-area icon with its own battery. Nothing checked keeps the single icon that follows the widget's device."] = "每勾选一台设备就为它单独显示一个托盘图标；全部不勾选则保留跟随挂件显示设备的那一个图标。",
         ["Hover the widget to list every known device."] = "悬停挂件列出所有已知设备。",
         ["Keep recorded devices"] = "保留已记录设备",
         ["Keep showing devices already recorded in the battery history after they go offline, instead of reporting that no devices were found."] = "设备离线后仍显示电量历史中已记录的设备，而不是提示未找到设备。",

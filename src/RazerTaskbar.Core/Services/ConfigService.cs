@@ -88,6 +88,14 @@ public sealed class Config
     [JsonPropertyName("tray_display_mode")]
     public string TrayDisplayMode { get; set; } = TrayDisplay.IconValue;
 
+    /// <summary>Multi-tray: handles of the devices that get their own
+    /// notification-area icon, one icon per entry in this order. Empty (the
+    /// default) keeps the single legacy icon driven by
+    /// <see cref="DisplayModeResolver.Pick"/>. Unknown handles are skipped at
+    /// render time; an all-unknown list falls back to the legacy icon.</summary>
+    [JsonPropertyName("tray_device_handles")]
+    public List<string> TrayDeviceHandles { get; set; } = new();
+
     /// <summary>Hover popover on the widget listing every device.</summary>
     [JsonPropertyName("hover_devices")]
     public bool HoverDevices { get; set; } = true;
@@ -219,6 +227,16 @@ public static class ConfigService
         // any unknown/missing value already renders as the glyph, but persisting
         // the canonical spelling keeps the file self-describing.
         cfg.TrayDisplayMode = TrayDisplay.Parse(cfg.TrayDisplayMode).ToConfig();
+        // `tray_device_handles` is hand-editable: drop null/blank entries and
+        // duplicates (first occurrence wins, order kept) so the tray slots and
+        // the settings checkboxes cannot disagree about the selection.
+        cfg.TrayDeviceHandles ??= new List<string>();
+        var traySeen = new HashSet<string>(StringComparer.Ordinal);
+        cfg.TrayDeviceHandles = cfg.TrayDeviceHandles
+            .Where(handle => !string.IsNullOrWhiteSpace(handle))
+            .Select(handle => handle.Trim())
+            .Where(traySeen.Add)
+            .ToList();
         // A hand-edited `"device_battery_types": null` must not null-ref the
         // per-device lookups (the initializer only covers a missing key).
         cfg.DeviceBatteryTypes ??= new Dictionary<string, string>();
