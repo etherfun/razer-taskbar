@@ -446,6 +446,10 @@ public sealed partial class SettingsPage : Page
         }
         bool on = SwitchColor.IsOn;
         AppState.PostModifyConfig(c => c.ColorBatteryIcon = on);
+        // The tray icon is its own HICON cache keyed on (mode, level, state):
+        // its render reads the same toggle, so push a repaint the same way the
+        // display-mode toggles do (widget repaints itself on the 1s poll).
+        AppState.PostTrayRefresh();
     }
 
     private void SwitchFade_Toggled(object sender, RoutedEventArgs e)

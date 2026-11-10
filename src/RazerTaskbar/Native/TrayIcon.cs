@@ -91,26 +91,29 @@ public static class TrayIcon
     private const int IconsMax = 512;
 
     /// <summary>Everything the rendered pixels depend on. The style is part of
-    /// it: the same battery level is a different image in number mode.</summary>
+    /// it: the same battery level is a different image in number mode, and the
+    /// same level in icon mode is a different image with the level fill colored
+    /// vs the default white — a key without the colorize flag would serve a
+    /// cached white icon to a just-enabled Colored battery icon.</summary>
     private readonly record struct IconKey(
-        TrayDisplayMode Mode, int Level, bool Charging, bool Connected, bool Saver);
+        TrayDisplayMode Mode, int Level, bool Charging, bool Connected, bool Saver, bool Colorize);
 
     /// <summary>Cache/dedupe key of a render state. Icon mode draws from
-    /// (level, charging, connected) — saver is normalized away because the
-    /// glyph has no leaf variant — so its key space stays small; number mode
-    /// tints by the full state (connected/saver/charging).</summary>
-    private static IconKey KeyFor(TrayDisplayMode mode, TrayIconState? state) => state is { } s
+    /// (level, charging, connected) plus the colorize flag — saver is
+    /// normalized away because the glyph has no leaf variant — so its key space
+    /// stays small; number mode tints by the full state (connected/saver/charging).</summary>
+    private static IconKey KeyFor(TrayDisplayMode mode, TrayIconState? state, bool colorize) => state is { } s
         ? mode == TrayDisplayMode.Number
-            ? new IconKey(mode, s.Level, s.Charging, s.Connected, s.Saver)
-            : new IconKey(mode, s.Level, s.Charging, s.Connected, false)
-        : new IconKey(mode, -1, false, false, false);
+            ? new IconKey(mode, s.Level, s.Charging, s.Connected, s.Saver, colorize)
+            : new IconKey(mode, s.Level, s.Charging, s.Connected, false, colorize)
+        : new IconKey(mode, -1, false, false, false, colorize);
 
     /// <summary>Cached icon for a display state; 0 on GDI failure (not cached,
     /// retried next refresh). Hits the <see cref="IconsMax"/> cap by dropping
     /// the whole cache — the key set is fixed, so this cannot thrash.</summary>
-    private static IntPtr CachedIcon(TrayDisplayMode mode, TrayIconState? state)
+    private static IntPtr CachedIcon(TrayDisplayMode mode, TrayIconState? state, bool colorize)
     {
-        var key = KeyFor(mode, state);
+        var key = KeyFor(mode, state, colorize);
         if (!Icons.TryGetValue(key, out var icon) && (icon = BuildIcon(mode, state)) != 0)
         {
             if (Icons.Count >= IconsMax)
@@ -196,6 +199,7 @@ public static class TrayIcon
         }
         var cfg = AppState.Instance.ConfigSnapshot();
         var mode = TrayDisplay.Parse(cfg.TrayDisplayMode);
+        var colorize = cfg.ColorBatteryIcon;
         var devices = AppState.Instance.Devices.Snapshot();
         var selected = TraySelection.Resolve(cfg.TrayDeviceHandles, devices);
         if (selected.Count == 0)
@@ -203,7 +207,7 @@ public static class TrayIcon
             // Empty selection (or every configured handle unknown) = the
             // legacy single icon, unchanged.
             RemoveAllDeviceIcons();
-            RefreshLegacy(cfg, mode, devices);
+            RefreshLegacy(cfg, mode, devices, colorize);
             return;
         }
         RemoveLegacyIcon();
@@ -211,7 +215,7 @@ public static class TrayIcon
         foreach (var device in selected)
         {
             wanted.Add(device.Handle);
-            RefreshDeviceIcon(device, mode);
+            RefreshDeviceIcon(device, mode, colorize);
         }
         RemoveStaleDeviceIcons(wanted);
     }
@@ -219,7 +223,7 @@ public static class TrayIcon
     /// <summary>Legacy single icon: the DisplayModeResolver pick (or the
     /// no-device tooltip), exactly as before multi-tray existed.</summary>
     private static void RefreshLegacy(
-        Config cfg, TrayDisplayMode mode, IReadOnlyDictionary<string, RazerDevice> devices)
+        Config cfg, TrayDisplayMode mode, IReadOnlyDictionary<string, RazerDevice> devices, bool colorize)
     {
         var device = DisplayModeResolver.Pick(
             devices, cfg, AppState.Instance.ModeState, Environment.TickCount64);
@@ -235,14 +239,14 @@ public static class TrayIcon
             tip = I18n.Tr("No devices found");
             state = null;
         }
-        var key = KeyFor(mode, state);
+        var key = KeyFor(mode, state, colorize);
         if (_legacyAdded && _last is { } last && last.Tip == tip && last.Key == key)
         {
             return;
         }
         var nid = Nid(TrayUid, NIF_TIP | NIF_ICON);
         nid.szTip = tip;
-        nid.hIcon = CachedIcon(mode, state);
+        nid.hIcon = CachedIcon(mode, state, colorize);
         if (_legacyAdded)
         {
             Shell_NotifyIconW(NIM_MODIFY, ref nid);
@@ -260,11 +264,11 @@ public static class TrayIcon
 
     /// <summary>One per-device icon: NIM_ADD on first sight, NIM_MODIFY only
     /// when that icon's own (tip, render key) changed.</summary>
-    private static void RefreshDeviceIcon(RazerDevice device, TrayDisplayMode mode)
+    private static void RefreshDeviceIcon(RazerDevice device, TrayDisplayMode mode, bool colorize)
     {
         var tip = TooltipOf(device);
         var state = StateOf(device);
-        var key = KeyFor(mode, state);
+        var key = KeyFor(mode, state, colorize);
         if (DeviceSlots.TryGetValue(device.Handle, out var slot))
         {
             if (slot.Last is { } last && last.Tip == tip && last.Key == key)
@@ -273,7 +277,7 @@ public static class TrayIcon
             }
             var nid = Nid(slot.Uid, NIF_TIP | NIF_ICON);
             nid.szTip = tip;
-            nid.hIcon = CachedIcon(mode, state);
+            nid.hIcon = CachedIcon(mode, state, colorize);
             Shell_NotifyIconW(NIM_MODIFY, ref nid);
             slot.Last = (tip, key);
             return;
@@ -282,7 +286,7 @@ public static class TrayIcon
         var add = Nid(uid, NIF_MESSAGE | NIF_TIP | NIF_ICON);
         add.uCallbackMessage = WmTray;
         add.szTip = tip;
-        add.hIcon = CachedIcon(mode, state);
+        add.hIcon = CachedIcon(mode, state, colorize);
         if (!Shell_NotifyIconW(NIM_ADD, ref add))
         {
             return; // not tracked, so the next tick retries the add
@@ -434,14 +438,18 @@ public static class TrayIcon
     private static IntPtr BuildIcon(TrayDisplayMode mode, TrayIconState? state)
     {
         int size = IconSize();
-        return RenderPixels(mode, state, size) is { } pixels ? CreateIconFromPixels(pixels, size) : 0;
+        return RenderPixels(mode, state, size, AppState.Instance.ConfigSnapshot().ColorBatteryIcon) is { } pixels
+            ? CreateIconFromPixels(pixels, size)
+            : 0;
     }
 
     /// <summary>Compose straight-alpha ARGB pixels (0xAARRGGBB) of the tray
     /// icon at `size`x`size`. Drawn at 2x and downsampled for smooth edges.
     /// Also used by the `--tray-preview` probe (which renders fixed sizes for
-    /// the style/size matrix). Returns null on GDI failure.</summary>
-    internal static uint[]? RenderPixels(TrayDisplayMode mode, TrayIconState? state, int size)
+    /// the style/size matrix). `colorize` is Settings → Colored battery icon;
+    /// it gates the plain-discharge level palette, never the state colors.
+    /// Returns null on GDI failure.</summary>
+    internal static uint[]? RenderPixels(TrayDisplayMode mode, TrayIconState? state, int size, bool colorize)
     {
         if (size is < 8 or > 256)
         {
@@ -488,11 +496,13 @@ public static class TrayIcon
         if (mode == TrayDisplayMode.Number)
         {
             DrawDigits(mem, state, src);
-            // Number mode always colorizes: charging / saver / disconnected
-            // keep their shared state colors, plain discharge gets the
-            // green→red level palette (a numeric icon is a colored number).
+            // Digit color follows Settings → Colored battery icon: the shared
+            // state colors (charging / saver / offline) always show, but the
+            // plain-discharge green→red level gradient only when the option is
+            // on — with it off the number stays the default white like the
+            // glyph (a 2026-11-10 report: the tray ignored the toggle).
             var color = state is { } s
-                ? BatteryColors.LevelFillColor(s.Level, s.Connected, s.Saver, s.Charging, colorize: true)
+                ? BatteryColors.LevelFillColor(s.Level, s.Connected, s.Saver, s.Charging, colorize)
                 : new RgbColor(0x80, 0x80, 0x80);
             unsafe
             {
@@ -501,7 +511,7 @@ public static class TrayIcon
         }
         else
         {
-            DrawGlyph(mem, state, src);
+            DrawGlyph(mem, state, src, colorize);
             unsafe
             {
                 output = DownsampleGlyph((uint*)bits, src, size);
@@ -520,26 +530,31 @@ public static class TrayIcon
     /// <summary>`--tray-preview` self-check: the full HICON construction path
     /// (DIB → CreateIconIndirect), which the pixel sheet does not exercise.
     /// A successful build is owned by the caller (destroy it with DestroyIcon).</summary>
-    internal static bool TryBuildIcon(TrayDisplayMode mode, TrayIconState? state, int size, out IntPtr icon)
+    internal static bool TryBuildIcon(TrayDisplayMode mode, TrayIconState? state, int size, bool colorize, out IntPtr icon)
     {
-        icon = RenderPixels(mode, state, size) is { } pixels ? CreateIconFromPixels(pixels, size) : 0;
+        icon = RenderPixels(mode, state, size, colorize) is { } pixels ? CreateIconFromPixels(pixels, size) : 0;
         return icon != 0;
     }
 
     /// <summary>16x16 logical battery outline + level fill + charging bolt,
     /// scaled to the supersample buffer (the historical 16px geometry maps
     /// 1:1 at size 16 and scales with the DPI metric otherwise).</summary>
-    private static void DrawGlyph(IntPtr mem, TrayIconState? state, int src)
+    private static void DrawGlyph(IntPtr mem, TrayIconState? state, int src, bool colorize)
     {
         static int S(int v, int src) => v * src / 16;
         // A recorded-but-offline device cannot be charging: a stale charging
         // flag must not draw the bolt over the neutral fill.
         var (level, charging) = state is { } s ? (s.Level, s.Charging && s.Connected) : (0, false);
-        // A recorded-but-offline device (keep_recorded_devices fallback) keeps
-        // its level fill but in the neutral gray of the disconnected state, so
-        // the tray still says "already recorded", not "live reading".
+        // The level fill follows Settings → Colored battery icon (plain
+        // discharge = the Win11 green→red palette; off = the default white,
+        // matching the widget). State colors are not gated: charging stays the
+        // shared light green, saver amber, a recorded-but-offline device the
+        // neutral gray of the disconnected state, so the tray still says
+        // "already recorded", not "live reading".
         var fr = state is { } d
-            ? d.Connected ? BatteryColors.ColorFor(d.Level) : new RgbColor(0x80, 0x80, 0x80)
+            ? d.Connected
+                ? colorize ? BatteryColors.ColorFor(d.Level) : new RgbColor(0xFF, 0xFF, 0xFF)
+                : new RgbColor(0x80, 0x80, 0x80)
             : new RgbColor(0x80, 0x80, 0x80);
 
         var white = CreateSolidBrush(0x00FF_FFFF);

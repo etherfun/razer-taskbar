@@ -59,20 +59,23 @@ internal static class TrayPreview
         lines.Add("");
         foreach (var mode in new[] { TrayDisplayMode.Icon, TrayDisplayMode.Number })
         {
-            foreach (var size in new[] { 16, 32, 64 })
+            foreach (var colorize in new[] { false, true })
             {
-                var path = Path.Combine(
-                    dir, $"tray-preview-{mode.ToConfig()}-{size}px.png");
-                var sheet = ComposeSheet(mode, size);
-                if (sheet is null)
+                foreach (var size in new[] { 16, 32, 64 })
                 {
-                    lines.Add($"{Path.GetFileName(path)}: FAILED (GDI render returned null)");
-                    failures++;
-                    continue;
+                    var path = Path.Combine(
+                        dir, $"tray-preview-{mode.ToConfig()}-{(colorize ? "color" : "mono")}-{size}px.png");
+                    var sheet = ComposeSheet(mode, size, colorize);
+                    if (sheet is null)
+                    {
+                        lines.Add($"{Path.GetFileName(path)}: FAILED (GDI render returned null)");
+                        failures++;
+                        continue;
+                    }
+                    var (width, height, pixels) = sheet.Value;
+                    WritePng(path, width, height, pixels);
+                    lines.Add($"{Path.GetFileName(path)}  {width}x{height}");
                 }
-                var (width, height, pixels) = sheet.Value;
-                WritePng(path, width, height, pixels);
-                lines.Add($"{Path.GetFileName(path)}  {width}x{height}");
             }
         }
         var manifest = Path.Combine(dir, "tray-preview.txt");
@@ -83,15 +86,18 @@ internal static class TrayPreview
         int iconOk = 0;
         foreach (var mode in new[] { TrayDisplayMode.Icon, TrayDisplayMode.Number })
         {
-            foreach (var size in new[] { 16, 32, 64 })
+            foreach (var colorize in new[] { false, true })
             {
-                foreach (var (_, state) in States)
+                foreach (var size in new[] { 16, 32, 64 })
                 {
-                    iconChecks++;
-                    if (TrayIcon.TryBuildIcon(mode, state, size, out var icon))
+                    foreach (var (_, state) in States)
                     {
-                        iconOk++;
-                        Interop.User32.DestroyIcon(icon);
+                        iconChecks++;
+                        if (TrayIcon.TryBuildIcon(mode, state, size, colorize, out var icon))
+                        {
+                            iconOk++;
+                            Interop.User32.DestroyIcon(icon);
+                        }
                     }
                 }
             }
@@ -115,8 +121,11 @@ internal static class TrayPreview
     }
 
     /// <summary>One sheet: every state in a column, dark strip above the light
-    /// strip. Null when the GDI render failed for any cell.</summary>
-    private static (int Width, int Height, uint[] Pixels)? ComposeSheet(TrayDisplayMode mode, int size)
+    /// strip. `colorize` is Settings → Colored battery icon (plain-discharge
+    /// level palette on/off; state colors always on). Null when the GDI render
+    /// failed for any cell.</summary>
+    private static (int Width, int Height, uint[] Pixels)? ComposeSheet(
+        TrayDisplayMode mode, int size, bool colorize)
     {
         int cell = size * Upscale;
         int columns = States.Length;
@@ -129,7 +138,7 @@ internal static class TrayPreview
 
         for (int i = 0; i < columns; i++)
         {
-            var pixels = TrayIcon.RenderPixels(mode, States[i].State, size);
+            var pixels = TrayIcon.RenderPixels(mode, States[i].State, size, colorize);
             if (pixels is null)
             {
                 return null;
